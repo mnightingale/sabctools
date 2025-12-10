@@ -31,6 +31,9 @@ jobs:
         name: Install Python
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install OpenSSL
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
       - name: Build module and run pytest
         run: |
           python -m pip install --upgrade pip

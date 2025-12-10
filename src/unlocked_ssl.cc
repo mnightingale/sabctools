@@ -24,12 +24,17 @@
  */
 
 #include "unlocked_ssl.h"
+#include <openssl/err.h>
 
+static long openssl_version_number = 0;
 static int (*SSL_read_ex)(void*, void*, size_t, size_t*) = NULL;
 static int (*SSL_get_error)(void*, int) = NULL;
 static int (*SSL_get_shutdown)(void*) = NULL;
-static PyObject *SSLWantReadError = NULL;
+static int (*UnlockedSSL_ERR_peek_last_error)() = NULL;
+static int (*UnlockedSSL_ERR_clear_error)() = NULL;
+static char* (*UnlockedSSL_ERR_reason_error_string)(unsigned long e) = NULL;
 static PyObject *SSLSocketType = NULL;
+static _sslmodulestate *ssl_module_state = NULL;
 
 typedef struct {
     int ssl; /* last seen error from SSL */
@@ -49,6 +54,17 @@ typedef struct {
     PyObject *owner; /* Python level "owner" passed to servername callback */
     PyObject *server_hostname;
     _PySSLError err; /* last seen error from various sources */
+    /* Some SSL callbacks don't have error reporting. Callback wrappers
+     * store exception information on the socket. The handshake, read, write,
+     * and shutdown methods check for chained exceptions.
+     */
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 12
+    PyObject *exc;
+#else
+    PyObject *exc_type;
+    PyObject *exc_value;
+    PyObject *exc_tb;
+#endif
 } PySSLSocket;
 
 static inline _PySSLError _PySSL_errno(int failed, void *ssl, int retcode)
@@ -63,6 +79,22 @@ static inline _PySSLError _PySSL_errno(int failed, void *ssl, int retcode)
     }
     return err;
 }
+
+enum py_ssl_error {
+    /* these mirror ssl.h */
+    PY_SSL_ERROR_NONE,
+    PY_SSL_ERROR_SSL,
+    PY_SSL_ERROR_WANT_READ,
+    PY_SSL_ERROR_WANT_WRITE,
+    PY_SSL_ERROR_WANT_X509_LOOKUP,
+    PY_SSL_ERROR_SYSCALL,     /* look at error stack/return value/errno */
+    PY_SSL_ERROR_ZERO_RETURN,
+    PY_SSL_ERROR_WANT_CONNECT,
+    /* start of non ssl.h errorcodes */
+    PY_SSL_ERROR_EOF,         /* special case of SSL_ERROR_SYSCALL */
+    PY_SSL_ERROR_NO_SOCKET,   /* socket has been GC'd */
+    PY_SSL_ERROR_INVALID_ERROR_CODE
+};
 
 typedef enum {
     SOCKET_IS_NONBLOCKING,
@@ -82,10 +114,12 @@ void openssl_init() {
     // TODO: consider adding an extra version check to avoid possible future changes to SSL_read_ex
 
     PyObject *ssl_module = NULL;
+    PyObject *py_openssl_version_number = NULL;
     PyObject *_ssl_module = NULL;
     PyObject *_ssl_module_path = NULL;
     #if defined(_WIN32) || defined(__CYGWIN__)
     HMODULE openssl_handle = NULL;
+    HMODULE crypto_handle = NULL;
     #else
     void* openssl_handle = NULL;
     #endif
@@ -93,27 +127,61 @@ void openssl_init() {
     ssl_module = PyImport_ImportModule("ssl");
     if(!ssl_module) goto cleanup;
 
+    py_openssl_version_number = PyObject_GetAttrString(ssl_module, "OPENSSL_VERSION_NUMBER");
+    if(!py_openssl_version_number) goto cleanup;
+    openssl_version_number = PyLong_AsLong(py_openssl_version_number);
+
     _ssl_module = PyImport_ImportModule("_ssl");
     if(!_ssl_module) goto cleanup;
 
     SSLSocketType = PyObject_GetAttrString(ssl_module, "SSLSocket");
     if(!SSLSocketType) goto cleanup;
 
-    SSLWantReadError = PyObject_GetAttrString(_ssl_module, "SSLWantReadError");
-    if(!SSLWantReadError) goto cleanup;
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
+    if (sizeof(_sslmodulestate) != PyModule_GetDef(_ssl_module)->m_size) goto cleanup;
+    ssl_module_state = static_cast<_sslmodulestate *>(PyModule_GetState(_ssl_module));
+    if(!ssl_module_state) goto cleanup;
+#else
+    ssl_module_state = new _sslmodulestate;
+
+    ssl_module_state->PySSLErrorObject = PyObject_GetAttrString(ssl_module, "SSLError");
+    if(!ssl_module_state->PySSLErrorObject) goto cleanup;
+
+    ssl_module_state->PySSLCertVerificationErrorObject = PyObject_GetAttrString(ssl_module, "SSLCertVerificationError");
+    if(!ssl_module_state->PySSLCertVerificationErrorObject) goto cleanup;
+
+    ssl_module_state->PySSLZeroReturnErrorObject = PyObject_GetAttrString(ssl_module, "SSLZeroReturnError");
+    if(!ssl_module_state->PySSLZeroReturnErrorObject) goto cleanup;
+
+    ssl_module_state->PySSLWantReadErrorObject = PyObject_GetAttrString(ssl_module, "SSLWantReadError");
+    if(!ssl_module_state->PySSLWantReadErrorObject) goto cleanup;
+
+    ssl_module_state->PySSLWantWriteErrorObject = PyObject_GetAttrString(ssl_module, "SSLWantWriteError");
+    if(!ssl_module_state->PySSLWantWriteErrorObject) goto cleanup;
+
+    ssl_module_state->PySSLSyscallErrorObject = PyObject_GetAttrString(ssl_module, "SSLSyscallError");
+    if(!ssl_module_state->PySSLSyscallErrorObject) goto cleanup;
+
+    ssl_module_state->PySSLEOFErrorObject = PyObject_GetAttrString(ssl_module, "SSLEOFError");
+    if(!ssl_module_state->PySSLEOFErrorObject) goto cleanup;
+#endif
 
 #if defined(_WIN32) || defined(__CYGWIN__)
 #ifdef _M_ARM64
     openssl_handle = GetModuleHandle(TEXT("libssl-3-arm64.dll"));
+    crypto_handle =  GetModuleHandle(TEXT("libcrypto-3-arm64.dll"));
 #else
-    openssl_handle = GetModuleHandle(TEXT("libssl-3.dll"));
-    if(!openssl_handle) openssl_handle = GetModuleHandle(TEXT("libssl-1_1.dll"));
+    openssl_handle = GetModuleHandle(TEXT(openssl_version_number >= 0x30000000L ? "libssl-3.dll" : "libssl-1_1.dll"));
+    crypto_handle =  GetModuleHandle(TEXT(openssl_version_number >= 0x30000000L ? "libcrypto-3.dll" : "libcrypto-1_1.dll"));
 #endif
-    if(!openssl_handle) goto cleanup;
+    if(!openssl_handle || !crypto_handle) goto cleanup;
 
     *(void**)&SSL_read_ex = GetProcAddress(openssl_handle, "SSL_read_ex");
     *(void**)&SSL_get_error = GetProcAddress(openssl_handle, "SSL_get_error");
     *(void**)&SSL_get_shutdown = GetProcAddress(openssl_handle, "SSL_get_shutdown");
+    *(void**)&UnlockedSSL_ERR_peek_last_error = GetProcAddress(crypto_handle, "ERR_peek_last_error");
+    *(void**)&UnlockedSSL_ERR_clear_error = GetProcAddress(crypto_handle, "ERR_clear_error");
+    *(void**)&UnlockedSSL_ERR_reason_error_string = GetProcAddress(crypto_handle, "ERR_reason_error_string");
 #else
     // Find library at "import ssl; print(ssl._ssl.__file__)"
 
@@ -128,6 +196,9 @@ void openssl_init() {
     *(void**)&SSL_read_ex = dlsym(openssl_handle, "SSL_read_ex");
     *(void**)&SSL_get_error = dlsym(openssl_handle, "SSL_get_error");
     *(void**)&SSL_get_shutdown = dlsym(openssl_handle, "SSL_get_shutdown");
+    *(void**)&UnlockedSSL_ERR_peek_last_error = dlsym(openssl_handle, "ERR_peek_last_error");
+    *(void**)&UnlockedSSL_ERR_clear_error = dlsym(openssl_handle, "ERR_clear_error");
+    *(void**)&UnlockedSSL_ERR_reason_error_string = dlsym(openssl_handle, "ERR_reason_error_string");
 
 error:
     if (!openssl_linked() && openssl_handle) dlclose(openssl_handle);
@@ -137,18 +208,247 @@ error:
 cleanup:
     Py_XDECREF(ssl_module);
     Py_XDECREF(_ssl_module);
-    if (!openssl_linked()) {
-        Py_XDECREF(SSLWantReadError);
-        Py_XDECREF(SSLSocketType);
+    Py_XDECREF(py_openssl_version_number);
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION < 10
+    if (!openssl_linked() && ssl_module_state) {
+        Py_XDECREF(ssl_module_state->PySSLErrorObject);
+        Py_XDECREF(ssl_module_state->PySSLZeroReturnErrorObject);
+        Py_XDECREF(ssl_module_state->PySSLWantReadErrorObject);
+        Py_XDECREF(ssl_module_state->PySSLWantWriteErrorObject);
+        Py_XDECREF(ssl_module_state->PySSLEOFErrorObject);
+        Py_XDECREF(ssl_module_state->PySSLCertVerificationErrorObject);
+        Py_XDECREF(ssl_module_state->PySSLSocket_Type);
     }
+#endif
 }
 
 bool openssl_linked() {
     return SSL_read_ex &&
         SSL_get_error &&
         SSL_get_shutdown &&
-        SSLWantReadError &&
-        SSLSocketType;
+        UnlockedSSL_ERR_peek_last_error &&
+        UnlockedSSL_ERR_clear_error &&
+        UnlockedSSL_ERR_reason_error_string &&
+        ssl_module_state;
+}
+
+static void
+fill_and_set_sslerror(
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
+    _sslmodulestate *state,
+#endif
+                      PySSLSocket *sslsock, PyObject *type, int ssl_errno,
+                      const char *errstr, int lineno, unsigned long errcode) {
+    PyObject *err_value = NULL, *reason_obj = NULL, *lib_obj = NULL;
+    PyObject *verify_obj = NULL, *verify_code_obj = NULL;
+    PyObject *init_value, *msg, *key;
+
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
+    if (errcode != 0) {
+        int lib, reason;
+
+        lib = ERR_GET_LIB(errcode);
+        reason = ERR_GET_REASON(errcode);
+        key = Py_BuildValue("ii", lib, reason);
+        if (key == NULL)
+            goto fail;
+        reason_obj = PyDict_GetItemWithError(state->err_codes_to_names, key);
+        Py_DECREF(key);
+        if (reason_obj == NULL && PyErr_Occurred()) {
+            goto fail;
+        }
+        key = PyLong_FromLong(lib);
+        if (key == NULL)
+            goto fail;
+        lib_obj = PyDict_GetItemWithError(state->lib_codes_to_names, key);
+        Py_DECREF(key);
+        if (lib_obj == NULL && PyErr_Occurred()) {
+            goto fail;
+        }
+        if (errstr == NULL) {
+            errstr = UnlockedSSL_ERR_reason_error_string(errcode);
+        }
+    }
+#endif
+    if (errstr == NULL)
+        errstr = "unknown error";
+
+    msg = PyUnicode_FromFormat("%s (unlocked_ssl.c:%d)", errstr, lineno);
+
+    init_value = Py_BuildValue("iN", ERR_GET_REASON(ssl_errno), msg);
+    if (init_value == NULL)
+        goto fail;
+
+    err_value = PyObject_CallObject(type, init_value);
+    Py_DECREF(init_value);
+    if (err_value == NULL)
+        goto fail;
+
+    if (reason_obj == NULL)
+        reason_obj = Py_None;
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 12
+    if (PyObject_SetAttr(err_value, state->str_reason, reason_obj))
+        goto fail;
+
+    if (lib_obj == NULL)
+        lib_obj = Py_None;
+    if (PyObject_SetAttr(err_value, state->str_library, lib_obj))
+        goto fail;
+
+    if ((sslsock != NULL) && (type == state->PySSLCertVerificationErrorObject)) {
+        /* Only set verify code / message for SSLCertVerificationError */
+        if (PyObject_SetAttr(err_value, state->str_verify_code,
+                                verify_code_obj))
+            goto fail;
+        if (PyObject_SetAttr(err_value, state->str_verify_message, verify_obj))
+            goto fail;
+    }
+#endif
+
+    PyErr_SetObject(type, err_value);
+    fail:
+        Py_XDECREF(err_value);
+        Py_XDECREF(verify_code_obj);
+        Py_XDECREF(verify_obj);
+}
+
+static int
+PySSL_ChainExceptions(PySSLSocket *sslsock) {
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 12
+    if (sslsock->exc == NULL)
+        return 0;
+
+    _PyErr_ChainExceptions1(sslsock->exc);
+    sslsock->exc = NULL;
+#else
+    if (sslsock->exc_type == NULL)
+        return 0;
+
+    _PyErr_ChainExceptions(sslsock->exc_type, sslsock->exc_value, sslsock->exc_tb);
+    sslsock->exc_type = NULL;
+    sslsock->exc_value = NULL;
+    sslsock->exc_tb = NULL;
+#endif
+    return -1;
+}
+
+static PyObject *
+UnlockedSSL_SetError(PySSLSocket *sslsock, const char *filename, int lineno)
+{
+    PyObject *type;
+    const char *errstr = NULL;
+    _PySSLError err;
+    enum py_ssl_error p = PY_SSL_ERROR_NONE;
+    unsigned long e = 0;
+
+    assert(sslsock != NULL);
+
+    type = ssl_module_state->PySSLErrorObject;
+
+    // ERR functions are thread local, no need to lock them.
+    e = UnlockedSSL_ERR_peek_last_error();
+
+    if (sslsock->ssl != NULL) {
+        err = sslsock->err;
+
+        switch (err.ssl) {
+        case SSL_ERROR_ZERO_RETURN:
+            errstr = "TLS/SSL connection has been closed (EOF)";
+            type = ssl_module_state->PySSLZeroReturnErrorObject;
+            p = PY_SSL_ERROR_ZERO_RETURN;
+            break;
+        case SSL_ERROR_WANT_READ:
+            errstr = "The operation did not complete (read)";
+            type = ssl_module_state->PySSLWantReadErrorObject;
+            p = PY_SSL_ERROR_WANT_READ;
+            break;
+        case SSL_ERROR_WANT_WRITE:
+            p = PY_SSL_ERROR_WANT_WRITE;
+            type = ssl_module_state->PySSLWantWriteErrorObject;
+            errstr = "The operation did not complete (write)";
+            break;
+        case SSL_ERROR_WANT_X509_LOOKUP:
+            p = PY_SSL_ERROR_WANT_X509_LOOKUP;
+            errstr = "The operation did not complete (X509 lookup)";
+            break;
+        case SSL_ERROR_WANT_CONNECT:
+            p = PY_SSL_ERROR_WANT_CONNECT;
+            errstr = "The operation did not complete (connect)";
+            break;
+        case SSL_ERROR_SYSCALL:
+        {
+            if (e == 0) {
+                /* underlying BIO reported an I/O error */
+                UnlockedSSL_ERR_clear_error();
+#ifdef MS_WINDOWS
+                if (err.ws) {
+                    return PyErr_SetFromWindowsErr(err.ws);
+                }
+#endif
+                if (err.c) {
+                    errno = err.c;
+                    return PyErr_SetFromErrno(PyExc_OSError);
+                }
+                else {
+                    p = PY_SSL_ERROR_EOF;
+                    type = ssl_module_state->PySSLEOFErrorObject;
+                    errstr = "EOF occurred in violation of protocol";
+                }
+            } else {
+                if (ERR_GET_LIB(e) == ERR_LIB_SSL &&
+                        ERR_GET_REASON(e) == SSL_R_CERTIFICATE_VERIFY_FAILED) {
+                    type = ssl_module_state->PySSLSyscallErrorObject;
+                }
+                if (ERR_GET_LIB(e) == ERR_LIB_SYS) {
+                    // A system error is being reported; reason is set to errno
+                    errno = ERR_GET_REASON(e);
+                    return PyErr_SetFromErrno(PyExc_OSError);
+                }
+                p = PY_SSL_ERROR_SYSCALL;
+            }
+            break;
+        }
+        case SSL_ERROR_SSL:
+        {
+            p = PY_SSL_ERROR_SSL;
+            if (e == 0) {
+                /* possible? */
+                errstr = "A failure in the SSL library occurred";
+            }
+            if (ERR_GET_LIB(e) == ERR_LIB_SSL &&
+                    ERR_GET_REASON(e) == SSL_R_CERTIFICATE_VERIFY_FAILED) {
+                type = ssl_module_state->PySSLCertVerificationErrorObject;
+            }
+            if (openssl_version_number >= 0x30000000L) {
+                /* OpenSSL 3.0 changed transport EOF from SSL_ERROR_SYSCALL with
+                 * zero return value to SSL_ERROR_SSL with a special error code. */
+                if (ERR_GET_LIB(e) == ERR_LIB_SSL &&
+                        ERR_GET_REASON(e) == SSL_R_UNEXPECTED_EOF_WHILE_READING) {
+                    p = PY_SSL_ERROR_EOF;
+                    type = ssl_module_state->PySSLEOFErrorObject;
+                    errstr = "EOF occurred in violation of protocol";
+                }
+            }
+            if (ERR_GET_LIB(e) == ERR_LIB_SYS) {
+                // A system error is being reported; reason is set to errno
+                errno = ERR_GET_REASON(e);
+                return PyErr_SetFromErrno(PyExc_OSError);
+            }
+            break;
+        }
+        default:
+            p = PY_SSL_ERROR_INVALID_ERROR_CODE;
+            errstr = "Invalid error code";
+        }
+    }
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
+    fill_and_set_sslerror(ssl_module_state, sslsock, type, p, errstr, lineno, e);
+#else
+    fill_and_set_sslerror(sslsock, type, p, errstr, lineno, e);
+#endif
+    UnlockedSSL_ERR_clear_error();
+    PySSL_ChainExceptions(sslsock);
+    return NULL;
 }
 
 static PyObject* unlocked_ssl_recv_into_impl(PySSLSocket *self, Py_ssize_t len, Py_buffer *buffer) {
@@ -222,22 +522,24 @@ static PyObject* unlocked_ssl_recv_into_impl(PySSLSocket *self, Py_ssize_t len, 
     } while (err.ssl == SSL_ERROR_WANT_READ ||
              err.ssl == SSL_ERROR_WANT_WRITE);
 
-    if (count == 0) {
-        if (err.ssl == SSL_ERROR_WANT_READ) {
-            PyErr_SetString(SSLWantReadError, "Need more data");
-        } else {
-            // Raise general error, as all errors that are left indicate fatal errors
-            // The calling code will have to establish a new connection
-            PyErr_SetString(PyExc_ConnectionAbortedError, "Failed to read data");
-        }
+    if (count == 0 && retval == 0) {
+        UnlockedSSL_SetError(self, __FILE__, __LINE__);
         goto error;
     }
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 12
+    if (self->exc != NULL)
+        goto error;
+#else
+    if (self->exc_type != NULL)
+        goto error;
+#endif
 
 done:
     Py_XDECREF(sock);
     return PyLong_FromSize_t(count);
 
 error:
+    PySSL_ChainExceptions(self);
     Py_XDECREF(sock);
     return NULL;
 }

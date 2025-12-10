@@ -32,6 +32,15 @@ from setuptools.command.build_ext import build_ext
 from distutils import log
 
 
+if sys.platform == "darwin":
+    openssl_include = "/opt/homebrew/opt/openssl/include"
+
+elif sys.platform.startswith("linux"):
+    openssl_include = "/usr/include"
+
+elif sys.platform == "win32":
+    openssl_include = r"C:\Program Files\OpenSSL\include"
+
 def autoconf_check(
     compiler: Type[CCompiler], include_check: str = None, define_check: str = None, flag_check: str = None
 ):
@@ -322,6 +331,7 @@ class SABCToolsBuild(build_ext):
                 ],
                 "gcc_flags": ["-Wno-unused-parameter", "-Wno-missing-field-initializers"],
                 "msvc_libraries": ["ws2_32"],
+                "include_dirs": [openssl_include]
             },
             {
                 "sources": [

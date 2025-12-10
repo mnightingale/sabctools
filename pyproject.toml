@@ -49,6 +49,14 @@ test-skip = "*"
 [tool.cibuildwheel.linux]
 archs = ["native"]
 
+[[tool.cibuildwheel.overrides]]
+select = "*manylinux*"
+before-all = "dnf -y install openssl-devel"
+
+[[tool.cibuildwheel.overrides]]
+select = "*musllinux*"
+before-all = "apk add openssl-dev"
+
 [tool.cibuildwheel.macos]
 archs = ["universal2"]
 
