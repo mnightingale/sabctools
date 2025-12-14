@@ -41,20 +41,40 @@ jobs:
           python -c "import sabctools; print('OpenSSL linked:', sabctools.openssl_linked);"
           pytest
 
+  generate-wheels-matrix:
+    name: Generate wheels matrix
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.set-matrix.outputs.include }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install cibuildwheel
+        run: pipx install cibuildwheel==3.3.0
+      - id: set-matrix
+        run: |
+          MATRIX=$(
+            {
+              cibuildwheel --print-build-identifiers --platform linux \
+              | jq -nRc '{"only": inputs, "os": "ubuntu-latest"}' \
+              && cibuildwheel --print-build-identifiers --platform macos \
+              | jq -nRc '{"only": inputs, "os": "macos-latest"}' \
+              && cibuildwheel --print-build-identifiers --platform windows \
+              | jq -nRc '{"only": inputs, "os": "windows-latest"}'
+            } | jq -sc
+          )
+          echo "include=$MATRIX" >> $GITHUB_OUTPUT
+    env:
+      CIBW_ARCHS_LINUX: native
+      CIBW_ARCHS_MACOS: universal2
+      CIBW_ARCHS_WINDOWS: AMD64 ARM64
+
   build_wheels:
-    name: Build wheels on ${{ matrix.os }} ${{ matrix.linux_arch }}
-    needs: ci
+    name: Build ${{ matrix.only }}
+    needs: [ci, generate-wheels-matrix]
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-          - os: macos-latest
-          - os: ubuntu-latest
-            linux_arch: x86_64
-          - os: ubuntu-24.04-arm
-            linux_arch: aarch64
+        include: ${{ fromJson(needs.generate-wheels-matrix.outputs.include) }}
 
     steps:
       - uses: actions/checkout@v6
@@ -64,6 +84,8 @@ jobs:
           python-version: "3.13"
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.3.0
+        with:
+          only: ${{ matrix.only }}
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v5
         with:
