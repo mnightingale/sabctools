@@ -56,6 +56,8 @@ jobs:
             {
               cibuildwheel --print-build-identifiers --platform linux \
               | jq -nRc '{"only": inputs, "os": "ubuntu-latest"}' \
+              cibuildwheel --print-build-identifiers --platform linux \
+              | jq -nRc '{"only": inputs, "os": "ubuntu-24.04-arm"}' \
               && cibuildwheel --print-build-identifiers --platform macos \
               | jq -nRc '{"only": inputs, "os": "macos-latest"}' \
               && cibuildwheel --print-build-identifiers --platform windows \
@@ -90,7 +92,7 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           path: ./wheelhouse/*.whl
-          name: Wheels ${{ matrix.os }} ${{ matrix.linux_arch }}
+          name: Wheels ${{ matrix.only }}
       # The action/upload-artifact only allows unique filenames for whole run
       # Need to build it on every arch otherwise twine fails
       - name: Build source distribution
