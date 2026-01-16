@@ -37,59 +37,6 @@
 extern "C" {
 #endif
 
-/*
- * ssl module state
- */
-typedef struct {
-    /* Types */
-    PyTypeObject *PySSLContext_Type;
-    PyTypeObject *PySSLSocket_Type;
-    PyTypeObject *PySSLMemoryBIO_Type;
-    PyTypeObject *PySSLSession_Type;
-    PyTypeObject *PySSLCertificate_Type;
-    /* SSL error object */
-    PyObject *PySSLErrorObject;
-    PyObject *PySSLCertVerificationErrorObject;
-    PyObject *PySSLZeroReturnErrorObject;
-    PyObject *PySSLWantReadErrorObject;
-    PyObject *PySSLWantWriteErrorObject;
-    PyObject *PySSLSyscallErrorObject;
-    PyObject *PySSLEOFErrorObject;
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 12
-    /* Error mappings */
-    PyObject *err_codes_to_names;
-    PyObject *lib_codes_to_names;
-    /* socket type from module CAPI */
-    PyTypeObject *Sock_Type;
-    /* Interned strings */
-    PyObject *str_library;
-    PyObject *str_reason;
-    PyObject *str_verify_code;
-    PyObject *str_verify_message;
-    /* keylog lock */
-    PyThread_type_lock keylog_lock;
-#elif  PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 11
-    /* Error mappings */
-    PyObject *err_codes_to_names;
-    PyObject *err_names_to_codes;
-    PyObject *lib_codes_to_names;
-    /* socket type from module CAPI */
-    PyTypeObject *Sock_Type;
-    /* Interned strings */
-    PyObject *str_library;
-    PyObject *str_reason;
-    PyObject *str_verify_code;
-    PyObject *str_verify_message;
-#elif  PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
-    /* Error mappings */
-    PyObject *err_codes_to_names;
-    PyObject *err_names_to_codes;
-    PyObject *lib_codes_to_names;
-    /* socket type from module CAPI */
-    PyTypeObject *Sock_Type;
-#endif
-} _sslmodulestate;
-
 /* Have to manually define this OpenSSL constant and hope it never changes */
 # define SSL_ERROR_SSL 1
 # define SSL_RECEIVED_SHUTDOWN 2
