@@ -64,7 +64,7 @@ typedef struct {
      * store exception information on the socket. The handshake, read, write,
      * and shutdown methods check for chained exceptions.
      */
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 12
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 12 && PY_MINOR_VERSION <= 14
     PyObject *exc;
 #else
     PyObject *exc_type;
