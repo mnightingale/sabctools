@@ -19,6 +19,20 @@ def test_sparse():
         os.unlink(file.name)
 
 
+def test_sparse_shrink():
+    file = tempfile.NamedTemporaryFile(delete=False)
+    try:
+        sabctools.sparse(file, 100)
+        assert os.path.getsize(file.name) == 100
+        assert is_sparse(file) is True
+        sabctools.sparse(file, 50)
+        assert os.path.getsize(file.name) == 50
+        assert is_sparse(file) is True
+    finally:
+        file.close()
+        os.unlink(file.name)
+
+
 def test_sparse_fd():
     file = tempfile.NamedTemporaryFile(delete=False)
     try:
