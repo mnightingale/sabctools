@@ -365,18 +365,18 @@ PyObject* unlocked_ssl_recv_into(PyObject *self, PyObject *const *args, Py_ssize
     }
     Py_ssize_t len = buffer.len;
 
-    if (nargs == 3) {
-        len = PyLong_AsSsize_t(args[2]);
-        if (len == -1 && PyErr_Occurred())
+    if (nargs == 3 && !Py_IsNone(args[2])) {
+        const Py_ssize_t requested = PyLong_AsSsize_t(args[2]);
+        if (requested == -1 && PyErr_Occurred())
             goto error;
 
-        if (len < 0) {
+        if (requested < 0) {
             PyErr_SetString(PyExc_ValueError, "length must be non-negative");
             goto error;
         }
 
-        if (len == 0 || len > buffer.len)
-            len = buffer.len;
+        if (requested > 0 && requested < buffer.len)
+            len = requested;
     }
 
     // Basic sanity check
