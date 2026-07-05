@@ -47,7 +47,7 @@ extern "C" {
 
 void openssl_init();
 bool openssl_linked();
-PyObject *unlocked_ssl_recv_into(PyObject *, PyObject*);
+PyObject *unlocked_ssl_recv_into(PyObject *, PyObject *const *, Py_ssize_t);
 
 #ifdef __cplusplus
 }

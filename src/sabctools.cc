@@ -36,8 +36,8 @@ static PyMethodDef sabctools_methods[] = {
     },
     {
         "unlocked_ssl_recv_into",
-        unlocked_ssl_recv_into,
-        METH_VARARGS,
+        (PyCFunction)(void (*)(void))unlocked_ssl_recv_into,
+        METH_FASTCALL,
         "unlocked_ssl_recv_into(ssl_socket, buffer)"
     },
     {

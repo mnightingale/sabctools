@@ -31,6 +31,7 @@ static int (*SSL_get_shutdown)(void*) = NULL;
 static PyObject *SSLWantReadError = NULL;
 static PyObject *SSLWantWriteError = NULL;
 static PyTypeObject *SSLSocketType = NULL;
+static PyObject *str_getblocking = NULL;
 
 typedef struct {
     int ssl; /* last seen error from SSL */
@@ -161,6 +162,10 @@ void openssl_init() {
     #else
     void* openssl_handle = NULL;
     #endif
+
+    str_getblocking = PyUnicode_InternFromString("getblocking");
+    if (!str_getblocking)
+        return;
 
     ssl_module = PyImport_ImportModule("ssl");
     if(!ssl_module) goto cleanup;
@@ -328,11 +333,10 @@ error:
     return NULL;
 }
 
-PyObject* unlocked_ssl_recv_into(PyObject* self, PyObject* args) {
-    PyObject *ssl_socket;
-    PyObject *Py_ssl_socket;
-    Py_ssize_t len;
-    Py_buffer Py_buffer;
+PyObject* unlocked_ssl_recv_into(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+    PyObject *ssl_socket = NULL;
+    PyObject *py_ssl_socket = NULL;
+    Py_buffer buffer;
     PyObject *retval = NULL;
     PyObject *blocking = NULL;
     int is_blocking;
@@ -342,23 +346,52 @@ PyObject* unlocked_ssl_recv_into(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    // Parse input
-    if (!PyArg_ParseTuple(args, "O!w*:unlocked_ssl_recv_into", SSLSocketType, &ssl_socket, &Py_buffer)) {
+    // Check argument count
+    if (nargs < 2 || nargs > 3) {
+        PyErr_Format(PyExc_TypeError, "unlocked_ssl_recv_into() takes 2 or 3 arguments (%zd given)", nargs);
         return NULL;
     }
 
-    if (!PyObject_TypeCheck(ssl_socket, SSLSocketType)) {
+    if (!PyObject_TypeCheck(args[0], SSLSocketType)) {
         PyErr_Format(PyExc_TypeError, "argument 1 must be %s", SSLSocketType->tp_name);
         return NULL;
     }
+    ssl_socket = args[0];
 
-    Py_ssl_socket = PyObject_GetAttrString(ssl_socket, "_sslobj");
-    if (!Py_ssl_socket) {
+    // Get writable buffer from second argument
+    if (PyObject_GetBuffer(args[1], &buffer, PyBUF_WRITABLE) < 0) {
+        PyErr_SetString(PyExc_TypeError, "argument 2 must be read-write bytes-like object");
+        return NULL;
+    }
+    Py_ssize_t len = buffer.len;
+
+    if (nargs == 3) {
+        len = PyLong_AsSsize_t(args[2]);
+        if (len == -1 && PyErr_Occurred())
+            goto error;
+
+        if (len < 0) {
+            PyErr_SetString(PyExc_ValueError, "length must be non-negative");
+            goto error;
+        }
+
+        if (len > buffer.len)
+            len = buffer.len;
+    }
+
+    // Basic sanity check
+    if (len == 0) {
+        PyErr_SetString(PyExc_ValueError, "No space left in buffer");
+        goto error;
+    }
+
+    py_ssl_socket = PyObject_GetAttrString(ssl_socket, "_sslobj");
+    if (!py_ssl_socket) {
         PyErr_SetString(PyExc_ValueError, "Could not find _sslobj attribute");
         goto error;
     }
 
-    blocking = PyObject_CallMethod(ssl_socket, "getblocking", NULL);
+    blocking = PyObject_CallMethodNoArgs(ssl_socket, str_getblocking);
     if (!blocking)
         goto error; // call failed
     is_blocking = PyObject_IsTrue(blocking);
@@ -369,18 +402,11 @@ PyObject* unlocked_ssl_recv_into(PyObject* self, PyObject* args) {
         goto error;
     }
 
-    // Basic sanity check
-    len = (Py_ssize_t)Py_buffer.len;
-    if (len <= 0) {
-        PyErr_SetString(PyExc_ValueError, "No space left in buffer");
-        goto error;
-    }
-
-    retval = unlocked_ssl_recv_into_impl((PySSLSocket*)Py_ssl_socket, len, &Py_buffer);
+    retval = unlocked_ssl_recv_into_impl(reinterpret_cast<PySSLSocket *>(py_ssl_socket), len, &buffer);
 
 error:
-    PyBuffer_Release(&Py_buffer);
-    Py_XDECREF(Py_ssl_socket);
+    PyBuffer_Release(&buffer);
+    Py_XDECREF(py_ssl_socket);
     Py_XDECREF(blocking);
     return retval;
 }

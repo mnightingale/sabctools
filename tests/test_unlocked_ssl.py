@@ -286,9 +286,10 @@ def test_unlocked_ssl_recv_into_response(client, buffer):
 
 
 def test_unlocked_ssl_recv_into_bulk_response(client):
-    # 131072 bytes divide up into 8 TLS records (16 KB each)
-    # In nonblocking mode, we should be able to read all eight in a single
-    # drop of the GIL.
+    """131072 bytes divide up into 8 TLS records (16 KB each)
+    In nonblocking mode, we should be able to read all eight in a single
+    drop of the GIL.
+    """
     size = 131072
     buffer = bytearray(size)
 
@@ -311,7 +312,28 @@ def test_unlocked_ssl_recv_into_bulk_response(client):
     pytest.fail("All TLS reads were smaller than 16KB")
 
 
-#
+def test_unlocked_ssl_length_limit(client):
+    """Test the length argument is respected.
+    All reads should be equal or smaller than the requested length
+    """
+    size = 131072
+    buffer = bytearray(size)
+
+    client.sendall(b"\xff" * size)
+
+    select.select([client], [], [])
+
+    while size > 0:
+        try:
+            count = sabctools.unlocked_ssl_recv_into(client, buffer, 4096)
+            size -= count
+            assert count <= 4096
+        except ssl.SSLWantReadError:
+            select.select([client], [], [])
+            # Give the sender some more time to complete sending.
+            time.sleep(0.1)
+
+
 def test_unlocked_ssl_recv_into_blocking_socket_fails(client, buffer):
     with pytest.raises(ValueError, match="Only non-blocking sockets are supported"):
         client.setblocking(True)
