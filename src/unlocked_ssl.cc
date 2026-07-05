@@ -375,7 +375,7 @@ PyObject* unlocked_ssl_recv_into(PyObject *self, PyObject *const *args, Py_ssize
             goto error;
         }
 
-        if (len > buffer.len)
+        if (len == 0 || len > buffer.len)
             len = buffer.len;
     }
 
