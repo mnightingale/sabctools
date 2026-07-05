@@ -312,12 +312,19 @@ def test_unlocked_ssl_recv_into_bulk_response(client):
     pytest.fail("All TLS reads were smaller than 16KB")
 
 
-def test_unlocked_ssl_length_limit(client):
+@pytest.mark.parametrize(
+    "length",
+    [0, None, 4096, 10240],
+)
+def test_unlocked_ssl_length(client, length):
     """Test the length argument is respected.
-    All reads should be equal or smaller than the requested length
+    0 and None should use len(buffer)
+    Smaller than buffer is respected
+    Larger than buffer is capped at len(buffer)
     """
     size = 131072
-    buffer = bytearray(size)
+    buffer = bytearray(8192)
+    cap = length if length else len(buffer)
 
     client.sendall(b"\xff" * size)
 
@@ -325,13 +332,11 @@ def test_unlocked_ssl_length_limit(client):
 
     while size > 0:
         try:
-            count = sabctools.unlocked_ssl_recv_into(client, buffer, 4096)
+            count = sabctools.unlocked_ssl_recv_into(client, buffer, length)
             size -= count
-            assert count <= 4096
+            assert count <= cap
         except ssl.SSLWantReadError:
             select.select([client], [], [])
-            # Give the sender some more time to complete sending.
-            time.sleep(0.1)
 
 
 def test_unlocked_ssl_recv_into_blocking_socket_fails(client, buffer):
