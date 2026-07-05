@@ -21,9 +21,9 @@
 
 #include <Python.h>
 
-PyObject* crc32_combine(PyObject *, PyObject*);
-PyObject* crc32_multiply(PyObject *, PyObject*);
-PyObject* crc32_zero_unpad(PyObject *, PyObject*);
+PyObject* crc32_combine(PyObject *, PyObject *const *, Py_ssize_t);
+PyObject* crc32_multiply(PyObject *, PyObject *const *, Py_ssize_t);
+PyObject* crc32_zero_unpad(PyObject *, PyObject *const *, Py_ssize_t);
 PyObject* crc32_xpown(PyObject *, PyObject*);
 PyObject* crc32_xpow8n(PyObject *, PyObject*);
 

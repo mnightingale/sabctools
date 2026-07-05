@@ -42,20 +42,20 @@ static PyMethodDef sabctools_methods[] = {
     },
     {
         "crc32_combine",
-        crc32_combine,
-        METH_VARARGS,
+        (PyCFunction)(void (*)(void))crc32_combine,
+        METH_FASTCALL,
         "crc32_combine(crc1, crc2, length)"
     },
     {
         "crc32_multiply",
-        crc32_multiply,
-        METH_VARARGS,
+        (PyCFunction)(void (*)(void))crc32_multiply,
+        METH_FASTCALL,
         "crc32_multiply(crc1, crc2)"
     },
     {
         "crc32_zero_unpad",
-        crc32_zero_unpad,
-        METH_VARARGS,
+        (PyCFunction)(void (*)(void))crc32_zero_unpad,
+        METH_FASTCALL,
         "crc32_zero_unpad(crc1, length)"
     },
     {

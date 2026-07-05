@@ -19,42 +19,59 @@
 #include "crc32.h"
 #include "yencode/crc.h"
 
-PyObject* crc32_combine(PyObject *self, PyObject *args) {
-    unsigned long crc1, crc2;
-    unsigned long long length;
-
-    if(!PyArg_ParseTuple(args, "kkK:crc32_combine", &crc1, &crc2, &length)) {
+PyObject* crc32_combine(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+    if (nargs != 3) {
+        PyErr_Format(PyExc_TypeError, "crc32_combine() takes exactly 3 arguments (%zd given)", nargs);
         return NULL;
     }
 
-    crc1 = RapidYenc::crc32_combine(crc1, crc2, length);
+    unsigned long crc1 = PyLong_AsUnsignedLong(args[0]);
+    if (PyErr_Occurred())
+        return NULL;
 
-    return PyLong_FromUnsignedLong(crc1);
+    unsigned long crc2 = PyLong_AsUnsignedLong(args[1]);
+    if (PyErr_Occurred())
+        return NULL;
+
+    unsigned long long length = PyLong_AsUnsignedLongLong(args[2]);
+    if (PyErr_Occurred())
+        return NULL;
+
+    return PyLong_FromUnsignedLong(RapidYenc::crc32_combine(crc1, crc2, length));
 }
 
-PyObject* crc32_multiply(PyObject *self, PyObject *args) {
-    unsigned long crc1, crc2;
-
-    if(!PyArg_ParseTuple(args, "kk:crc32_multiply", &crc1, &crc2)) {
+PyObject* crc32_multiply(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError, "crc32_multiply() takes exactly 2 arguments (%zd given)", nargs);
         return NULL;
     }
 
-    crc1 = RapidYenc::crc32_multiply(crc1, crc2);
+    unsigned long crc1 = PyLong_AsUnsignedLong(args[0]);
+    if (PyErr_Occurred())
+        return NULL;
 
-    return PyLong_FromUnsignedLong(crc1);
+    unsigned long crc2 = PyLong_AsUnsignedLong(args[1]);
+    if (PyErr_Occurred())
+        return NULL;
+
+    return PyLong_FromUnsignedLong(RapidYenc::crc32_multiply(crc1, crc2));
 }
 
-PyObject* crc32_zero_unpad(PyObject *self, PyObject *args) {
-    unsigned long crc1;
-    unsigned long long length;
-
-    if(!PyArg_ParseTuple(args, "kK:crc32_zero_unpad", &crc1, &length)) {
+PyObject* crc32_zero_unpad(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError, "crc32_zero_unpad() takes exactly 2 arguments (%zd given)", nargs);
         return NULL;
     }
 
-    crc1 = RapidYenc::crc32_unzero(crc1, length);
+    unsigned long crc1 = PyLong_AsUnsignedLong(args[0]);
+    if (PyErr_Occurred())
+        return NULL;
 
-    return PyLong_FromUnsignedLong(crc1);
+    unsigned long long length = PyLong_AsUnsignedLongLong(args[1]);
+    if (PyErr_Occurred())
+        return NULL;
+
+    return PyLong_FromUnsignedLong(RapidYenc::crc32_unzero(crc1, length));
 }
 
 PyObject* crc32_xpown(PyObject* self, PyObject* arg) {
