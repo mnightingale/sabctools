@@ -61,7 +61,7 @@
 #define YENC_CHUNK_SIZE (64*1024)
 
 /* Functions */
-bool yenc_init(PyObject *);
+int yenc_init(PyObject *);
 PyObject* yenc_encode(PyObject *, PyObject*);
 
 typedef struct {

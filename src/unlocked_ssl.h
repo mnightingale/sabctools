@@ -43,7 +43,7 @@ extern "C" {
 # define SSL_ERROR_WANT_WRITE 3
 # define SSL_ERROR_ZERO_RETURN 6
 
-void openssl_init();
+int openssl_init(PyObject *);
 bool openssl_linked();
 PyObject *unlocked_ssl_recv_into(PyObject *, PyObject*);
 

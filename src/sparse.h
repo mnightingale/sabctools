@@ -27,7 +27,7 @@
 #include <unistd.h>
 #endif
 
-void sparse_init();
+int sparse_init(PyObject *);
 PyObject *sparse(PyObject *, PyObject *);
 
 #endif //SABCTOOLS_SPARSE_H

@@ -1478,8 +1478,8 @@ static PyObject* create_int_enum(const char* enum_name, const EnumEntry* entries
     return enum_obj;
 }
 
-bool yenc_init(PyObject *m) {
-    if (PyType_Ready(&DecoderType) < 0 ||  PyType_Ready(&NNTPResponseType) < 0) return false;
+int yenc_init(PyObject *m) {
+    if (PyType_Ready(&DecoderType) < 0 ||  PyType_Ready(&NNTPResponseType) < 0) return -1;
 
     RapidYenc::encoder_init();
     RapidYenc::decoder_init();
@@ -1510,11 +1510,11 @@ bool yenc_init(PyObject *m) {
     if (PyModule_AddObject(m, "EncodingFormat", encoding_enum) < 0)
         goto error;
 
-    return true;
+    return 0;
 
 error:
     Py_XDECREF(encoding_enum);
     Py_CLEAR(ENCODING_FORMAT_YENC);
     Py_CLEAR(ENCODING_FORMAT_UU);
-    return false;
+    return -1;
 }

@@ -79,7 +79,7 @@ typedef enum {
     (PyObject *) PyWeakref_GetObject((obj)->Socket) : NULL)
 
 /* Linking to OpenSSL function used by Python */
-void openssl_init() {
+int openssl_init(PyObject *m) {
     // TODO: consider adding an extra version check to avoid possible future changes to SSL_read_ex
 
     PyObject *ssl_module = NULL;
@@ -146,6 +146,7 @@ cleanup:
         Py_XDECREF(SSLWantWriteError);
         Py_XDECREF(SSLSocketType);
     }
+    return 0;
 }
 
 bool openssl_linked() {

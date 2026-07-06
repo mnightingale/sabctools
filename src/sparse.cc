@@ -21,12 +21,13 @@
 PyObject *Py_msvcrt_module = NULL;
 PyObject *get_osfhandle_string = NULL;
 
-void sparse_init()
+int sparse_init(PyObject *m)
 {
 #if defined(_WIN32) || defined(__CYGWIN__)
     Py_msvcrt_module = PyImport_ImportModule("msvcrt");
     get_osfhandle_string = PyUnicode_FromString("get_osfhandle");
 #endif
+    return 0;
 }
 
 PyObject *sparse(PyObject *self, PyObject *args)

@@ -91,14 +91,6 @@ static PyMethodDef sabctools_methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
-static struct PyModuleDef sabctools_definition = {
-    PyModuleDef_HEAD_INIT,
-    "sabctools",
-    "Utils written in C for use within SABnzbd.",
-    -1,
-    sabctools_methods
-};
-
 static const char* simd_detected(void) {
     int level = RapidYenc::decode_isa_level();
 #ifdef PLATFORM_X86
@@ -133,27 +125,53 @@ static const char* simd_detected(void) {
     return "";
 }
 
-PyMODINIT_FUNC PyInit_sabctools(void) {
-    PyObject* m = PyModule_Create(&sabctools_definition);
-    if (m == NULL) return NULL;
+static int sabctools_exec(PyObject *m)
+{
+    if (yenc_init(m) < 0)
+        return -1;
+
+    if (openssl_init(m) < 0)
+        return -1;
+
+    if (sparse_init(m) < 0)
+        return -1;
 
     // Initialize and add version / SIMD information
-    if (!yenc_init(m)) {
-        Py_DECREF(m);
-        return NULL;
+    if (PyModule_AddStringConstant(m, "version", SABCTOOLS_VERSION) < 0)
+        return -1;
+
+    if (PyModule_AddStringConstant(m, "simd", simd_detected()) < 0)
+        return -1;
+
+    PyObject *linked = PyBool_FromLong(openssl_linked());
+    if (linked == nullptr)
+        return -1;
+
+    if (PyModule_AddObject(m, "openssl_linked", linked) < 0) {
+        Py_DECREF(linked);
+        return -1;
     }
-    openssl_init();
-    sparse_init();
 
-    PyModule_AddStringConstant(m, "version", SABCTOOLS_VERSION);
-    PyModule_AddStringConstant(m, "simd", simd_detected());
+    return 0;
+}
 
-    // Add status of linking OpenSSL function
-    PyObject *openssl_linked_object = openssl_linked() ? Py_True : Py_False;
-    Py_INCREF(openssl_linked_object);
-    PyModule_AddObject(m, "openssl_linked", openssl_linked_object);
+static PyModuleDef_Slot sabctools_slots[] = {
+    {Py_mod_exec, reinterpret_cast<void*>(sabctools_exec)},
+    {0, NULL}
+};
 
-    return m;
+static PyModuleDef sabctools_definition = {
+    PyModuleDef_HEAD_INIT,
+    "sabctools",
+    "Utils written in C for use within SABnzbd.",
+    0,
+    sabctools_methods,
+    sabctools_slots,
+};
+
+
+PyMODINIT_FUNC PyInit_sabctools(void) {
+    return PyModuleDef_Init(&sabctools_definition);
 }
 
 
