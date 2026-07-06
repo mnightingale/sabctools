@@ -37,4 +37,14 @@ struct sabctools_state {
     PyObject* ENCODING_FORMAT_UU;
 };
 
+Py_LOCAL_INLINE(sabctools_state*)
+get_sabctools_state(PyObject *module)
+{
+    void *state = PyModule_GetState(module);
+    assert(state != NULL);
+    return static_cast<sabctools_state *>(state);
+}
+
+#define get_state_obj(o) static_cast<sabctools_state *>(PyType_GetModuleState(Py_TYPE(o)))
+
 #endif //SABCTOOLS_H

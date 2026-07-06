@@ -228,9 +228,7 @@ static inline void NNTPResponse_detect_format(NNTPResponse* instance, std::strin
         return;
     }
 
-    const auto *state = static_cast<sabctools_state *>(
-        PyType_GetModuleState(Py_TYPE(instance))
-    );
+    const auto *state = get_state_obj(instance);
 
     // YEnc detection
     if (starts_with(line, "=ybegin "))
@@ -499,9 +497,7 @@ static PyObject* NNTPResponse_get_crc(NNTPResponse* self, void *closure)
         Py_RETURN_NONE;
     }
 
-    const auto *state = static_cast<sabctools_state *>(
-        PyType_GetModuleState(Py_TYPE(self))
-    );
+    const auto *state = get_state_obj(self);
 
     if (self->format == state->ENCODING_FORMAT_YENC && (!self->crc_expected.has_value() || self->crc != self->crc_expected.value())) {
         Py_RETURN_NONE;
@@ -885,9 +881,7 @@ bool next_crlf_line(const char* buf, std::size_t buf_len, Py_ssize_t &read, std:
 static Py_ssize_t NNTPResponse_decode_buffer(NNTPResponse *instance, const char* buf, const Py_ssize_t buf_len) {
     Py_ssize_t read = 0;
 
-    const auto *state = static_cast<sabctools_state *>(
-        PyType_GetModuleState(Py_TYPE(instance))
-    );
+    const auto *state = get_state_obj(instance);
 
     // Resume body decoding if we were in the middle of it
     if (instance->body && instance->format == state->ENCODING_FORMAT_YENC) {
@@ -1229,7 +1223,7 @@ static Py_ssize_t Decoder_len(Decoder *self)
 Py_ssize_t Decoder_decode(Decoder *self, const char* data, const Py_ssize_t size) {
     auto instance = self->response;
     if (!instance) {
-        const auto *state = static_cast<sabctools_state *>(PyType_GetModuleState(Py_TYPE(self)));
+        const auto *state = get_state_obj(self);;
         instance = reinterpret_cast<NNTPResponse *>(PyObject_CallNoArgs(state->NNTPResponseType));
         if (!instance) return -1;
         self->response = instance;
@@ -1400,7 +1394,7 @@ static PyObject* create_int_enum(const char* enum_name, const EnumEntry* entries
 }
 
 int yenc_init(PyObject *m) {
-    auto *state = static_cast<sabctools_state *>(PyModule_GetState(m));
+    auto *state = get_sabctools_state(m);
 
     RapidYenc::encoder_init();
     RapidYenc::decoder_init();
