@@ -163,6 +163,9 @@ static int sabctools_traverse(PyObject *module, visitproc visit, void *arg)
 
     Py_VISIT(state->DecoderType);
     Py_VISIT(state->NNTPResponseType);
+    Py_VISIT(state->EncodingFormat);
+    Py_VISIT(state->ENCODING_FORMAT_YENC);
+    Py_VISIT(state->ENCODING_FORMAT_UU);
 
     return 0;
 }
@@ -175,6 +178,9 @@ static int sabctools_clear(PyObject *module)
 
     Py_CLEAR(state->DecoderType);
     Py_CLEAR(state->NNTPResponseType);
+    Py_CLEAR(state->EncodingFormat);
+    Py_CLEAR(state->ENCODING_FORMAT_YENC);
+    Py_CLEAR(state->ENCODING_FORMAT_UU);
 
     return 0;
 }

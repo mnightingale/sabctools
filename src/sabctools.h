@@ -32,6 +32,9 @@ PyMODINIT_FUNC PyInit_sabctools(void);
 struct sabctools_state {
     PyObject *DecoderType;
     PyObject *NNTPResponseType;
+    PyObject *EncodingFormat;
+    PyObject* ENCODING_FORMAT_YENC;
+    PyObject* ENCODING_FORMAT_UU;
 };
 
 #endif //SABCTOOLS_H

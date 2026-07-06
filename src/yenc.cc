@@ -24,11 +24,6 @@
 #include "yencode/decoder.h"
 #include "yencode/crc.h"
 
-/* Global objects */
-
-static PyObject* ENCODING_FORMAT_YENC = nullptr;
-static PyObject* ENCODING_FORMAT_UU = nullptr;
-
 /* Function definitions */
 
 /**
@@ -233,20 +228,24 @@ static inline void NNTPResponse_detect_format(NNTPResponse* instance, std::strin
         return;
     }
 
+    const auto *state = static_cast<sabctools_state *>(
+        PyType_GetModuleState(Py_TYPE(instance))
+    );
+
     // YEnc detection
     if (starts_with(line, "=ybegin "))
     {
         Py_XDECREF(instance->format);
-        instance->format = ENCODING_FORMAT_YENC;
-        Py_INCREF(ENCODING_FORMAT_YENC);
+        instance->format = state->ENCODING_FORMAT_YENC;
+        Py_INCREF(state->ENCODING_FORMAT_YENC);
         return;
     }
 
     // UUEncode detection: 60 or 61 chars, starts with 'M'
     if ((line.size() == 60 || line.size() == 61) && line.front() == 'M') {
         Py_XDECREF(instance->format);
-        instance->format = ENCODING_FORMAT_UU;
-        Py_INCREF(ENCODING_FORMAT_UU);
+        instance->format = state->ENCODING_FORMAT_UU;
+        Py_INCREF(state->ENCODING_FORMAT_UU);
         return;
     }
 
@@ -279,8 +278,8 @@ static inline void NNTPResponse_detect_format(NNTPResponse* instance, std::strin
 
         if (all_valid) {
             Py_XDECREF(instance->format);
-            instance->format = ENCODING_FORMAT_UU;
-            Py_INCREF(ENCODING_FORMAT_UU);
+            instance->format = state->ENCODING_FORMAT_UU;
+            Py_INCREF(state->ENCODING_FORMAT_UU);
         }
         return;
     }
@@ -317,8 +316,8 @@ static inline void NNTPResponse_detect_format(NNTPResponse* instance, std::strin
 
         // Probably UU
         Py_XDECREF(instance->format);
-        instance->format = ENCODING_FORMAT_UU;
-        Py_INCREF(ENCODING_FORMAT_UU);
+        instance->format = state->ENCODING_FORMAT_UU;
+        Py_INCREF(state->ENCODING_FORMAT_UU);
         instance->body = true;
         return;
     }
@@ -500,7 +499,11 @@ static PyObject* NNTPResponse_get_crc(NNTPResponse* self, void *closure)
         Py_RETURN_NONE;
     }
 
-    if (self->format == ENCODING_FORMAT_YENC && (!self->crc_expected.has_value() || self->crc != self->crc_expected.value())) {
+    const auto *state = static_cast<sabctools_state *>(
+        PyType_GetModuleState(Py_TYPE(self))
+    );
+
+    if (self->format == state->ENCODING_FORMAT_YENC && (!self->crc_expected.has_value() || self->crc != self->crc_expected.value())) {
         Py_RETURN_NONE;
     }
 
@@ -882,8 +885,12 @@ bool next_crlf_line(const char* buf, std::size_t buf_len, Py_ssize_t &read, std:
 static Py_ssize_t NNTPResponse_decode_buffer(NNTPResponse *instance, const char* buf, const Py_ssize_t buf_len) {
     Py_ssize_t read = 0;
 
+    const auto *state = static_cast<sabctools_state *>(
+        PyType_GetModuleState(Py_TYPE(instance))
+    );
+
     // Resume body decoding if we were in the middle of it
-    if (instance->body && instance->format == ENCODING_FORMAT_YENC) {
+    if (instance->body && instance->format == state->ENCODING_FORMAT_YENC) {
         if (!NNTPResponse_decode_yenc(instance, buf, buf_len, read)) return -1;
         if (instance->body) return read;  // Still in body, need more data
     }
@@ -919,14 +926,14 @@ static Py_ssize_t NNTPResponse_decode_buffer(NNTPResponse *instance, const char*
             // Format is still unknown so record lines
             if (NNTPResponse_append_line(instance, line) < 0)
                 return -1;
-        } else if (instance->format == ENCODING_FORMAT_YENC) {
+        } else if (instance->format == state->ENCODING_FORMAT_YENC) {
             NNTPResponse_process_yenc_header(instance, line);
             if (instance->body) {
                 // =ypart was encountered, switch to body decoding
                 if (!NNTPResponse_decode_yenc(instance, buf, buf_len, read)) return -1;
                 if (instance->body) return read;  // Still decoding, need more data
             }
-        } else if (instance->format == ENCODING_FORMAT_UU) {
+        } else if (instance->format == state->ENCODING_FORMAT_UU) {
             if (!NNTPResponse_decode_uu(instance, line)) return -1;
         }
     }
@@ -1404,41 +1411,44 @@ int yenc_init(PyObject *m) {
         {"YENC", 0},
         {"UU", 1}
     };
-    PyObject* encoding_enum = create_int_enum("EncodingFormat", encoding_entries, std::size(encoding_entries));
-    if (!encoding_enum)
+    state->EncodingFormat = create_int_enum("EncodingFormat", encoding_entries, std::size(encoding_entries));
+    if (!state->EncodingFormat)
         goto error;
 
-    ENCODING_FORMAT_YENC = PyObject_GetAttrString(encoding_enum, "YENC");
-    ENCODING_FORMAT_UU = PyObject_GetAttrString(encoding_enum, "UU");
-    if (!ENCODING_FORMAT_YENC || !ENCODING_FORMAT_UU)
+    if (PyModule_AddObjectRef(m, "EncodingFormat", state->EncodingFormat) < 0)
         goto error;
 
-    // Add objects to module
+    state->ENCODING_FORMAT_YENC = PyObject_GetAttrString(state->EncodingFormat, "YENC");
+    if (!state->ENCODING_FORMAT_YENC)
+        goto error;
+
+    state->ENCODING_FORMAT_UU = PyObject_GetAttrString(state->EncodingFormat, "UU");
+    if (!state->ENCODING_FORMAT_UU)
+        goto error;
+
     state->DecoderType = PyType_FromModuleAndSpec(m, &Decoder_spec, nullptr);
     if (!state->DecoderType)
         goto error;
+
     if (PyModule_AddObjectRef(m, "Decoder", state->DecoderType) < 0) {
-        Py_CLEAR(state->DecoderType);
-        return -1;
+        goto error;
     }
 
     state->NNTPResponseType = PyType_FromModuleAndSpec(m, & NNTPResponse_spec, nullptr);
     if (!state->NNTPResponseType)
-        return -1;
-    if (PyModule_AddObjectRef(m, "NNTPResponse", state->NNTPResponseType) < 0) {
-        Py_CLEAR(state->NNTPResponseType);
-        return -1;
-    }
-
-    // Steals reference to encoding_enum
-    if (PyModule_AddObject(m, "EncodingFormat", encoding_enum) < 0)
         goto error;
+
+    if (PyModule_AddObjectRef(m, "NNTPResponse", state->NNTPResponseType) < 0) {
+        goto error;
+    }
 
     return 0;
 
 error:
-    Py_XDECREF(encoding_enum);
-    Py_CLEAR(ENCODING_FORMAT_YENC);
-    Py_CLEAR(ENCODING_FORMAT_UU);
+    Py_CLEAR(state->EncodingFormat);
+    Py_CLEAR(state->ENCODING_FORMAT_YENC);
+    Py_CLEAR(state->ENCODING_FORMAT_UU);
+    Py_CLEAR(state->DecoderType);
+    Py_CLEAR(state->NNTPResponseType);
     return -1;
 }
