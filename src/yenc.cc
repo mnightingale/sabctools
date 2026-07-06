@@ -16,6 +16,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
+#include "sabctools.h"
 #include "yenc.h"
 
 #include "yencode/common.h"
@@ -1066,45 +1067,22 @@ static PyGetSetDef NNTPResponse_gets_sets[] = {
     {nullptr, nullptr, nullptr, nullptr, nullptr}
 };
 
-PyTypeObject NNTPResponseType = {
-    PyVarObject_HEAD_INIT(nullptr, 0)
-    "sabctools.NNTPResponse",            // tp_name
-    sizeof(NNTPResponse),                // tp_basicsize
-    0,                                   // tp_itemsize
-    (destructor)NNTPResponse_dealloc,    // tp_dealloc
-    0,                                   // tp_vectorcall_offset
-    nullptr,                             // tp_getattr
-    nullptr,                             // tp_setattr
-    nullptr,                             // tp_as_async
-    (reprfunc)NNTPResponse_repr,         // tp_repr
-    nullptr,                             // tp_as_number
-    nullptr,                             // tp_as_sequence
-    nullptr,                             // tp_as_mapping
-    nullptr,                             // tp_hash
-    nullptr,                             // tp_call
-    nullptr,                             // tp_str
-    nullptr,                             // tp_getattro
-    nullptr,                             // tp_setattro
-    nullptr,                             // tp_as_buffer
-    Py_TPFLAGS_DEFAULT,                  // tp_flags
-    PyDoc_STR("NNTPResponse"),           // tp_doc
-    nullptr,                             // tp_traverse
-    nullptr,                             // tp_clear
-    nullptr,                             // tp_richcompare
-    0,                                   // tp_weaklistoffset
-    nullptr,                             // tp_iter
-    nullptr,                             // tp_iternext
-    nullptr,                             // tp_methods
-    NNTPResponse_members,                // tp_members
-    NNTPResponse_gets_sets,              // tp_getset
-    nullptr,                             // tp_base
-    nullptr,                             // tp_dict
-    nullptr,                             // tp_descr_get
-    nullptr,                             // tp_descr_set
-    0,                                   // tp_dictoffset
-    nullptr,                             // tp_init
-    PyType_GenericAlloc,                 // tp_alloc
-    NNTPResponse_new,                    // tp_new
+static PyType_Slot NNTPResponse_slots[] = {
+    {Py_tp_dealloc, (void *)NNTPResponse_dealloc},
+    {Py_tp_repr, (void *)NNTPResponse_repr},
+    {Py_tp_members, NNTPResponse_members},
+    {Py_tp_getset, NNTPResponse_gets_sets},
+    {Py_tp_doc, (void *)PyDoc_STR("NNTPResponse")},
+    {Py_tp_new, (void *)NNTPResponse_new},
+    {0, nullptr},
+};
+
+static PyType_Spec NNTPResponse_spec = {
+    .name = "sabctools.NNTPResponse",
+    .basicsize = sizeof(NNTPResponse),
+    .itemsize = 0,
+    .flags = Py_TPFLAGS_DEFAULT,
+    .slots = NNTPResponse_slots,
 };
 
 /**
@@ -1130,26 +1108,6 @@ static int Decoder_getbuffer(Decoder* self, Py_buffer *view, int flags)
         0,
         flags);
 }
-
-/**
- * Buffer protocol releasebuffer implementation for Decoder.
- *
- * The Decoder does not allocate per-view resources when exporting its
- * buffer, so there is nothing to clean up when a view is released.
- * This function exists only to satisfy the PyBufferProcs interface.
- *
- * @param self Decoder instance that previously exported a buffer view
- * @param view Py_buffer being released (unused)
- */
-static void Decoder_releasebuffer(Decoder* self, Py_buffer *view)
-{
-    // nothing to do
-}
-
-static PyBufferProcs Decoder_bufferprocs = {
-    (getbufferproc)Decoder_getbuffer,
-    (releasebufferproc)Decoder_releasebuffer
-};
 
 static PyObject* Decoder_iter(Decoder *self)
 {
@@ -1264,7 +1222,8 @@ static Py_ssize_t Decoder_len(Decoder *self)
 Py_ssize_t Decoder_decode(Decoder *self, const char* data, const Py_ssize_t size) {
     auto instance = self->response;
     if (!instance) {
-        instance = reinterpret_cast<NNTPResponse *>(PyObject_CallObject(reinterpret_cast<PyObject *>(&NNTPResponseType), NULL));
+        const auto *state = static_cast<sabctools_state *>(PyType_GetModuleState(Py_TYPE(self)));
+        instance = reinterpret_cast<NNTPResponse *>(PyObject_CallNoArgs(state->NNTPResponseType));
         if (!instance) return -1;
         self->response = instance;
     }
@@ -1366,71 +1325,26 @@ static PyMethodDef Decoder_methods[] = {
     {NULL}
 };
 
-static PyNumberMethods Decoder_as_number = {
-    nullptr,                              // nb_add
-    nullptr,                              // nb_subtract
-    nullptr,                              // nb_multiply
-    nullptr,                              // nb_remainder
-    nullptr,                              // nb_divmod
-    nullptr,                              // nb_power
-    nullptr,                              // nb_negative
-    nullptr,                              // nb_positive
-    nullptr,                              // nb_absolute
-    (inquiry)Decoder_nb_bool,             // nb_bool
+static PyType_Slot Decoder_slots[] = {
+    {Py_tp_doc, (void *)PyDoc_STR("Decoder")},
+    {Py_tp_init, (void *)Decoder_init},
+    {Py_tp_new, (void *)Decoder_new},
+    {Py_tp_dealloc, (void *)Decoder_dealloc},
+    {Py_tp_iter, (void *)Decoder_iter},
+    {Py_tp_iternext, (void *)Decoder_iternext},
+    {Py_tp_methods, Decoder_methods},
+    {Py_nb_bool, (void *)Decoder_nb_bool},
+    {Py_sq_length, (void *)Decoder_len},
+    {Py_bf_getbuffer, (void *)Decoder_getbuffer},
+    {0, nullptr}
 };
 
-static PySequenceMethods Decoder_as_sequence = {
-    (lenfunc)Decoder_len,                 // sq_length
-    nullptr,                              // sq_concat
-    nullptr,                              // sq_repeat
-    nullptr,                              // sq_item
-    nullptr,                              // sq_slice
-    nullptr,                              // sq_ass_item
-    nullptr,                              // sq_ass_slice
-    nullptr,                              // sq_contains
-    nullptr,                              // sq_inplace_concat
-    nullptr,                              // sq_inplace_repeat
-};
-
-PyTypeObject DecoderType = {
-    PyVarObject_HEAD_INIT(nullptr, 0)
-    "sabctools.Decoder",                  // tp_name
-    sizeof(Decoder),                      // tp_basicsize
-    0,                                    // tp_itemsize
-    (destructor)Decoder_dealloc,          // tp_dealloc
-    0,                                    // tp_print
-    nullptr,                              // tp_getattr
-    nullptr,                              // tp_setattr
-    nullptr,                              // tp_compare / tp_reserved
-    nullptr,                              // tp_repr
-    &Decoder_as_number,                   // tp_as_number
-    &Decoder_as_sequence,                 // tp_as_sequence
-    nullptr,                              // tp_as_mapping
-    nullptr,                              // tp_hash
-    nullptr,                              // tp_call
-    nullptr,                              // tp_str
-    nullptr,                              // tp_getattro
-    nullptr,                              // tp_setattro
-    &Decoder_bufferprocs,                 // tp_as_buffer
-    Py_TPFLAGS_DEFAULT,                   // tp_flags
-    PyDoc_STR("Decoder"),                 // tp_doc
-    nullptr,                              // tp_traverse
-    nullptr,                              // tp_clear
-    nullptr,                              // tp_richcompare
-    0,                                    // tp_weaklistoffset
-    (getiterfunc)Decoder_iter,            // tp_iter
-    (iternextfunc)Decoder_iternext,       // tp_iternext
-    Decoder_methods,                      // tp_methods
-    nullptr,                              // tp_members
-    nullptr,                              // tp_getset
-    nullptr,                              // tp_base
-    nullptr,                              // tp_dict
-    nullptr,                              // tp_descr_get
-    nullptr,                              // tp_descr_set
-    0,                                    // tp_dictoffset
-    (initproc)Decoder_init,               // tp_init
-    PyType_GenericAlloc,                  // tp_alloc
-    Decoder_new,                          // tp_new
+static PyType_Spec Decoder_spec = {
+    .name = "sabctools.Decoder",
+    .basicsize = sizeof(Decoder),
+    .itemsize = 0,
+    .flags = Py_TPFLAGS_DEFAULT,
+    .slots = Decoder_slots,
 };
 
 struct EnumEntry {
@@ -1479,7 +1393,7 @@ static PyObject* create_int_enum(const char* enum_name, const EnumEntry* entries
 }
 
 int yenc_init(PyObject *m) {
-    if (PyType_Ready(&DecoderType) < 0 ||  PyType_Ready(&NNTPResponseType) < 0) return -1;
+    auto *state = static_cast<sabctools_state *>(PyModule_GetState(m));
 
     RapidYenc::encoder_init();
     RapidYenc::decoder_init();
@@ -1500,11 +1414,21 @@ int yenc_init(PyObject *m) {
         goto error;
 
     // Add objects to module
-    if (PyModule_AddType(m, &DecoderType) < 0)
+    state->DecoderType = PyType_FromModuleAndSpec(m, &Decoder_spec, nullptr);
+    if (!state->DecoderType)
         goto error;
+    if (PyModule_AddObjectRef(m, "Decoder", state->DecoderType) < 0) {
+        Py_CLEAR(state->DecoderType);
+        return -1;
+    }
 
-    if (PyModule_AddType(m, &NNTPResponseType) < 0)
-        goto error;
+    state->NNTPResponseType = PyType_FromModuleAndSpec(m, & NNTPResponse_spec, nullptr);
+    if (!state->NNTPResponseType)
+        return -1;
+    if (PyModule_AddObjectRef(m, "NNTPResponse", state->NNTPResponseType) < 0) {
+        Py_CLEAR(state->NNTPResponseType);
+        return -1;
+    }
 
     // Steals reference to encoding_enum
     if (PyModule_AddObject(m, "EncodingFormat", encoding_enum) < 0)

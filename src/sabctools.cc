@@ -155,6 +155,30 @@ static int sabctools_exec(PyObject *m)
     return 0;
 }
 
+static int sabctools_traverse(PyObject *module, visitproc visit, void *arg)
+{
+    const auto *state = static_cast<sabctools_state *>(
+        PyModule_GetState(module)
+    );
+
+    Py_VISIT(state->DecoderType);
+    Py_VISIT(state->NNTPResponseType);
+
+    return 0;
+}
+
+static int sabctools_clear(PyObject *module)
+{
+    auto *state = static_cast<sabctools_state *>(
+        PyModule_GetState(module)
+    );
+
+    Py_CLEAR(state->DecoderType);
+    Py_CLEAR(state->NNTPResponseType);
+
+    return 0;
+}
+
 static PyModuleDef_Slot sabctools_slots[] = {
     {Py_mod_exec, reinterpret_cast<void*>(sabctools_exec)},
     {0, NULL}
@@ -164,9 +188,11 @@ static PyModuleDef sabctools_definition = {
     PyModuleDef_HEAD_INIT,
     "sabctools",
     "Utils written in C for use within SABnzbd.",
-    0,
+    sizeof(sabctools_state),
     sabctools_methods,
     sabctools_slots,
+    sabctools_traverse,
+    sabctools_clear,
 };
 
 

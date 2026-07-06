@@ -16,6 +16,9 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
+#ifndef SABCTOOLS_H
+#define SABCTOOLS_H
+
 #include <Python.h>
 #include <stdio.h>
 #include <fcntl.h>
@@ -25,3 +28,10 @@
 #define SABCTOOLS_VERSION "9.6.0"
 
 PyMODINIT_FUNC PyInit_sabctools(void);
+
+struct sabctools_state {
+    PyObject *DecoderType;
+    PyObject *NNTPResponseType;
+};
+
+#endif //SABCTOOLS_H
