@@ -7,6 +7,7 @@ This module implements three main sets of C implementations that are used within
 * CRC32 calculations
 * Non-blocking SSL-socket reading
 * Marking files as sparse
+* Positional writes on Windows
 
 Of course, they can also be used in any other application.
 
@@ -24,6 +25,26 @@ For more details, see the [cpython pull request](https://github.com/python/cpyth
 ## Marking files as sparse
 Uses Windows specific system calls to mark files as sparse and set the desired size.
 On other platforms the same is achieved by calling `truncate`.
+
+## Positional writes on Windows
+Windows has no `os.pwrite`/`os.pwritev`, so callers normally fall back to `ctypes` to reach `WriteFile` with an
+`OVERLAPPED` offset. `sabctools.pwrite(fd, buffer, offset)` and `sabctools.pwritev(fd, buffers, offset)` do the same
+thing natively, avoiding the per-call `ctypes` marshalling and the `msvcrt.get_osfhandle` round trip.
+Because the offset travels with the write, it never touches the shared file pointer, so concurrent writers to the
+same descriptor do not need a lock.
+
+Both mirror the signature and return value of their `os` counterparts, and raise `OSError` with `errno` mapped from
+the Windows error, so checks such as `errno == errno.ENOSPC` keep working. On non-Windows platforms they raise
+`NotImplementedError`, use `os.pwrite`/`os.pwritev` there.
+
+`pwritev` is emulated with sequential `WriteFile` calls at advancing offsets, since `WriteFileGather` requires
+page-aligned unbuffered handles. All buffers are acquired before the first write, so an invalid entry fails without
+writing anything.
+
+To compare against the `ctypes` implementation on your system, run:
+```
+python tests/benchmark_pwrite.py
+```
 
 ## Utility functions
 Use `sabctools.bytearray_malloc(size)` to get an `bytearray` that is uninitialized (not set to `0`'s). 

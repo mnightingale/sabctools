@@ -21,6 +21,7 @@
 #include "unlocked_ssl.h"
 #include "crc32.h"
 #include "sparse.h"
+#include "pwrite.h"
 #include "utils.h"
 
 /* Function and exception declarations */
@@ -75,6 +76,18 @@ static PyMethodDef sabctools_methods[] = {
         sparse,
         METH_VARARGS,
         "sparse(handle, length)"
+    },
+    {
+        "pwrite",
+        sabctools_pwrite,
+        METH_VARARGS,
+        "pwrite(fd, buffer, offset)"
+    },
+    {
+        "pwritev",
+        sabctools_pwritev,
+        METH_VARARGS,
+        "pwritev(fd, buffers, offset)"
     },
     {
         "bytearray_malloc",

@@ -1,7 +1,7 @@
 from enum import IntEnum
-from typing import Tuple, Optional, IO, List, Iterator, Union
+from typing import Tuple, Optional, IO, List, Iterator, Sequence, Union
 from ssl import SSLSocket
-from _typeshed import WriteableBuffer
+from _typeshed import WriteableBuffer, ReadableBuffer
 
 __version__: str
 openssl_linked: bool
@@ -15,6 +15,12 @@ def crc32_xpow8n(n: int) -> int: ...
 def crc32_xpown(n: int) -> int: ...
 def crc32_zero_unpad(crc1: int, length: int) -> int: ...
 def sparse(file: Union[IO, int], length: int) -> None: ...
+def pwrite(fd: int, buffer: ReadableBuffer, offset: int) -> int:
+    """Windows-only equivalent of os.pwrite, raises NotImplementedError elsewhere."""
+
+def pwritev(fd: int, buffers: Sequence[ReadableBuffer], offset: int) -> int:
+    """Windows-only equivalent of os.pwritev, raises NotImplementedError elsewhere."""
+
 def bytearray_malloc(size: int) -> bytearray: ...
 def rarfile_rar3_s2k(pwd, salt) -> tuple[bytes, bytes]: ...
 

@@ -350,6 +350,12 @@ class SABCToolsBuild(build_ext):
             },
             {
                 "sources": [
+                    "src/pwrite.cc",
+                ],
+                "gcc_flags": ["-Wno-unused-parameter"],
+            },
+            {
+                "sources": [
                     "src/utils.cc",
                 ],
                 "gcc_flags": ["-Wno-unused-parameter"],
