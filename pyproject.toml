@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=77.0.0", "wheel"]
+# cmake and ninja build the vendored par2cmdline-turbo; see src/par2/VENDOR.md
+requires = ["setuptools>=77.0.0", "wheel", "cmake>=3.13", "ninja; sys_platform != 'win32'"]
 build-backend = "setuptools.build_meta"
 
 [project]

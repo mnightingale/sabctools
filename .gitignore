@@ -54,8 +54,18 @@ test
 dist
 *.whl
 
+# Compiled extension, written into src/ by `build_ext --inplace`
+*.so
+*.pyd
+*.dylib
+
+# Generated into the vendored tree by par2's own CMake configure step
+src/par2/include/par2/version.h
+
 # Visual studio
 cmake*/
+# ...but the vendored par2 build system is not a Visual Studio artefact
+!src/par2/cmake/
 *.sln
 *.vcxproj*
 .vs/

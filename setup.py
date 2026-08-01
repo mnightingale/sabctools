@@ -21,6 +21,7 @@ import platform
 import re
 import tempfile
 import shutil
+import subprocess
 import logging
 from typing import Type
 from contextlib import closing, ExitStack
@@ -40,14 +41,21 @@ from distutils.errors import CompileError as StdlibCompileError
 log = logging.getLogger("sabctools.setup")
 log.setLevel(logging.INFO)
 
+# Vendored par2cmdline-turbo; see src/par2/VENDOR.md for the exact commit.
+PAR2_DIR = "src/par2"
+
 
 def autoconf_check(
     compiler: Type[CCompiler],
     include_check: str = None,
     define_check: str = None,
-    flag_check: str = None,
+    flag_check=None,
 ):
-    """A makeshift Python version of the autoconf checks"""
+    """A makeshift Python version of the autoconf checks
+
+    flag_check accepts a single flag or a list of flags that must be applied together
+    (some ISA extensions only compile when their prerequisites are also enabled).
+    """
     with ExitStack() as stack:
         tmpdir = tempfile.mkdtemp()
         stack.callback(shutil.rmtree, tmpdir)
@@ -69,8 +77,10 @@ def autoconf_check(
 
         extra_postargs = []
         if flag_check:
-            log.info("==> Checking support for flag: %s", flag_check)
-            extra_postargs.append(flag_check)
+            if isinstance(flag_check, str):
+                flag_check = [flag_check]
+            log.info("==> Checking support for flag(s): %s", " ".join(flag_check))
+            extra_postargs.extend(flag_check)
 
         try:
             log.info("==> Please ignore any errors shown below!")
@@ -84,6 +94,211 @@ def autoconf_check(
 
 
 class SABCToolsBuild(build_ext):
+    # Static libraries produced by the vendored par2 CMake build, in link order:
+    # archives only satisfy symbols demanded to their left.
+    PAR2_LIBRARIES = ("par2-turbo", "gf16", "hasher")
+
+    def build_par2(self) -> tuple:
+        """Build the vendored par2cmdline-turbo with its own CMake build.
+
+        Driving upstream's CMake rather than reimplementing it in setup.py keeps the
+        ~100-file per-ISA SIMD flag matrix, the MASM stub for MSVC's XOR-JIT and the
+        generated config.h in upstream's hands, and builds them in parallel instead of
+        serially through distutils.
+
+        Returns (include_dirs, libraries) for linking into the extension.
+        """
+        build_dir = os.path.abspath(os.path.join(self.build_temp, "par2"))
+        source_dir = os.path.abspath(PAR2_DIR)
+
+        arches = sorted(set(re.findall(r"-arch\s+(\S+)", os.environ.get("ARCHFLAGS", ""))))
+
+        if sys.platform == "darwin" and len(arches) > 1:
+            build_dir, libraries = self.build_par2_universal(source_dir, build_dir, arches)
+        else:
+            extra = []
+            if sys.platform == "darwin" and arches:
+                extra.append("-DCMAKE_OSX_ARCHITECTURES=" + arches[0])
+            self.configure_and_build_par2(source_dir, build_dir, extra)
+            libraries = [self.find_par2_library(build_dir, name) for name in self.PAR2_LIBRARIES]
+
+        for library in libraries:
+            log.info("==> Built %s", library)
+
+        return ([os.path.join(source_dir, "include"), build_dir], libraries)
+
+    def build_par2_universal(self, source_dir: str, build_dir: str, arches: list) -> tuple:
+        """Build one slice per architecture, then lipo them together.
+
+        A single configure with several -arch flags does not work: CMake reports one
+        CMAKE_SYSTEM_PROCESSOR, so cmake/common.cmake picks exactly one of IS_X86 /
+        IS_ARM, and parpar's per-file ISA flags are applied for that one only. Worse,
+        CHECK_CXX_COMPILER_FLAG then probes with every -arch at once, so flags valid for
+        a single slice - -mavx2, -march=armv8.2-a+sha3 - fail and get dropped for *all*
+        slices. A universal2 build done that way loses essentially all of parpar's SIMD
+        on both halves.
+
+        Building each slice separately with CMAKE_SYSTEM_NAME set puts CMake into
+        cross-compiling mode, which is what makes it honour the CMAKE_SYSTEM_PROCESSOR
+        we hand it. nzbget's cmake/par2-turbo.cmake passes the same pair for the same
+        reason.
+        """
+        slices = {}
+        for arch in arches:
+            slice_dir = "%s-%s" % (build_dir, arch)
+            self.configure_and_build_par2(
+                source_dir,
+                slice_dir,
+                [
+                    "-DCMAKE_OSX_ARCHITECTURES=" + arch,
+                    "-DCMAKE_SYSTEM_NAME=Darwin",
+                    "-DCMAKE_SYSTEM_PROCESSOR=" + arch,
+                ],
+            )
+            slices[arch] = slice_dir
+
+        os.makedirs(build_dir, exist_ok=True)
+        libraries = []
+        for name in self.PAR2_LIBRARIES:
+            merged = os.path.join(build_dir, "lib%s.a" % name)
+            inputs = [self.find_par2_library(slices[arch], name) for arch in arches]
+            log.info("==> Merging %s for %s", name, ", ".join(arches))
+            subprocess.check_call(["lipo", "-create"] + inputs + ["-output", merged])
+            libraries.append(merged)
+
+        # config.h only records host/OS traits, which are identical across slices here,
+        # so the glue can be compiled against any one of them.
+        shutil.copy(os.path.join(slices[arches[0]], "config.h"), os.path.join(build_dir, "config.h"))
+        return build_dir, libraries
+
+    @staticmethod
+    def usable_ninja() -> bool:
+        """Whether Ninja is present *and* actually runs.
+
+        Being on PATH is not enough. pip's build isolation puts the `ninja` wheel's
+        launcher script in the overlay bin directory, and it is not always executable
+        from there - CMake then fails the whole configure with "no such file or
+        directory" rather than falling back. Run it once and believe the result;
+        without Ninja, CMake picks its own default generator, which still builds in
+        parallel through `cmake --build --parallel`.
+        """
+        ninja = shutil.which("ninja")
+        if not ninja:
+            return False
+        try:
+            subprocess.check_output([ninja, "--version"], stderr=subprocess.STDOUT)
+            return True
+        except (OSError, subprocess.SubprocessError):
+            log.info("==> Ninja found at %s but does not run; letting CMake choose", ninja)
+            return False
+
+    @staticmethod
+    def par2_cmake_env() -> dict:
+        """Environment for the CMake calls, with any -arch flags stripped.
+
+        CMake seeds CMAKE_C_FLAGS / CMAKE_CXX_FLAGS from CFLAGS / CXXFLAGS, so the
+        `-arch x86_64 -arch arm64` cibuildwheel exports for universal2 would reach the
+        compiler and contradict the CMAKE_OSX_ARCHITECTURES we set per slice - CMake
+        detects the mismatch and refuses to configure. Architecture is ours to choose
+        here, so take it out of the environment entirely.
+        """
+        env = dict(os.environ)
+        for name in ("ARCHFLAGS", "CFLAGS", "CXXFLAGS", "LDFLAGS"):
+            if name in env:
+                stripped = re.sub(r"-arch\s+\S+", "", env[name]).strip()
+                if stripped:
+                    env[name] = stripped
+                else:
+                    del env[name]
+        return env
+
+    def configure_and_build_par2(self, source_dir: str, build_dir: str, extra_args: list) -> None:
+        """Configure and build one par2 tree."""
+        configure = [
+            "cmake",
+            "-S",
+            source_dir,
+            "-B",
+            build_dir,
+            "-DBUILD_LIB=ON",
+            "-DBUILD_TOOL=OFF",
+            "-DCMAKE_BUILD_TYPE=Release",
+            # The static libraries end up inside a shared object.
+            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+        ]
+
+        if self.compiler.compiler_type == "msvc":
+            # Let CMake find Visual Studio itself, and tell it which architecture the
+            # extension is being built for. Emphatically do not hand it -G Ninja here:
+            # Ninja makes CMake take the first compiler on PATH, which on the GitHub
+            # Windows runners is MinGW gcc. That produces GNU-mangled symbols in .a
+            # archives that link.exe cannot resolve against an MSVC-built par2.obj.
+            architectures = {"win-amd64": "x64", "win-arm64": "ARM64", "win32": "Win32"}
+            configure += ["-A", architectures.get(self.plat_name, "x64")]
+        elif self.usable_ninja():
+            configure += ["-G", "Ninja"]
+
+        deployment_target = os.environ.get("MACOSX_DEPLOYMENT_TARGET")
+        if sys.platform == "darwin" and deployment_target:
+            configure.append("-DCMAKE_OSX_DEPLOYMENT_TARGET=" + deployment_target)
+
+        configure += extra_args
+
+        env = self.par2_cmake_env()
+
+        log.info("==> Configuring par2: %s", " ".join(configure))
+        try:
+            subprocess.check_call(configure, env=env)
+        except subprocess.CalledProcessError:
+            # build/ survives between runs, but a CMakeCache records absolute paths to
+            # the compiler and generator. Under pip those can point into a build
+            # isolation overlay that has since been deleted, and CMake fails rather
+            # than re-detecting. Throw the cache away and configure once more.
+            if not os.path.exists(os.path.join(build_dir, "CMakeCache.txt")):
+                raise
+            log.info("==> Configure failed; discarding stale CMake cache in %s and retrying", build_dir)
+            shutil.rmtree(build_dir, ignore_errors=True)
+            subprocess.check_call(configure, env=env)
+
+        build = ["cmake", "--build", build_dir, "--config", "Release"]
+        if self.parallel:
+            build += ["--parallel", str(self.parallel)]
+        log.info("==> Building par2: %s", " ".join(build))
+        subprocess.check_call(build, env=env)
+
+    @staticmethod
+    def find_par2_library(build_dir: str, name: str) -> str:
+        """Locate one of the static libraries CMake just produced.
+
+        Where it lands depends on the generator: multi-config generators such as Visual
+        Studio add a per-config subdirectory, single-config ones do not, and the prefix
+        and suffix differ per platform. Search rather than predict.
+        """
+        candidates = []
+        for suffix in (".a", ".lib"):
+            for prefix in ("lib", ""):
+                candidates.append(prefix + name + suffix)
+
+        matches = []
+        for root, _dirs, files in os.walk(build_dir):
+            for candidate in candidates:
+                if candidate in files:
+                    matches.append(os.path.join(root, candidate))
+
+        # A multi-config generator can leave artefacts for configurations we did not
+        # ask for; take the one we built.
+        for match in matches:
+            if "Release" in match.split(os.sep):
+                return match
+        if matches:
+            return matches[0]
+
+        raise RuntimeError(
+            "par2 build did not produce %s under %s - looked for %s"
+            % (name, build_dir, ", ".join(candidates))
+        )
+
+
     def build_extension(self, ext: Extension):
         # Try to determine the architecture to build for
         machine = platform.machine().lower()
@@ -104,19 +319,27 @@ class SABCToolsBuild(build_ext):
         gcc_rvv_flags = []
         gcc_rvzbkc_flags = []
         gcc_macros = []
+        # Baseline for src/par2.cc, the glue against the CMake-built par2 libraries
+        par2_glue_flags = []
         if self.compiler.compiler_type == "msvc":
             # LTCG not enabled due to issues seen with code generation where
             # different ISA extensions are selected for specific files
             ldflags = ["/OPT:REF", "/OPT:ICF"]
             cflags = ["/O2", "/GS-", "/Gy", "/sdl-", "/Oy", "/Oi"]
             if autoconf_check(self.compiler, flag_check="/std:c++20"):
-                cflags.append("/std:c++20")
-                ext.extra_compile_args.append("/std:c++20")
+                cxx_std_flag = "/std:c++20"
             elif autoconf_check(self.compiler, flag_check="/std:c++17"):
-                cflags.append("/std:c++17")
-                ext.extra_compile_args.append("/std:c++17")
+                cxx_std_flag = "/std:c++17"
             else:
+                cxx_std_flag = None
                 log.info("==> C++17 flag not available")
+            if cxx_std_flag:
+                cflags.append(cxx_std_flag)
+                ext.extra_compile_args.append(cxx_std_flag)
+
+            # /EHsc because the glue catches par2's exceptions and distutils' MSVC
+            # defaults omit it; /utf-8 to match how the par2 libraries were compiled.
+            par2_glue_flags = ["/O2", "/GS-", "/Gy", "/Oy", "/Oi", "/utf-8", "/EHsc", "/std:c++17"]
         else:
             # TODO: consider -flto - may require some extra testing
             ldflags = ["-ldl"]  # for dlopen
@@ -132,13 +355,33 @@ class SABCToolsBuild(build_ext):
                 "-fwrapv",
             ]
             if autoconf_check(self.compiler, flag_check="-std=c++20"):
-                cflags.append("-std=c++20")
-                ext.extra_compile_args.append("-std=c++20")
+                cxx_std_flag = "-std=c++20"
             elif autoconf_check(self.compiler, flag_check="-std=c++17"):
-                cflags.append("-std=c++17")
-                ext.extra_compile_args.append("-std=c++17")
+                cxx_std_flag = "-std=c++17"
             else:
+                cxx_std_flag = None
                 log.info("==> C++17 flag not available")
+            if cxx_std_flag:
+                cflags.append(cxx_std_flag)
+                ext.extra_compile_args.append(cxx_std_flag)
+
+            # Baseline for src/par2.cc. Differs from cflags in two ways, both required:
+            #  - no -fno-exceptions, because the glue catches par2's exceptions
+            #  - pinned to C++17, matching upstream's CMAKE_CXX_STANDARD. Under C++20
+            #    libc++'s ~vector() is constexpr and gets eagerly instantiated, which
+            #    gfmat_inv.h's std::vector<Galois16RecMatrixWorker> of an incomplete
+            #    type does not survive
+            par2_glue_flags = [
+                "-Wno-unused-function",
+                "-Wno-unused-parameter",
+                "-fomit-frame-pointer",
+                "-fno-rtti",
+                "-O3",
+                "-fPIC",
+                "-fwrapv",
+                "-pthread",
+                "-std=c++17",
+            ]
 
             # Verify specific flags for ARM chips
             # macOS ARM does not need any flags, they support everything
@@ -197,6 +440,24 @@ class SABCToolsBuild(build_ext):
         srcdeps_crc_common = ["src/yencode/common.h", "src/yencode/crc_common.h", "src/yencode/crc.h"]
         srcdeps_dec_common = ["src/yencode/common.h", "src/yencode/decoder_common.h", "src/yencode/decoder.h"]
         srcdeps_enc_common = ["src/yencode/common.h", "src/yencode/encoder_common.h", "src/yencode/encoder.h"]
+
+        par2_includes, par2_libraries = self.build_par2()
+
+        # The glue has to agree with the libraries it links against on every macro that
+        # changes a layout. PARPAR_INVERT_SUPPORT in particular decides whether
+        # Galois16RecMatrix exists in gfmat_inv.h, which par2repairer.h embeds; these
+        # mirror the add_compile_definitions() in the vendored cmake/common.cmake.
+        par2_glue_group = {
+            "sources": ["src/par2.cc"],
+            "baseline": "par2_glue",
+            "include_dirs": par2_includes + ["src"],
+            "macros": [
+                ("HAVE_CONFIG_H", None),
+                ("PARPAR_ENABLE_HASHER_MD5CRC", None),
+                ("PARPAR_INVERT_SUPPORT", None),
+                ("PARPAR_SLIM_GF16", None),
+            ],
+        }
 
         # build yencode/crcutil
         output_dir = os.path.dirname(self.build_lib)
@@ -354,11 +615,17 @@ class SABCToolsBuild(build_ext):
                 ],
                 "gcc_flags": ["-Wno-unused-parameter"],
             },
+            par2_glue_group,
         ]:
+            baseline = {
+                "default": cflags,
+                "par2_glue": par2_glue_flags,
+            }[source_files.get("baseline", "default")]
+
             args = {
                 "sources": source_files["sources"],
                 "output_dir": output_dir,
-                "extra_postargs": cflags[:],
+                "extra_postargs": baseline[:],
                 "macros": gcc_macros[:],
             }
             if self.compiler.compiler_type == "msvc":
@@ -382,9 +649,10 @@ class SABCToolsBuild(build_ext):
             self.compiler.compile(**args)
             compiled_objects += self.compiler.object_filenames(source_files["sources"], output_dir=output_dir)
 
-        # attach to Extension
-        ext.extra_link_args = ldflags + compiled_objects
-        ext.depends = ["src/sabctools.h"] + compiled_objects
+        # attach to Extension. The par2 archives go last: static libraries only satisfy
+        # symbols already demanded to their left, and src/par2.o is what demands them.
+        ext.extra_link_args = ldflags + compiled_objects + par2_libraries
+        ext.depends = ["src/sabctools.h"] + compiled_objects + par2_libraries
 
         # proceed with regular Extension build
         super(SABCToolsBuild, self).build_extension(ext)

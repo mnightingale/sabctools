@@ -25,6 +25,29 @@ For more details, see the [cpython pull request](https://github.com/python/cpyth
 Uses Windows specific system calls to mark files as sparse and set the desired size.
 On other platforms the same is achieved by calling `truncate`.
 
+## par2 verification and repair
+Verifies and repairs par2 sets in-process using a vendored [par2cmdline-turbo](https://github.com/animetosho/par2cmdline-turbo),
+so callers get typed results instead of having to parse the par2 tool's output.
+
+```python
+repairer = sabctools.Par2Repairer("set.par2", extrafiles=[...], basepath="/downloads/job")
+repairer.progress_callback = lambda stage, filename, percent: ...
+repairer.load()
+repairer.verify()
+if not repairer.repair_possible:
+    shortfall = repairer.missing_block_count - repairer.recovery_block_count
+    # ...fetch that many more blocks, then feed the new files in and repair
+    # without verifying a second time:
+    repairer.load_more(["set.vol000+200.par2"])
+repairer.repair()
+```
+
+`load_more()` exists so that a repairer can be kept alive across a "not enough recovery blocks,
+go and fetch more" cycle: only the new packets are read, and the next `repair()` re-checks
+whether it now has enough blocks without repeating the verification pass.
+
+See `src/par2/VENDOR.md` for the vendored version and the local patches carried against it.
+
 ## Utility functions
 Use `sabctools.bytearray_malloc(size)` to get an `bytearray` that is uninitialized (not set to `0`'s). 
 This is much faster than the built-in `bytearray(size)` because the data inside the new `bytearray` will be whatever is present in the memory block.

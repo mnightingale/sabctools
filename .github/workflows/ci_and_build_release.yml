@@ -39,6 +39,7 @@ jobs:
           python -c "import sabctools; print('Version:', sabctools.__version__);"
           python -c "import sabctools; print('SIMD:', sabctools.simd);"
           python -c "import sabctools; print('OpenSSL linked:', sabctools.openssl_linked);"
+          python -c "import sabctools; print('par2:', sabctools.Par2Repairer);"
           pytest
 
   build_wheels:
