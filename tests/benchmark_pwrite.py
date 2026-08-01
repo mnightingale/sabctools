@@ -124,6 +124,7 @@ def run_vectored(fd: int, size: int, count: int, iterations: int, repeats: int) 
     print("\n%d x %s vectored, %d iterations x %d repeats" % (count, human(size), iterations, repeats))
 
     if WINDOWS:
+
         def loop_pwrite(_i: int) -> None:
             offset = 0
             for buffer in buffers:
@@ -135,6 +136,7 @@ def run_vectored(fd: int, size: int, count: int, iterations: int, repeats: int) 
         native = time_call(lambda i: sabctools.pwritev(fd, buffers, 0), iterations, repeats)
         print(format_row("sabctools.pwritev", native, baseline, total))
     else:
+
         def loop_pwrite(_i: int) -> None:
             offset = 0
             for buffer in buffers:
