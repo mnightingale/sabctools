@@ -103,3 +103,15 @@ For testing we use `pytest` (install via `pip install --group test`) and test ca
 pytest
 ```
 Note that tests can fail if `git` modified the line endings of data files when checking out the repository!
+
+## Benchmarking the TLS paths
+
+`tests/benchmark_tls.py` compares the CPU cost of `ssl.SSLSocket.recv_into`,
+`unlocked_ssl_recv_into` and `TLSSocket.recv_into` at several connection counts. It is not
+collected by `pytest`, run it directly from the repository root:
+```
+python tests/benchmark_tls.py
+```
+Each implementation runs in its own process, so the reported CPU per GiB belongs to that
+implementation alone. Use it to re-check the read-ahead tradeoff documented in `src/tls.cc`
+after touching the TLS code or bumping aws-lc.
