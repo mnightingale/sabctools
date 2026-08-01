@@ -52,10 +52,21 @@ def test_pwrite_offset_creates_hole(fd):
 
 
 @windows_only
-def test_pwrite_does_not_move_file_pointer(fd):
+def test_pwrite_moves_file_pointer(fd):
+    """Unlike os.pwrite, a synchronous handle has its file pointer moved to the end of the write.
+    The write position itself is still taken from the offset, never from the pointer."""
     os.lseek(fd, 5, os.SEEK_SET)
     sabctools.pwrite(fd, b"data", 100)
-    assert os.lseek(fd, 0, os.SEEK_CUR) == 5
+    assert os.lseek(fd, 0, os.SEEK_CUR) == 104
+
+
+@windows_only
+def test_pwrite_ignores_file_pointer(fd):
+    """The write must land at the given offset regardless of where the pointer is"""
+    sabctools.pwrite(fd, b"x" * 32, 0)
+    os.lseek(fd, 20, os.SEEK_SET)
+    sabctools.pwrite(fd, b"here", 4)
+    assert read_at(fd, 4, 4) == b"here"
 
 
 @windows_only
@@ -185,10 +196,11 @@ def test_pwritev_matches_sequential_pwrite(fd, tmp_path):
 
 
 @windows_only
-def test_pwritev_does_not_move_file_pointer(fd):
+def test_pwritev_moves_file_pointer(fd):
+    """As with pwrite, the pointer ends up after the last buffer written"""
     os.lseek(fd, 5, os.SEEK_SET)
     sabctools.pwritev(fd, [b"data", b"more"], 100)
-    assert os.lseek(fd, 0, os.SEEK_CUR) == 5
+    assert os.lseek(fd, 0, os.SEEK_CUR) == 108
 
 
 @windows_only

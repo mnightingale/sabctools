@@ -16,10 +16,16 @@ def crc32_xpown(n: int) -> int: ...
 def crc32_zero_unpad(crc1: int, length: int) -> int: ...
 def sparse(file: Union[IO, int], length: int) -> None: ...
 def pwrite(fd: int, buffer: ReadableBuffer, offset: int) -> int:
-    """Windows-only equivalent of os.pwrite, raises NotImplementedError elsewhere."""
+    """Windows-only equivalent of os.pwrite, raises NotImplementedError elsewhere.
+
+    Unlike os.pwrite, Windows moves the file pointer to the end of the write.
+    """
 
 def pwritev(fd: int, buffers: Sequence[ReadableBuffer], offset: int) -> int:
-    """Windows-only equivalent of os.pwritev, raises NotImplementedError elsewhere."""
+    """Windows-only equivalent of os.pwritev, raises NotImplementedError elsewhere.
+
+    Unlike os.pwritev, Windows moves the file pointer to the end of the write.
+    """
 
 def bytearray_malloc(size: int) -> bytearray: ...
 def rarfile_rar3_s2k(pwd, salt) -> tuple[bytes, bytes]: ...

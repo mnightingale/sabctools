@@ -58,8 +58,13 @@ static HANDLE handle_from_fd(int fd)
  * Write a single buffer at an absolute offset.
  *
  * WriteFile with the offset supplied in an OVERLAPPED structure is a single
- * syscall that ignores the shared file pointer, so concurrent writers to the
- * same descriptor do not need to be serialized by a lock.
+ * syscall that takes its position from the offset rather than the shared file
+ * pointer, so concurrent writers to the same descriptor do not need to be
+ * serialized by a lock.
+ *
+ * Note that on a synchronous handle Windows still moves the file pointer to the
+ * end of the write afterwards, so unlike os.pwrite this is not free of side
+ * effects for callers that also use the pointer.
  *
  * @return true on success, with `written` set; false with the Windows error raised
  */

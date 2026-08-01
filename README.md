@@ -30,8 +30,12 @@ On other platforms the same is achieved by calling `truncate`.
 Windows has no `os.pwrite`/`os.pwritev`, so callers normally fall back to `ctypes` to reach `WriteFile` with an
 `OVERLAPPED` offset. `sabctools.pwrite(fd, buffer, offset)` and `sabctools.pwritev(fd, buffers, offset)` do the same
 thing natively, avoiding the per-call `ctypes` marshalling and the `msvcrt.get_osfhandle` round trip.
-Because the offset travels with the write, it never touches the shared file pointer, so concurrent writers to the
-same descriptor do not need a lock.
+Because the offset travels with the write, the position never comes from the shared file pointer, so concurrent
+writers to the same descriptor do not need a lock.
+
+One difference from `os.pwrite`: on a synchronous handle Windows still moves the file pointer to the end of the
+write once it completes. The write position is unaffected, but code that mixes these calls with `os.write` or
+`os.lseek` on the same descriptor should not rely on the pointer staying put.
 
 Both mirror the signature and return value of their `os` counterparts, and raise `OSError` with `errno` mapped from
 the Windows error, so checks such as `errno == errno.ENOSPC` keep working. On non-Windows platforms they raise
