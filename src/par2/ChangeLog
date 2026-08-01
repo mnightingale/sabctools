@@ -1,0 +1,594 @@
+06 February 2026 Ike Devolder
+  * release: 1.1.1
+
+  Release:
+    *  #264: Version 1.1.1 (PR #267 version 1.1.1)
+  Issues:
+    * #248: When repairing a file, if there is not enough disk space, the final error message displays garbled characters. (PR  #263 fix garbled errormessage on windows)
+    * #253: Why does running par2 in the command line environment forcibly switch the code page to CP65001?
+  PRs:
+    * #261: Cleanup/std namespace search replace oops (https://github.com/Parchive/par2cmdline/pull/242#pullrequestreview-3731414581)
+    * #262: Migrate Windows unit tests to Visual C++ projects (https://github.com/Parchive/par2cmdline/pull/256#issuecomment-3827352914)
+    * #265: add .clangd file for additional editor lsp support
+    * #266: Integer definitions consistency
+
+27 Januari 2026 Ike Devolder
+  * release: 1.1.0
+
+  Release:
+    * #215: Version 1.1.0 (PR #260 Version 1.1.0)
+  Issues:
+    * #216: [1.0.0] amd64 binary tests/utf8_test included in release tarball
+    * #225: restore support for older macOS
+    * #220: BUG: : should be an illegal character only on HFS filesystems
+    * #181: Lack of thread guards in DiskFile (PR #237 Add thread guards in diskfile)
+    * #228: How can I know the default values without looking at the source code, or is --dry-run command available? (PR #238 show defaults in help output and man)
+    * #230: Consider adding manual page symlinks for par2create, par2repair and par2verify (PR #239 create symlinks for the long form manpages as well)
+    * #187: global-buffer-overflow by default in unit test (diskfile_test) (PR #240 calculate size in diskfile unittest to avoid bufferoverflow)
+    * #184: rename only repair mode (quickly skip non matching files) (PR #185 POC for a rename only mode and #243 Issue 184)
+    * #139: test failure because testdata archives preserve ownership info (PR #249 repack test tarballs with tar --owner=0 --group=0)
+    * #231: par2 create cannot handle non-ASCII directory names (e.g. ę) (PR #250 Windows unicode issues)
+    * #233: windows - rename using long path notation (PR #250 Windows unicode issues)
+    * #167: Can not create file in root path on Windows. (PR #251 diskfile CreateParentDirectory, take rootpath behaviour into account)
+    * #244: Regression in V1.0.0 for symbolic links to files. (PR #254 Fix symbolic links as primary file.)
+  PRs:
+    * #213: Strip MacOS binary
+    * #214: Add armhf Linux build
+    * #217: fix manpage typ0
+    * #218: tests/utf8_test is generated before running tests, not needed in dist
+    * #221: Replace deprecated sprintf with snprintf 
+    * #223: Remove unused code
+    * #224: Fix README not found
+    * #226: Reduce the minimum supported macOS version and add a universal macOS binary
+    * #229: Update COPYING with the latest GPL v2 license
+    * #236: Fix memory leak.
+    * #241: Build warnings
+    * #245: Cleanup unused
+    * #246: remove define of stat or _stat
+    * #247: add freebsd ci check
+    * #252: remove obsolete autoconf macro AC_HEADER_STDC
+    * #255: use native ubuntu cross building instead of gha-ubuntu-cross
+    * #257: add dependabot check for github actions updates
+    * #256: Windows integration testing
+    * #258: Bump actions/upload-artifact from 4 to 6
+    * #259: Bump actions/checkout from 4 to 6
+  Skipped:
+    * #101: properly detect openmp on *BSD
+    * #108: Trying to cross-compile with openmp support
+    * #122: How to detect wrong data files against par2 files?
+    * #115: Crashes with "std::bad_alloc" when running more than one instance
+    * #154: Par2cmdline allocation failure.
+
+30 April 2025 Ike Devolder
+  * release: 1.0.0
+  * release artifacts are all built with github actions
+    * linux static x86_64 and arm64
+    * windows x86_64 and arm64
+    * macos x86_64 and arm64 (experimental, could not test)
+  * Special thanks to everyone for waiting over 5 years for a new release
+
+  Support:
+    * #146: build fails in Cygwin
+    * #140: A potential Data Race
+    * #151: Understanding par2cmdline performance
+    * #129: Understanding The Par2 Spec and par2cmdline
+    * #163: performance with hundreds of small files
+    * #166: A better error correcting code
+    * #157: Recover impossible without a .par2 "main" file?
+    * #172: Thread count option not shown on Arm based Mac version
+    * #178: Increase block count limit 32768
+    * #112: Behaviour with insufficient read permissions
+    *  #79: Help to create a compatible implementation!
+    * #171: Flag for automatic Blocksize in commandline
+    * #121: Repair-Files created amount to size twice as high as expected from redundancy
+    * #175: New release?
+
+  Issues:
+    * #141: syntax error in tests (fixed with PR #142)
+    * #143: test failure in unit_tests on s390x, powerpc (fixed with PR #144)
+    * #145: Core dump on single letter file name (duplicate: #192, #165) (fixed with PR #149)
+    *  #41: prepare code and header files for libpar2 (e4e449f97ff0758029d73af58da66b0f33619741)
+    * #169: Windows version always recurse into subdirectories (duplicate: #173, #111) (fixed with PR #182)
+    * #193: config.guess timestamp = 2015-03-04 ... time for a newer version? (83bb2495c906660fad3a4f85a72f8ce0de05445b)
+    * #190: Cannot recover one-bit flip (duplicate #156?) (fixed with PR #179)
+    * #120: exit codes from par2 executable not documented? (improved with PR #199)
+    * #126: Problem with PACKED little-endian structs (4a4179f1e42bc11bbcc9d24554690d3bc5c31b38)
+    * #150: Recurse option (-R) does not include files in current directory (more documenation)
+    * #128: Problem with empty (0 Bytes) files. (workaround via PR #200)
+    * #152: Fail earlier during creation if the .par2 file already exists (basic check in PR #203)
+    * #113: Hang with -n=256 (limited in PR #204)
+    * #205: Could not create "./Disk 1 (a-m)/.PAR2 (Recovery Disk 1)/disk1.vol34529+00000.par2": File already exists. (6c2fa05a16bd604e54b46a5546c3acb64eb9fed4)
+    * #189: Properly handle UTF8 and long-paths on Windows (implemented by dnzbk for nzbget, rebased in PR #202)
+    * #186: It would be nice if permissions were checked eariler when creating parchive. (basic check in PR #210)
+    * #164: need option to disable following symlinks on "-R" (fixed in PR #211)
+    * #208: Version 1.0.0
+
+  PRs:
+    * #148: fix: enforce -qq silent
+    * #153: Install relative symlinks instead of absolute ones
+    * #161: Allow Creating Files With Over 100% Redundancy (new PR from #158)
+    * #162: Minor cleanup
+    * #168: fix win32 directory recursion
+    * #179: Avoid copying back memory in FileChecksummer when data is valid
+    * #177: CRC32/MD5 optimisations
+    * #182: enable Recurse flag on Windows OS
+    * #198: enable Recurse flag on Windows OS
+    * #199: add exitcodes to manfile
+    * #201: Issue 150 recursive no files from rootpath
+    * #197: Updates from turbo
+    * #200: Issue 128
+    * #203: Quick bail if the base par2 file already exists
+    * #204: Issue 113
+    * #206: github workflows
+    * #207: When number of recovery files is set, you get "File already exists"
+    * #202: Issue 189 windows utf8
+    * #209: Workflow release
+    * #210: Add simple "permissions" check while creating
+    * #211: diskfile, replace stat use with lstat
+
+  Skipped:
+    *   #7: command line flags can not be chained
+    *  #91: make use of appveyor for windows
+    * #191: Update diskfile.cpp
+    * #155: Travis-ci: added support for ppc64le
+    * #194: Avoid copying back memory in FileChecksummer when data is valid (superseeded by #202)
+    * #176: Added support for GPU acceleration (CUDA) on recovery file creation.
+
+09 February 2020 Ike Devolder
+  * release: 0.8.1
+  * Serious rework of internals by Michael Nahas
+  * Added unittests by Michael Nahas
+  * Added support for static libpar2
+
+11 December 2017 Ike Devolder
+  * release: 0.8.0
+	* improved parallelisation on input files
+
+08 September 2017 Ike Devolder
+  * release: 0.7.4
+	* performance improvement when not using quiet mode
+
+25 June 2017 Ike Devolder
+  * release: 0.7.3
+	* fixed critical issue on windows where created parfiles were corrupt
+
+03 June 2017 Ike Devolder
+	* release: 0.7.2
+	* fixed tests on NetBSD, #102
+	* fixed failing tests when dir contains whitespace, #103
+	* added automake.sh to the files, #104
+	* changed some flags related to windows build, #94
+	* cleaned up compiler warnings for mingw build
+
+19 May 2017 Ike Devolder
+	* release: 0.7.1
+	* fixed basepath issues #93
+	* made distcheck behaviour consistent with different --srcdir #96
+	* properly package distribution package #98
+	* cross compile for windows to get redistributable exe #94
+	* change distribution format to tar.gz and tar.bz2 for unix
+	  and keep zip for windows #97
+
+17 April 2017 Ike Devolder
+	* release: 0.7.0
+	* Merged OpenMP version and so enabled multithreading
+		* added -t flag to set the number of threads (all possible threads
+		  used by default)
+	* Added -B flag to set the basepath for difficult to guess situations
+	* bugfixes
+
+27 February 2014 Ike Devolder
+	* release: 0.6.5
+	* fix blocksize calculation
+
+25 February 2014 JCF Ploemen
+	* lintian warning spelling fix
+
+7 February 2014 Ike Devolder
+	* add manfile for par2
+
+29 January 2014 Jan van Haarst
+	* README in Markdown
+
+21 January 2014 Ike Devolder
+	* add spelling fixes to cmdline output
+
+18 January 2014 Jan van Haarst
+	* fixed some spelling
+
+6 January 2014 Ike Devolder
+	* simplify FindFiles
+
+4 January 2014 Ike Devolder
+	* release: 0.6.4
+	* when directory is removed, recreate
+	* add test to verify directory behaviour
+	* add test with valgrind
+
+16 December 2013 Ike Devolder
+	* allow verification of files even with duplicates in parfiles
+
+15 December 2013 Ike Devolder
+	* avoid adding of duplicates
+
+14 December 2013 Ike Devolder
+	* release: 0.6.3
+	* rework original tests so parallelisation is no issue
+	* add test8 which makes sure the paths stored are relative
+	* add test9 rename wrongly named file, passed to par2
+	  result is correctly named files after repair
+
+13 Decebmer 2013 Ike Devolder
+	* move tests in separate folder, tests will be extended
+	  and otherwise eventually clutter the source too much
+
+9 December 2013 Ike Devolder
+	* rework parfilename handling + it fixes passing par
+	  filename without extension for repair
+
+7 December 2013 Ike Devolder
+	* release: 0.6.2
+	* basepath was not set correctly in restoring of 'old' way
+
+5 December 2013 Ike Devolder
+	* release: 0.6.1
+	* show usage / version / copyright on request
+	* restore 'old' way of creating make -a optional
+
+30 November 2013 Ike Devolder
+	* release: 0.6.0
+	* test8: windows generated recovery files with subdir
+	* windows recurses in . and .. which leads to deadlock
+	  so don't recurse in folders starting with . on windows
+	* when recursion happens make sure windows can recover with
+	  unix created par2 files
+	* fixed fc -> fd typo in windows part of diskfile
+	* FTBFS fix on GNU/kFreeBSD (by Cyril Brulebois)
+	* fixed non quiet output when creating par2
+	* Applied fix preventing a stack overflow (by Robert Schneider)
+
+14 October 2013 Ike Devolder
+	* Implemented recursion
+	* NOTE: only for unix like systems
+	* Windows can be done i guess but i have no access to windows machines
+
+16 June 2013 Ike Devolder
+	* Implemented initial subdir handling
+	* added subdir tests
+
+13 June 2013 Ike Devolder
+	* Fixed failing testsuite
+
+9 December 2012 Ike Devolder
+	* rework purging of par(2) files because of possible segfaults
+		and other inconsistencies
+
+4 December 2012 Ike Devolder
+	* fix purge option so it removes the par files when there is no
+		repair needed
+	* add purge option to verify so when there is no repair needed
+		the par2 files are removed when the purge option is given
+
+30 November 2012 Ike Devolder
+	* add purge option
+		remove backup files (mostly .1) and par files on request
+		**USE AT YOUR OWN RISK
+	* purge option available in par1 and par2 repair
+	* fix memory leak when using par1 repair
+
+30 January 2012 Ike Devolder
+	* add inlining performance improvement of Gerard Putter
+	* release: 0.5.4
+
+19 January 2012 Ike Devolder
+	* fix wrongly created par2 files in quiet mode
+	  this was related to the -q -qq fix
+	* release: 0.5.3
+
+17 January 2012 Ike Devolder
+	* fix deadlock condition when repairing and filepath is longer
+		than _MAX_PATH
+	* increase _MAX_PATH, 255 is no longer of these days
+	* release: 0.5.2
+
+16 January 2012 Ike Devolder
+	* fixup 0.5 version display
+	* "par2 create" dumps core with -q or -qq, but non-quiet mode works fine
+		FIXED
+	* removed automake files
+	* updated copyrights
+	* release: 0.5.1
+
+12 December 2011 Marcel Partap
+	* Reanimate par2cmdline development on new github repository
+	* Merge available distro patches since 2004 0.4 release back upstream
+	* Release: Version 0.5 ;)
+
+3 January 2005 Peter B Clements
+
+	* par2creatorsourcefile.cpp: "offset" must be updated when computing
+	  file and block hashes even if progress is not being displayed.
+
+23 June 2004 Peter B Clements
+
+	* diskfile.cpp: Changed DiskFile::GetFileSize for WIN32
+	  so that it uses _stati64() to get the size of a file.
+
+	* par2creatorsourcefile.cpp: In UpdateHashes() the test
+	  that adjusts the length of the last block of a file when
+	  before updating the file hash was incorrect.
+
+17 June 2004 Peter B Clements
+
+	* par1repairer.cpp, par2repairer.cpp: Report empty files when
+	  scanning for data.
+
+22 April 2004 Peter B Clements
+
+	* README: Updated to include new commandline options.
+
+	* par2cmdline.vcproj: Update VS .NET project file with new
+	  version number.
+
+	* Released: Version 0.4.
+
+15 April 2004 Peter B Clements
+
+	* par2cmdline.sln, par2cmdline.vcproj: Updated.
+
+	* commandline.cpp, commandline.h, par1repairer.cpp, par1repairer.h,
+	  par2cmdline.cpp, par2cmdline.h, par2creator.cpp, par2creator.h,
+	  par2creatorsourcefile.cpp, par2creatorsourcefile.h, par2repairer.cpp,
+	  par2repairer.h, reedsolomon.h, par2cmdline.h: Handle -v and -q
+	  options from the command line to change the amount of messages displayed.
+
+14 April 2004 Peter B Clements
+
+	* commandline.h, commandline.cpp: Add -c<n> option to allow the
+	  number of recovery blocks to be directly specified rather than
+	  indirectly via the -r<n> option. Add -l option to allow the
+	  recovery file size to be limited so that the largest will have
+	  just enough recovery data to reconstruct the largest source file.
+
+	* par2creator.h, par2creator.cpp: Use the recovery block count
+	  specified via the command line instead of the redundancy % if
+	  given. Allocate the sizes of recovery files so the are limited
+	  if requested.
+
+12 April 2004 Peter B Clements
+
+	* config.h.in, configure, configure.ac: Detect what defines are
+	  required to enable 64 bit file system support and whether or
+	  not fseeko() is available.
+
+	* diskfile.cpp: Use fseeko and 64 bit file operations if they
+	  are available.
+
+	* par2cmdline.h: Change order of include files.
+
+	* par2repairer.cpp: When verifying files with long filenames,
+	  display a shorter version of the filename.
+
+	* datablock.h: Change DataBlock::GetDiskFile so that in returns
+	  a non const DiskFile.
+
+	* par2repairer.cpp, par2creator.cpp: Only keep source files open
+	  when they are actually needed. This should allow par2 creation
+	  and repair to work with large file sets on OS's with a limit
+	  on the number of files that can be open simultaneously.
+
+	* Makefile.in, aclocal.m4, config.guess, config.sub, configure,
+	  depcomp, install-sh, missing, mkinstalldirs: Updated Automake to
+	  version 1.8.3 and Autoconf to version 2.59.
+
+	* configure.ac, config.h.in, configure: Check for getopt() and
+	  getopt_long().
+
+19 August 2003 Peter B Clements
+
+	* Updated par2creator.cpp: When creating par2 files the wrong
+	  number of bytes would be reported as written to disk.
+
+13 August 2003 Peter B Clements
+
+	* Updated par2cmdline.h: Recorrected spelling of STDC_HEADERS!
+
+	* Updated par1repairersourcefile.cpp, par2repairersourcefile.cpp:
+	  Don't treat ':' as a path separator on non Windows platforms.
+
+2 August 2003 Peter B Clements
+
+	* Updated par1fileformat.h, par2fileformat.h: Use memcmp when
+	  comparing MAGIC strings and PACKETTYPE strings.
+
+	* Updated par2repairer.cpp: When a good packet is found after bad
+	  data, use memcpy to copy the packet header. Don't attempt to get
+	  the block count directly from the verification packet (which
+	  might be missing).
+
+	* Updated par2repairersourcefile.cpp: Add function to set the block
+	  count when the verification packet is missing.
+
+1 August 2003 Peter B Clements
+
+	* Updated par2cmdline.h: Included <iomanip>.
+
+31 July 2003 Peter B Clements
+
+	* Updated reedsolomon.h: Added debugging code.
+
+29 July 2003 Peter B Clements
+
+	* Updated galois.h: Use typename when refering to a typedef
+	  in another class.
+
+	* Updated par1repairer.cpp: Cast size of fileentry in memcpy.
+
+	* Updated par2repairersourcefile.h: Add function to set the block
+	  count for a file when the verification packet is missing.
+
+25 July 2003 Peter B Clements
+
+	* Updated par2cmdline.h: Correct spelling of STDC_HEADERS.
+
+16 July 2003 Peter B Clements
+
+	* Release: Version 0.3.
+
+15 July 2003 Peter B Clements
+
+	* Added config.guess, config.sub: Autoconf files.
+
+	* Updated configure, Makefile.in: Updated by Autoconf.
+
+	* Updated configure.ac: Changed par2cmdline version number. Added
+	  call to AC_CANONICAL_HOST.
+
+	* Updated par2cmdline.vcproj: Updated version number.
+
+3 July 2003 Peter B Clements
+
+	* Updated aclocal.m4, depcomp, INSTALL, install-sh,
+	  mkinstalldirs: Upgrade Autoconf to version 1.75 from 1.6.3.
+
+	* Updated Makefile.am: Changed CXXFLAGS to AM_CXXFLAGS.
+
+24 June 2003 Peter B Clements
+
+	* Updated commandline.cpp, commandline.h: Added "redundancyseet"
+	  member to record whether or not the value of "redundancy" has been
+	  specified so that 0% redundancy is permissible.
+
+	* Updated par2creator.cpp: Detect situation where no recovery
+	  blocks are being created and skip related code sections.
+
+14 June 2003 Peter B Clements
+
+	* Updated galois.h: Corrected bug in the initialisation of log[0] in
+	  GaloisTable.
+
+11 June 2003 Peter B Clements
+
+	* Updated par1repair.cpp, par1repairer.h: Detect buggy version
+	  of smartpar which creates PAR1 files with invalid 16k hash
+	  values, Change alignment of temporary buffer used for
+	  PAR1FILEENTRYs to 8 bytes.
+
+7 June 2003 Peter B Clements
+
+	* Update par2cmdline.h: Added <cassert> header include.
+
+3 June 2003 Peter B Clements
+
+	* Updated verificationhashtable.h: Fixed bug where blocks of data
+	  that have the same crc and hash would not be correctly
+	  recognised.
+
+26 May 2003 Peter B Clements
+
+	* Release: Version 0.2.
+
+	* Added config.h.in, configure, configure.ac, depcomp, missing,
+	  mkinstalldirs, stamp-h.in: Autoconf configuration files.
+	* Added NEWS
+
+	* Added par1fileformat.h, par1fileformat.cpp: Specifies the
+	  layout of PAR 1.0 files.
+
+	* Added par1repairer.h, par1repairer.cpp: Encapsulates the details
+	  of repairing using PAR 1.0 files.
+
+	* Added par1repairersourcefile.h, par1repairersourcefile.cpp:
+	  Stores details of a source file.
+
+	* Added test1, test2, test3, test4, test5, test6, testdata.tar.gz:
+	  Test files for "make check".
+
+	* Changed commandline.cpp, commandline.h: Add "version" member
+		and set it according to whether the recovery file is a .PAR file
+	  or a .PAR2 file. Rename "par2filename" member to "parfilename".
+
+	* Changed creatorpacket.cpp: Made "string creator" a local variable
+	  in CreatorPacket::Create instead of a global. Commented out code
+	  that does nothing.
+
+	* Changed criticalpacket.h: Corrected bug in
+		CriticalPacketEntry::operator= which failed to return *this.
+
+	* Changed descriptionpacket.cpp: Commented out code which does
+	  nothing.
+
+	* Changed diskfile.cpp: Updated wildcard matching code to permit
+	  multiple "?" in wildcard. Adjusted the list of characters that
+	  are accepted in filenames to include all with bit 7 set and
+	  also spaces. Removed restrictions on many other permitted
+	  characters.
+
+	* Changed diskfile.h: Removed cygwin and linux ifdefs which are
+	  now handled by autoconf.
+
+	* Changed galois.cpp: Move the constructors for GaloisTable and
+	  GaloisLongMultiplyTable to galois.h.
+
+	* Changed galois.h: Changed GaloisTable, Galois, and
+	  GaloisLongMultipleTable into templates. Corrected bug in
+	  Galois::pow and Galois::operator^ which incorrectly returned 0
+	  for x^0 when it should always return 1. Added Galois8 and
+	  Galois16 typedefs for PAR1 and PAR2.
+
+	* Changed letype.h: Added leu16 type for use in PAR1 processing.
+
+	* Changed mainpacket.cpp: Commented out code which does nothing.
+
+	* Changed md5.cpp: Adjusted ROL macro to include masking to correct
+	  for bug on Alpha CPUs. Added operator<<() and print() to MD5Hash.
+
+	* Changed md5.h: Added copy and assignment operators for MD5Hash.
+
+	* Changed par2cmdline.cpp: Made "string version" a local variable
+	  instead of global. Use Par1Repairer or Par2Repaire as appropriate
+	  when verifying or repairing PAR1 and PAR2 files.
+
+	* Changed par2cmdline.h: Adjusted to conditionally include headers
+	  and to define various types based on the autoconf configuration.
+
+	* Changed par2cmdline.sln, par2cmdline.vcproj: Updated.
+
+	* Changed par2creator.cpp: Called Commandline::GetParFilename instead
+	  of CommandLine::GetPar2Filename.
+
+	* Changed par2creator.h: Redifine rs as ReedSolomon<Galois16>.
+
+	* Changed par2creatorsourcefile.cpp: Comment out code which does
+	  nothing. Added typecasts between 32bit and 64bit values.
+
+	* Changed par2fileformat.cpp: Adjusted initialisation code.
+
+	* Changed par2fileformat.h: Use packed attribute for gnu compilers.
+
+	* Changed par2repairer.cpp: Get filename using
+	  CommandLine::GetParFilename.
+
+	* Changed par2repairer.h: Redefine rs as ReedSolomon<Galois16>.
+
+	* Changed par2repairersourcefile: Add typecast from 32bit to 64bit.
+
+	* Changed README: Update details of how to compile the source code
+	  using the configure script.
+
+	* Changed recoverypacket.cpp: Commented out code which does nothing.
+
+	* Changed ReedSolomon.cpp: Move ReedSolomon constructor to
+	  ReedSolomon.h. Created template specialisations for Galois8 and
+	  Galois16 for SetInput, SetOutput, and Process.
+
+	* Changed ReedSolomon.h: Converted ReedSolomon to a template.
+
+	* Changed verificationhashtable.cpp: Removed unused code.
+
+	* Changed verificationpacket.cpp: Commented out code that does
+	  nothing.
+
+7 May 2003 Peter B Clements
+
+	* Version 0.1: Initial release.
