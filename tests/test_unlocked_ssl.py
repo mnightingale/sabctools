@@ -160,7 +160,7 @@ class EchoServer(threading.Thread):
                     self.running = False
                     self.server.stop()
 
-    def __init__(self):
+    def __init__(self, certificate: str = cert, private_key: str = key):
         self.host = HOST
         self.port = portend.find_available_local_port()
         self.flag = None
@@ -170,13 +170,13 @@ class EchoServer(threading.Thread):
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             self.certfile = tmp.name
             with open(self.certfile, "w") as f:
-                f.write(cert)
+                f.write(certificate)
                 f.close()
 
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             self.keyfile = tmp.name
             with open(self.keyfile, "w") as f:
-                f.write(key)
+                f.write(private_key)
                 f.close()
 
         self.context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)

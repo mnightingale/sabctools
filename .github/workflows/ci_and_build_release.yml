@@ -27,6 +27,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - uses: actions/setup-python@v7
         name: Install Python
         with:
@@ -39,6 +41,7 @@ jobs:
           python -c "import sabctools; print('Version:', sabctools.__version__);"
           python -c "import sabctools; print('SIMD:', sabctools.simd);"
           python -c "import sabctools; print('OpenSSL linked:', sabctools.openssl_linked);"
+          python -c "import sabctools; print('aws-lc:', sabctools.aws_lc_linked, sabctools.aws_lc_version);"
           pytest
 
   build_wheels:
@@ -59,6 +62,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.1
       - name: Upload wheel artifacts

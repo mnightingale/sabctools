@@ -19,10 +19,11 @@ import os
 import sys
 import platform
 import re
+import subprocess
 import tempfile
 import shutil
 import logging
-from typing import Type
+from typing import Type, Optional
 from contextlib import closing, ExitStack
 
 from setuptools import setup, Extension
@@ -83,6 +84,132 @@ def autoconf_check(
     return True
 
 
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+AWSLC_SOURCE_DIR = os.path.join(ROOT_DIR, "third_party", "aws-lc")
+
+
+def aws_lc_enabled() -> bool:
+    """aws-lc is opt-out, so packagers that cannot ship vendored crypto can disable it"""
+    return os.environ.get("SABCTOOLS_AWSLC", "1").lower() not in ("0", "false", "no", "off")
+
+
+def macos_target_archs() -> list:
+    """cibuildwheel signals the wanted architectures through ARCHFLAGS, as does a manual
+    "ARCHFLAGS=-arch arm64 -arch x86_64 pip wheel ." invocation"""
+    archs = re.findall(r"-arch\s+(\S+)", os.environ.get("ARCHFLAGS", ""))
+    if not archs:
+        archs = [platform.machine()]
+    # Preserve order but drop duplicates
+    return list(dict.fromkeys(archs))
+
+
+def run_command(args: list):
+    log.info("==> %s", " ".join(args))
+    subprocess.run(args, check=True)
+
+
+def build_aws_lc_single(build_dir: str, arch: Optional[str] = None) -> tuple:
+    """Configure and build a static libssl/libcrypto for a single architecture.
+    Returns the (libssl, libcrypto) paths."""
+    configure = [
+        "cmake",
+        "-S",
+        AWSLC_SOURCE_DIR,
+        "-B",
+        build_dir,
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DBUILD_SHARED_LIBS=OFF",
+        "-DBUILD_LIBSSL=ON",
+        # We only need the libraries, not the bssl tool or the (Go-based) test suite
+        "-DBUILD_TESTING=OFF",
+        "-DBUILD_TOOL=OFF",
+        # Fall back to the checked-in generated-src/, so no Go or Perl is needed to build
+        "-DDISABLE_GO=ON",
+        "-DDISABLE_PERL=ON",
+        # Required, we link the result into a shared object
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+    ]
+
+    if sys.platform == "darwin":
+        # aws-lc only supports one architecture per build, the caller lipo's them together
+        configure.append("-DCMAKE_OSX_ARCHITECTURES=%s" % arch)
+        if deployment_target := os.environ.get("MACOSX_DEPLOYMENT_TARGET"):
+            configure.append("-DCMAKE_OSX_DEPLOYMENT_TARGET=%s" % deployment_target)
+    elif sys.platform == "win32":
+        # Match the /MD that CPython extensions are built with
+        configure.append("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL")
+        # Without an assembler aws-lc still builds, it just uses the slower C code
+        assembler = "armasm64" if platform.machine().lower() in ("arm64", "aarch64") else "nasm"
+        if not shutil.which(assembler):
+            log.info("==> %s not found, building aws-lc without assembly", assembler)
+            configure.append("-DOPENSSL_NO_ASM=ON")
+
+    run_command(configure)
+    run_command(["cmake", "--build", build_dir, "--config", "Release", "--target", "ssl", "crypto", "--parallel"])
+
+    if sys.platform == "win32":
+        # Single-config generators drop the libraries directly in the target directory,
+        # multi-config generators (Visual Studio) add a per-configuration subdirectory
+        candidates = [
+            (os.path.join(build_dir, "ssl", "ssl.lib"), os.path.join(build_dir, "crypto", "crypto.lib")),
+            (
+                os.path.join(build_dir, "ssl", "Release", "ssl.lib"),
+                os.path.join(build_dir, "crypto", "Release", "crypto.lib"),
+            ),
+        ]
+    else:
+        candidates = [(os.path.join(build_dir, "ssl", "libssl.a"), os.path.join(build_dir, "crypto", "libcrypto.a"))]
+
+    for libssl, libcrypto in candidates:
+        if os.path.exists(libssl) and os.path.exists(libcrypto):
+            return libssl, libcrypto
+
+    raise RuntimeError("aws-lc built without error, but no static libraries were produced in %s" % build_dir)
+
+
+def build_aws_lc(build_temp: str) -> Optional[list]:
+    """Build the vendored aws-lc and return the static libraries to link against,
+    or None when it is unavailable. Never raises: without aws-lc the module still
+    builds, it just falls back to unlocked_ssl_recv_into."""
+    if not aws_lc_enabled():
+        log.info("==> SABCTOOLS_AWSLC is disabled, skipping aws-lc")
+        return None
+
+    if not os.path.exists(os.path.join(AWSLC_SOURCE_DIR, "CMakeLists.txt")):
+        log.warning(
+            "==> %s is empty, run 'git submodule update --init --recursive' to enable the aws-lc TLS support",
+            AWSLC_SOURCE_DIR,
+        )
+        return None
+
+    if not shutil.which("cmake"):
+        log.warning("==> cmake not found, building without aws-lc TLS support")
+        return None
+
+    try:
+        awslc_root = os.path.join(os.path.abspath(build_temp), "aws-lc")
+        if sys.platform == "darwin":
+            archs = macos_target_archs()
+        else:
+            archs = [None]
+
+        libraries = [build_aws_lc_single(os.path.join(awslc_root, arch or "native"), arch) for arch in archs]
+
+        if len(libraries) == 1:
+            return list(libraries[0])
+
+        # Fuse the per-architecture builds into universal static libraries
+        universal = []
+        for index, name in enumerate(("libssl.a", "libcrypto.a")):
+            output = os.path.join(awslc_root, name)
+            run_command(["lipo", "-create", "-output", output] + [library[index] for library in libraries])
+            universal.append(output)
+        return universal
+    except Exception as error:
+        log.warning("==> Failed to build aws-lc (%s), building without aws-lc TLS support", error)
+        return None
+
+
 class SABCToolsBuild(build_ext):
     def build_extension(self, ext: Extension):
         # Try to determine the architecture to build for
@@ -93,6 +220,11 @@ class SABCToolsBuild(build_ext):
         IS_AARCH64 = True
 
         log.info("==> Baseline detection: ARM=%s, x86=%s, macOS=%s", IS_ARM, IS_X86, IS_MACOS)
+
+        # Build the vendored aws-lc that backs the TLSContext/TLSSocket types.
+        # Returns None when unavailable, in which case only the OpenSSL-hooking
+        # unlocked_ssl_recv_into is compiled in.
+        aws_lc_libraries = build_aws_lc(self.build_temp)
 
         # Determine compiler flags
         gcc_arm_neon_flags = []
@@ -201,7 +333,7 @@ class SABCToolsBuild(build_ext):
         # build yencode/crcutil
         output_dir = os.path.dirname(self.build_lib)
         compiled_objects = []
-        for source_files in [
+        source_groups = [
             {
                 "sources": [
                     "src/yencode/platform.cc",
@@ -354,7 +486,23 @@ class SABCToolsBuild(build_ext):
                 ],
                 "gcc_flags": ["-Wno-unused-parameter"],
             },
-        ]:
+        ]
+
+        if aws_lc_libraries:
+            ext.define_macros.append(("SABCTOOLS_AWS_LC", "1"))
+            gcc_macros.append(("SABCTOOLS_AWS_LC", "1"))
+            source_groups.append(
+                {
+                    "sources": [
+                        "src/tls.cc",
+                    ],
+                    "gcc_flags": ["-Wno-unused-parameter", "-Wno-missing-field-initializers"],
+                    "include_dirs": [os.path.join(AWSLC_SOURCE_DIR, "include")],
+                    "msvc_libraries": ["ws2_32", "advapi32", "crypt32", "user32", "bcrypt"],
+                }
+            )
+
+        for source_files in source_groups:
             args = {
                 "sources": source_files["sources"],
                 "output_dir": output_dir,
@@ -383,7 +531,14 @@ class SABCToolsBuild(build_ext):
             compiled_objects += self.compiler.object_filenames(source_files["sources"], output_dir=output_dir)
 
         # attach to Extension
-        ext.extra_link_args = ldflags + compiled_objects
+        if aws_lc_libraries and sys.platform.startswith("linux"):
+            # Keep the aws-lc symbols out of the dynamic symbol table, so they can never collide
+            # with the OpenSSL that CPython's own _ssl module is linked against. macOS does not
+            # need this as it uses two-level namespaces, and static libraries do not export on Windows.
+            ldflags.append("-Wl,--exclude-libs,ALL")
+
+        # The static libraries have to follow the objects that reference them
+        ext.extra_link_args = ldflags + compiled_objects + (aws_lc_libraries or [])
         ext.depends = ["src/sabctools.h"] + compiled_objects
 
         # proceed with regular Extension build

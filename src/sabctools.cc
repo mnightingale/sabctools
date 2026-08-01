@@ -19,6 +19,7 @@
 #include "sabctools.h"
 #include "yenc.h"
 #include "unlocked_ssl.h"
+#include "tls.h"
 #include "crc32.h"
 #include "sparse.h"
 #include "utils.h"
@@ -152,6 +153,18 @@ PyMODINIT_FUNC PyInit_sabctools(void) {
     PyObject *openssl_linked_object = openssl_linked() ? Py_True : Py_False;
     Py_INCREF(openssl_linked_object);
     PyModule_AddObject(m, "openssl_linked", openssl_linked_object);
+
+    // Add the aws-lc backed TLSContext/TLSSocket, when they were built in
+#ifdef SABCTOOLS_AWS_LC
+    if (!tls_init(m)) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    PyModule_AddObject(m, "aws_lc_linked", Py_NewRef(Py_True));
+#else
+    PyModule_AddObject(m, "aws_lc_linked", Py_NewRef(Py_False));
+    PyModule_AddObject(m, "aws_lc_version", Py_NewRef(Py_None));
+#endif
 
     return m;
 }

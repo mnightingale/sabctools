@@ -5,6 +5,7 @@ SABCTools - C implementations of functions for use within SABnzbd
 This module implements three main sets of C implementations that are used within SABnzbd: 
 * yEnc decoding and encoding using SIMD routines
 * CRC32 calculations
+* TLS connections that do not hold the GIL
 * Non-blocking SSL-socket reading
 * Marking files as sparse
 
@@ -17,9 +18,30 @@ which utilizes x86/ARM SIMD optimised routines if such CPU features are availabl
 ## CRC32 calculations
 We used the `crcutil` library for very fast CRC calculations.
 
+## TLS connections that do not hold the GIL
+`sabctools.TLSContext` and `sabctools.TLSSocket` implement a TLS client on top of a statically linked
+[aws-lc](https://github.com/aws/aws-lc), covering the part of `ssl.SSLSocket` that a download path needs.
+Because the `SSL` object belongs to us, a single `recv_into()` drains as many TLS records as fit in the
+buffer without ever reacquiring the GIL, `send()` does the same in the other direction, and sessions are
+resumed across reconnects. It depends on no CPython internals.
+
+```python
+import socket, sabctools
+
+context = sabctools.TLSContext(ca_certs=sabctools.collect_ca_certs())
+sock = socket.create_connection(("news.example.org", 563), timeout=60)
+tls = context.wrap_socket(sock, server_hostname="news.example.org")
+tls.setblocking(False)
+```
+
+`collect_ca_certs()` gathers the platform's trust store as a PEM blob, using the same sources the `ssl`
+module does, so locally installed roots keep working.
+
 ## Non-blocking SSL-socket reading
 When Python reads data from a non-blocking SSL socket, it is limited to receiving 16K data at once. This module implements a patched version that can read as much data is available at once.
 For more details, see the [cpython pull request](https://github.com/python/cpython/pull/31492).
+
+This predates the `TLSSocket` above and remains as the fallback for builds without aws-lc.
 
 ## Marking files as sparse
 Uses Windows specific system calls to mark files as sparse and set the desired size.
@@ -40,11 +62,18 @@ pip install sabctools --upgrade
 ```
 When you want to compile from sources, you can run in the `sabctools` directory:
 ```
+git submodule update --init --recursive
 pip install .
 ```
 
 > [!NOTE]
 > You need a compiler that supports at least C++17 to compile the extension.
+
+The `third_party/aws-lc` submodule backs `TLSContext`/`TLSSocket` and is built with CMake as part of
+`pip install`. It needs neither Go nor Perl, and NASM only for the Windows x86_64 assembly. It is not
+part of the source distribution because of its size, so an sdist install builds without it. Set
+`SABCTOOLS_AWSLC=0` to skip it deliberately. Either way the module still builds and
+`unlocked_ssl_recv_into` remains available, only `sabctools.aws_lc_linked` becomes `False`.
 
 ## SIMD detection
 
@@ -58,6 +87,13 @@ python -c "import sabctools; print(sabctools.simd);"
 To see if we could link to OpenSSL library on your system, run:
 ```
 python -c "import sabctools; print(sabctools.openssl_linked);"
+```
+
+## aws-lc detection
+
+To see whether the TLS support was built in, run:
+```
+python -c "import sabctools; print(sabctools.aws_lc_linked, sabctools.aws_lc_version);"
 ```
 
 # Testing

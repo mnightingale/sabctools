@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=77.0.0", "wheel"]
+# cmake and ninja build the vendored aws-lc. Taking them from PyPI keeps the build
+# self-contained on every platform, instead of relying on the system package manager.
+requires = ["setuptools>=77.0.0", "wheel", "cmake>=3.20", "ninja"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -60,6 +62,9 @@ archs = ["native"]
 build = "cp314-*"
 # Skip wheel repair: SABnzbd already bundles the required runtime DLLs
 repair-wheel-command = ""
+# aws-lc needs NASM for the x86_64 assembly, without it the build falls back to
+# the (slower) pure C implementations
+before-all = "choco install nasm -y --no-progress || exit 0"
 
 [tool.setuptools]
 packages = ["sabctools"]

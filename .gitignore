@@ -66,3 +66,7 @@ __pycache__
 
 # PyCharm project files
 .idea/
+
+# Compiled extension from an in-place build
+*.so
+*.pyd

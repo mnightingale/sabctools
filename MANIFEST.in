@@ -1,1 +1,7 @@
 recursive-include src *
+
+# The vendored aws-lc is deliberately left out of the source distribution: it is
+# several hundred megabytes and the build degrades gracefully without it, falling
+# back to unlocked_ssl_recv_into. Clone the repository with its submodules to
+# build the TLS support from source.
+prune third_party
