@@ -32,6 +32,23 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # Without a ninja on PATH, scikit-build-core pulls the ninja wheel into a
+      # pip build-isolation directory that is deleted afterwards - and a cached
+      # build tree would then point CMake at a /tmp/build-env-*/bin/ninja that
+      # no longer exists. Install it where the path is stable for the life of
+      # the runner image, which is what the cache key is pinned to. Windows
+      # needs none: it builds with the Visual Studio generator.
+      - name: Install build tools
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install ninja
+          else
+            sudo apt-get install -y ninja-build
+          fi
+          command -v ninja && ninja --version
+
       # Keyed per Python version: the build tree records the interpreter it was
       # configured against, so trees cannot be shared between them.
       - uses: ./.github/actions/build-cache
@@ -69,25 +86,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # One tree per wheel tag, so every Python version in the matrix gets its
-      # own - all of them restored and saved together as build/.
-      - uses: ./.github/actions/build-cache
-        with:
-          scope: wheels
-
+      # Deliberately not cached. These wheels are what gets published, and a
+      # restored build tree is not content-addressed - a stale one can be wrong
+      # rather than merely unhelpful. A fresh checkout has no build/, so every
+      # wheel is built from scratch. The ci job above carries the cache instead,
+      # where a bad restore costs a failed test run and nothing more.
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.1
-        env:
-          # cibuildwheel *copies* the project into the container rather than
-          # mounting it, so a build tree written under /project is thrown away
-          # with the container. Bind-mount a directory instead and send the
-          # build there, or nothing survives to be saved. Both containers -
-          # manylinux and musllinux - write into this same directory, under
-          # their own wheel tags.
-          CIBW_CONTAINER_ENGINE: 'docker; create_args: --volume=${{ github.workspace }}/build:/host-build'
-          CIBW_ENVIRONMENT_LINUX: SKBUILD_BUILD_DIR=/host-build/{wheel_tag}
-          # macOS and Windows build on the host, where the build-dir setting in
-          # pyproject.toml already puts the tree in ./build.
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v7.0.1
