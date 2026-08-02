@@ -114,6 +114,14 @@ class Par2Repairer:
     unwind through par2 and are reported via sys.unraisablehook.
     """
 
+    file_done_callback: Optional[Callable[[str, int, int], None]]
+    """Called as (filename, blocks_found, blocks_total) once per scanned file.
+
+    blocks_found > 0 means that file contributed data to the repair, which is the only
+    way to tell that joinable .001/.002 parts were consumed - par2 never reports those
+    as source files. Same threading rules as progress_callback.
+    """
+
     missing_block_count: int
     """Blocks that need reconstructing"""
     available_block_count: int
