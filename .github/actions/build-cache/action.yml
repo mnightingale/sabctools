@@ -12,6 +12,11 @@ description: >
   changes to our own src/*.cc are deliberately not in the key; sorting those out
   is what a build tree is good at.
 
+  Used by the test job only. The wheels that get published are always built from
+  a clean tree, where the same staleness would be a far worse trade. Callers must
+  also ensure the build tools live at stable paths - a tree that records a ninja
+  inside a pip build-isolation directory is broken as soon as that is cleaned up.
+
 inputs:
   scope:
     description: Which kind of job this is, to keep unrelated caches apart.
@@ -33,9 +38,8 @@ runs:
         # carries what a workflow itself defined. It changes whenever the
         # hosted image does, which is when the host compilers move.
         echo "image=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
-        # Must exist before the container starts: it is the source of a bind
-        # mount for Linux wheel builds, and Docker would otherwise create it
-        # owned by root. Also stops actions/cache warning when nothing ran.
+        # Stops actions/cache warning about a missing path when the build has
+        # not run yet, on the very first use.
         mkdir -p build
 
     - name: Restore build cache
