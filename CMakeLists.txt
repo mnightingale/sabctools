@@ -261,6 +261,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Nothing here uses C++20 modules, so scanning every translation unit for them
+# is wasted work - and with GCC it adds -fmodules-ts -fdeps-format=p1689r5,
+# which ccache cannot parse ("to generate dependencies you must specify either
+# -M or -MM"). CMake only turns scanning on for C++20 and above, which is why
+# this bites our own sources but not the C++17 glue or the vendored trees.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 # ---------------------------------------------------------------------------
 # The extension
 # ---------------------------------------------------------------------------
