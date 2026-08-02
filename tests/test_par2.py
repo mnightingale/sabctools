@@ -200,6 +200,90 @@ class TestPar2Repair:
         assert rep.repair() == sabctools.Par2Result.REPAIR_NOT_POSSIBLE
 
 
+class TestPar2LoadMore:
+    """Adding recovery blocks to a live repairer, the 'fetch more blocks' path.
+
+    par2 finds sibling rec.vol*.par2 files by name during load(), so these tests stage
+    the volume file only after loading to keep it out of the initial set.
+    """
+
+    @staticmethod
+    def without_volumes(par2set):
+        volumes = [f for f in os.listdir(par2set) if "vol" in f]
+        held = {}
+        for name in volumes:
+            path = os.path.join(par2set, name)
+            with open(path, "rb") as f:
+                held[name] = f.read()
+            os.remove(path)
+        return held
+
+    def test_more_blocks_make_repair_possible(self, par2set, digests):
+        held = self.without_volumes(par2set)
+        os.remove(os.path.join(par2set, "gamma.bin"))
+
+        rep = repairer(par2set)
+        assert rep.load() == sabctools.Par2Result.SUCCESS
+        assert rep.recovery_block_count == 0
+        assert rep.verify() == sabctools.Par2Result.REPAIR_NOT_POSSIBLE
+        assert not rep.repair_possible
+        assert rep.missing_block_count == 320
+
+        # SABnzbd would have fetched these in the meantime
+        restored = []
+        for name, data in held.items():
+            path = os.path.join(par2set, name)
+            with open(path, "wb") as f:
+                f.write(data)
+            restored.append(path)
+
+        assert rep.load_more(restored) == RECOVERY_BLOCKS
+        assert rep.repair_possible
+        assert rep.repair() == sabctools.Par2Result.SUCCESS
+        assert md5(os.path.join(par2set, "gamma.bin")) == digests["gamma.bin"]
+
+    def test_repair_after_load_more_does_not_reverify(self, par2set):
+        held = self.without_volumes(par2set)
+        os.remove(os.path.join(par2set, "gamma.bin"))
+
+        rep = repairer(par2set)
+        rep.load()
+        rep.verify()
+
+        restored = []
+        for name, data in held.items():
+            path = os.path.join(par2set, name)
+            with open(path, "wb") as f:
+                f.write(data)
+            restored.append(path)
+        rep.load_more(restored)
+
+        # Only watch the repair; a re-verify would show up as "verifying" events
+        stages = []
+        rep.progress_callback = lambda stage, filename, percent: stages.append(stage)
+        assert rep.repair() == sabctools.Par2Result.SUCCESS
+        assert "verifying" not in stages
+        assert "repairing" in stages
+
+    def test_load_more_before_load_is_rejected(self, par2set):
+        rep = repairer(par2set)
+        with pytest.raises(RuntimeError):
+            rep.load_more([])
+
+    def test_load_more_is_idempotent(self, par2set):
+        rep = repairer(par2set)
+        rep.load()
+        before = rep.recovery_block_count
+        # Already pulled in by load(); loading it again must not double-count
+        assert rep.load_more([os.path.join(par2set, "rec.vol000+576.par2")]) == before
+
+    def test_load_more_rejects_a_missing_file(self, par2set):
+        rep = repairer(par2set)
+        rep.load()
+        with pytest.raises(sabctools.Par2Error):
+            rep.load_more([os.path.join(par2set, "does-not-exist.par2")])
+
+
 class TestPar2Renames:
     def test_obfuscated_file_is_matched(self, par2set):
         obfuscated = os.path.join(par2set, "abc123def456ghi789.tmp")
