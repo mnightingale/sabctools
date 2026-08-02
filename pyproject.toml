@@ -1,8 +1,8 @@
 [build-system]
-# cmake and ninja build the vendored par2cmdline-turbo and rapidyenc;
-# see src/par2/VENDOR.md and src/rapidyenc/VENDOR.md
-requires = ["setuptools>=77.0.0", "wheel", "cmake>=3.13", "ninja; sys_platform != 'win32'"]
-build-backend = "setuptools.build_meta"
+# The whole build is CMake now - the extension itself plus the vendored
+# par2cmdline-turbo and rapidyenc; see src/par2/VENDOR.md and src/rapidyenc/VENDOR.md
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "sabctools"
@@ -63,7 +63,17 @@ build = "cp314-*"
 # Skip wheel repair: SABnzbd already bundles the required runtime DLLs
 repair-wheel-command = ""
 
-[tool.setuptools]
-packages = ["sabctools"]
-package-dir = {"sabctools" = "src"}
-include-package-data = false
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.15"
+# Keep the CMake cache between builds, so an incremental rebuild does not
+# reconfigure and recompile the vendored trees from scratch.
+build-dir = "build/{wheel_tag}"
+# CMakeLists.txt installs the package files explicitly; src/ is mostly C++.
+wheel.packages = []
+
+# The version is defined once, in the C sources
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "src/sabctools.h"
+regex = '#define SABCTOOLS_VERSION +"(?P<value>[0-9xA-Z_.]+)"'
