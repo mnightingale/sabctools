@@ -1,0 +1,51 @@
+name: Build cache
+description: >
+  Cache the CMake build tree, so the vendored par2 and rapidyenc trees are not
+  reconfigured and recompiled from scratch on every run. Those are some 130
+  source files, plus configure-time ISA probes that compile a test program per
+  candidate flag - none of which changes unless the vendored trees do.
+
+  Unlike a compiler cache, a build tree is not content-addressed: a stale one can
+  be wrong rather than merely unhelpful. The key is therefore exact-match only,
+  with no restore-keys, and covers everything that decides what gets built - the
+  vendored sources, the CMake files, the toolchain and the runner image. Ordinary
+  changes to our own src/*.cc are deliberately not in the key; sorting those out
+  is what a build tree is good at.
+
+inputs:
+  scope:
+    description: Which kind of job this is, to keep unrelated caches apart.
+    required: true
+  variant:
+    description: Extra key component, such as a Python version.
+    required: false
+    default: none
+
+runs:
+  using: composite
+  steps:
+    - name: Identify toolchain
+      id: toolchain
+      shell: bash
+      run: |
+        # ImageVersion is a process environment variable set by the runner
+        # image, so it has to be read in a shell - the ${{ env }} context only
+        # carries what a workflow itself defined. It changes whenever the
+        # hosted image does, which is when the host compilers move.
+        echo "image=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+        # Must exist before the container starts: it is the source of a bind
+        # mount for Linux wheel builds, and Docker would otherwise create it
+        # owned by root. Also stops actions/cache warning when nothing ran.
+        mkdir -p build
+
+    - name: Restore build cache
+      uses: actions/cache@v6
+      with:
+        path: build
+        # No restore-keys: a near-miss is precisely the case that would hand
+        # CMake a tree built from different sources or a different compiler. The
+        # workflow file is in the hash because it pins the cibuildwheel version,
+        # and with it the container image the Linux wheels are compiled in.
+        key: >-
+          build-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.variant }}-${{ steps.toolchain.outputs.image }}-${{
+          hashFiles('CMakeLists.txt', 'pyproject.toml', 'src/par2/**', 'src/rapidyenc/**', '.github/workflows/**', '.github/actions/**') }}

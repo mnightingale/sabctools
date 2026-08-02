@@ -32,9 +32,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # Pays off across the matrix rather than within a job: every Python
-      # version here compiles the vendored sources to the same objects.
-      - uses: ./.github/actions/compiler-cache
+      # Keyed per Python version: the build tree records the interpreter it was
+      # configured against, so trees cannot be shared between them.
+      - uses: ./.github/actions/build-cache
         with:
           scope: ci
           variant: ${{ matrix.python-version }}
@@ -68,33 +68,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Here the same objects get rebuilt for every Python version in a single
-      # job - five times over on Linux.
-      - uses: ./.github/actions/compiler-cache
+      # One tree per wheel tag, so every Python version in the matrix gets its
+      # own - all of them restored and saved together as build/.
+      - uses: ./.github/actions/build-cache
         with:
           scope: wheels
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.1
         env:
-          # Linux wheels build in a container, which has neither ccache nor the
-          # environment set up above. Failing to install one only costs us the
-          # cache, so it must not fail the wheel.
-          CIBW_BEFORE_ALL_LINUX: >
-            dnf install -y ccache || yum install -y ccache || apk add ccache || true
           # cibuildwheel *copies* the project into the container rather than
-          # mounting it, so anything written under /project is thrown away with
-          # the container. Bind-mount the cache directory explicitly, or it
-          # never survives to be saved. Note each container - manylinux and
-          # musllinux - is a fresh one, so both read and write this same store.
-          CIBW_CONTAINER_ENGINE: 'docker; create_args: --volume=${{ github.workspace }}/.ccache:/host-ccache'
-          # The container runs as root, so relax the mode on what it writes -
-          # actions/cache then reads it back as the (unprivileged) runner user.
-          CIBW_ENVIRONMENT_LINUX: CCACHE_DIR=/host-ccache CCACHE_MAXSIZE=500M CCACHE_UMASK=000
-          # macOS wheels build on the host, but pass the settings in rather than
-          # trusting them to be inherited - if they were not, ccache would
-          # quietly use ~/.ccache and nothing would ever be saved.
-          CIBW_ENVIRONMENT_MACOS: CCACHE_DIR=$CCACHE_DIR CCACHE_MAXSIZE=$CCACHE_MAXSIZE
+          # mounting it, so a build tree written under /project is thrown away
+          # with the container. Bind-mount a directory instead and send the
+          # build there, or nothing survives to be saved. Both containers -
+          # manylinux and musllinux - write into this same directory, under
+          # their own wheel tags.
+          CIBW_CONTAINER_ENGINE: 'docker; create_args: --volume=${{ github.workspace }}/build:/host-build'
+          CIBW_ENVIRONMENT_LINUX: SKBUILD_BUILD_DIR=/host-build/{wheel_tag}
+          # macOS and Windows build on the host, where the build-dir setting in
+          # pyproject.toml already puts the tree in ./build.
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v7.0.1
