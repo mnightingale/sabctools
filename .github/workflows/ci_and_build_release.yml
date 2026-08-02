@@ -82,9 +82,15 @@ jobs:
           # cache, so it must not fail the wheel.
           CIBW_BEFORE_ALL_LINUX: >
             dnf install -y ccache || yum install -y ccache || apk add ccache || true
-          # /project is where cibuildwheel mounts the checkout, so the cache ends
-          # up back in the workspace for actions/cache to save.
-          CIBW_ENVIRONMENT_LINUX: CCACHE_DIR=/project/.ccache CCACHE_MAXSIZE=500M
+          # cibuildwheel *copies* the project into the container rather than
+          # mounting it, so anything written under /project is thrown away with
+          # the container. Bind-mount the cache directory explicitly, or it
+          # never survives to be saved. Note each container - manylinux and
+          # musllinux - is a fresh one, so both read and write this same store.
+          CIBW_CONTAINER_ENGINE: 'docker; create_args: --volume=${{ github.workspace }}/.ccache:/host-ccache'
+          # The container runs as root, so relax the mode on what it writes -
+          # actions/cache then reads it back as the (unprivileged) runner user.
+          CIBW_ENVIRONMENT_LINUX: CCACHE_DIR=/host-ccache CCACHE_MAXSIZE=500M CCACHE_UMASK=000
           # macOS wheels build on the host, but pass the settings in rather than
           # trusting them to be inherited - if they were not, ccache would
           # quietly use ~/.ccache and nothing would ever be saved.

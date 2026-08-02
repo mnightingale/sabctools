@@ -30,6 +30,10 @@ runs:
       run: |
         echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> "$GITHUB_ENV"
         echo "CCACHE_MAXSIZE=500M" >> "$GITHUB_ENV"
+        # Create it up front: it is the source of a bind mount for container
+        # builds (Docker would otherwise invent it, owned by root), and it stops
+        # actions/cache warning that the path does not exist when nothing ran.
+        mkdir -p "${{ github.workspace }}/.ccache"
 
     - name: Restore compiler cache
       if: runner.os != 'Windows'
