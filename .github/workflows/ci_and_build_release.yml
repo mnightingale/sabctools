@@ -31,6 +31,14 @@ jobs:
         name: Install Python
         with:
           python-version: ${{ matrix.python-version }}
+
+      # Pays off across the matrix rather than within a job: every Python
+      # version here compiles the vendored sources to the same objects.
+      - uses: ./.github/actions/compiler-cache
+        with:
+          scope: ci
+          variant: ${{ matrix.python-version }}
+
       - name: Build module and run pytest
         run: |
           python -m pip install --upgrade pip
@@ -60,8 +68,29 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      # Here the same objects get rebuilt for every Python version in a single
+      # job - five times over on Linux.
+      - uses: ./.github/actions/compiler-cache
+        with:
+          scope: wheels
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.1
+        env:
+          # Linux wheels build in a container, which has neither ccache nor the
+          # environment set up above. Failing to install one only costs us the
+          # cache, so it must not fail the wheel.
+          CIBW_BEFORE_ALL_LINUX: >
+            dnf install -y ccache || yum install -y ccache || apk add ccache || true
+          # /project is where cibuildwheel mounts the checkout, so the cache ends
+          # up back in the workspace for actions/cache to save.
+          CIBW_ENVIRONMENT_LINUX: CCACHE_DIR=/project/.ccache CCACHE_MAXSIZE=500M
+          # macOS wheels build on the host, but pass the settings in rather than
+          # trusting them to be inherited - if they were not, ccache would
+          # quietly use ~/.ccache and nothing would ever be saved.
+          CIBW_ENVIRONMENT_MACOS: CCACHE_DIR=$CCACHE_DIR CCACHE_MAXSIZE=$CCACHE_MAXSIZE
+
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v7.0.1
         with:
