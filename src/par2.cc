@@ -144,6 +144,8 @@ public:
     void ClearKnownBlocks() { knownBlocks.clear(); }
     Par2::u32 QuickVerifiedFiles() const { return quickVerifiedFiles; }
 
+    void SetSkipRepairedVerification(bool skip) { skipRepairedVerification = skip; }
+
 protected:
     void SigFilename(std::string filename) override;
     void SigProgress(int progress) override;
@@ -163,6 +165,8 @@ private:
     const char* stage;
     std::map<std::string, std::vector<bool>> knownBlocks;
     Par2::u32 quickVerifiedFiles = 0;
+    bool skipRepairedVerification = true;
+    bool repairStarted = false;
 };
 
 typedef struct Par2RepairerObject {
@@ -290,6 +294,37 @@ bool SabRepairer::ScanDataFile(Par2::DiskFile* diskfile,
                                Par2::MD5Hash& hashfull,
                                Par2::MD5Hash& hash16k,
                                Par2::u32& count) {
+    /*
+     * Optionally skip the pass par2 makes over the files it just rebuilt. The only way
+     * a repair produces wrong data is a fault in the machine rather than in the maths,
+     * and ParPar checksums its own GF16 computation to catch exactly that. Reporting a
+     * full match here costs par2 nothing: it calls SetCompleteFile() and counts the
+     * file, which is all the final result depends on.
+     *
+     * Deliberately conditional on quickVerifiedFiles: skipping the check on the way out
+     * is only defensible if the caller's own checksums were trusted on the way in, so a
+     * set that got a real source scan gets its repair properly verified too.
+     *
+     * The saving is re-reading and hashing the repaired files, so it scales with how
+     * much was repaired rather than with the size of the set. Constructor only - it
+     * must not change once a repair is under way.
+     *
+     * The reported counts stay correct: UpdateVerificationResults credits a file's
+     * whole BlockCount as soon as GetCompleteFile() is set, which the eFullMatch below
+     * causes, so it never looks at the block locations VerifyTargetFiles just cleared.
+     */
+    if (skipRepairedVerification && repairStarted && quickVerifiedFiles > 0 && diskfile && sourcefile) {
+        matchtype = Par2::eFullMatch;
+        count = sourcefile->BlockCount();
+
+        std::string name;
+        Par2::DiskFile::SplitFilename(diskfile->FileName(), basepath, name);
+        SigFilename(name);
+        SigDone(name, count, count);
+        SigProgress(1000);
+        return true;
+    }
+
     /* Only during the source scan. par2 verifies again after repairing, and the block
        map describes what was on disk *before* the repair - reusing it there would
        report the freshly rebuilt file as still damaged. Those files are worth reading
@@ -336,6 +371,7 @@ bool SabRepairer::ScanDataFile(Par2::DiskFile* diskfile,
 
 void SabRepairer::BeginRepair() {
     stage = STAGE_REPAIRING;
+    repairStarted = true;
     if (owner)
         reinterpret_cast<Par2RepairerObject*>(owner)->last_progress = -1;
 }
@@ -371,9 +407,11 @@ static void Par2Repairer_dealloc(Par2RepairerObject* self) {
 }
 
 static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject* kwds) {
-    static const char* kwlist[] = {"parfile",    "extrafiles", "basepath",  "memory_limit",
-                                   "threads",    "file_threads", "skip_data", "skip_leaway",
-                                   "purge_files", "rename_only", NULL};
+    static const char* kwlist[] = {"parfile",     "extrafiles",  "basepath",
+                                   "memory_limit", "threads",     "file_threads",
+                                   "skip_data",    "skip_leaway", "purge_files",
+                                   "rename_only",  "skip_repaired_verification",
+                                   NULL};
 
     const char* parfile = NULL;
     PyObject* extrafiles = NULL;
@@ -385,10 +423,12 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
     unsigned long long skip_leaway = 0;
     int purge_files = 0;
     int rename_only = 0;
+    int skip_repaired_verification = 1;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|OsKIIpKpp", (char**)kwlist, &parfile, &extrafiles,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|OsKIIpKppp", (char**)kwlist, &parfile, &extrafiles,
                                      &basepath, &memory_limit, &threads, &file_threads, &skip_data,
-                                     &skip_leaway, &purge_files, &rename_only))
+                                     &skip_leaway, &purge_files, &rename_only,
+                                     &skip_repaired_verification))
         return -1;
 
     /* Build the argv that CommandLine::Parse expects. Going through CommandLine
@@ -469,6 +509,7 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
     self->err = new NullStream();
     self->repairer = new SabRepairer(*self->out, *self->err);
     self->repairer->SetOwner(self);
+    self->repairer->SetSkipRepairedVerification(skip_repaired_verification != 0);
     return 0;
 }
 

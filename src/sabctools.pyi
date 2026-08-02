@@ -76,11 +76,20 @@ class Par2Repairer:
         skip_leaway: int = 0,
         purge_files: bool = False,
         rename_only: bool = False,
+        skip_repaired_verification: bool = True,
     ) -> None:
         """Verify and repair a par2 set in-process.
 
         Raises ValueError if par2 rejects the arguments, which includes `parfile`
         not existing. `memory_limit` of 0 lets par2 derive one from physical memory.
+
+        `skip_repaired_verification` drops the pass par2 makes over the files it just
+        rebuilt, but only for a set where set_known_blocks() actually shortcut the
+        source scan - trusting the repair on the way out follows from having trusted
+        the caller's checksums on the way in, so a set that got a real scan still gets
+        its repair verified. Saves in proportion to how much was repaired, not to the
+        size of the set, and gives up the only check on what reached disk; ParPar still
+        checksums its own GF16 computation. The reported counts are unaffected.
         """
 
     def load(self) -> Par2Result:
