@@ -31,26 +31,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # Without a ninja on PATH, scikit-build-core pulls the ninja wheel into a
-      # pip build-isolation directory that is deleted afterwards - and a cached
-      # build tree would then point CMake at a /tmp/build-env-*/bin/ninja that
-      # no longer exists. Install it where the path is stable for the life of
-      # the runner image, which is what the cache key is pinned to. Windows
-      # needs none: it builds with the Visual Studio generator.
-      - name: Install build tools
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install ninja
-          else
-            sudo apt-get install -y ninja-build
-          fi
-          command -v ninja && ninja --version
-
-      # Keyed per Python version: the build tree records the interpreter it was
-      # configured against, so trees cannot be shared between them.
-      - uses: ./.github/actions/build-cache
+      # Nothing here caches a build tree, so scikit-build-core is free to fetch
+      # its own cmake and ninja into a pip build-isolation directory - the paths
+      # it records live and die with that build.
+      - uses: ./.github/actions/compiler-cache
         with:
           scope: ci
           variant: ${{ matrix.python-version }}
