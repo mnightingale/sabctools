@@ -134,6 +134,7 @@ public:
 protected:
     void SigFilename(std::string filename) override;
     void SigProgress(int progress) override;
+    void SigDone(std::string filename, int available, int total) override;
     void BeginRepair() override;
 
 private:
@@ -148,6 +149,7 @@ typedef struct Par2RepairerObject {
     NullStream* err;
     Par2::CommandLine* cmdline;
     PyObject* progress_callback;
+    PyObject* file_done_callback;
     bool loaded;
     /* Last value passed to the callback, so the 0..1000 stream from par2 can be
        thinned before it reaches Python. */
@@ -217,6 +219,31 @@ void SabRepairer::SigProgress(int progress) {
     call_progress(self, stage, NULL, percent);
 }
 
+/*
+ * Fires once per file par2 finishes scanning, with how many of that file's blocks it
+ * could use. This is the structured form of par2's "found N of M data blocks from" line
+ * - the only thing that identifies which files on disk actually contributed data, which
+ * is how a caller learns that a set of joinable .001/.002 parts was consumed.
+ */
+void SabRepairer::SigDone(std::string filename, int available, int total) {
+    if (!owner)
+        return;
+
+    Par2RepairerObject* self = reinterpret_cast<Par2RepairerObject*>(owner);
+    if (!self->file_done_callback)
+        return;
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    PyObject* result =
+        PyObject_CallFunction(self->file_done_callback, "sii", filename.c_str(), available, total);
+    if (result == NULL) {
+        PyErr_WriteUnraisable(self->file_done_callback);
+    } else {
+        Py_DECREF(result);
+    }
+    PyGILState_Release(gstate);
+}
+
 void SabRepairer::BeginRepair() {
     stage = STAGE_REPAIRING;
     if (owner)
@@ -237,6 +264,7 @@ static PyObject* Par2Repairer_new(PyTypeObject* type, PyObject* args, PyObject* 
     self->err = NULL;
     self->cmdline = NULL;
     self->progress_callback = NULL;
+    self->file_done_callback = NULL;
     self->loaded = false;
     self->last_progress = -1;
     return (PyObject*)self;
@@ -248,6 +276,7 @@ static void Par2Repairer_dealloc(Par2RepairerObject* self) {
     delete self->out;
     delete self->err;
     Py_XDECREF(self->progress_callback);
+    Py_XDECREF(self->file_done_callback);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
@@ -708,6 +737,27 @@ static int set_progress_callback(Par2RepairerObject* self, PyObject* value, void
     return 0;
 }
 
+static PyObject* get_file_done_callback(Par2RepairerObject* self, void*) {
+    if (self->file_done_callback == NULL)
+        Py_RETURN_NONE;
+    Py_INCREF(self->file_done_callback);
+    return self->file_done_callback;
+}
+
+static int set_file_done_callback(Par2RepairerObject* self, PyObject* value, void*) {
+    if (value == NULL || value == Py_None) {
+        Py_CLEAR(self->file_done_callback);
+        return 0;
+    }
+    if (!PyCallable_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "file_done_callback must be callable or None");
+        return -1;
+    }
+    Py_INCREF(value);
+    Py_XSETREF(self->file_done_callback, value);
+    return 0;
+}
+
 static PyGetSetDef Par2Repairer_getset[] = {
     {"missing_block_count", (getter)get_missing_block_count, NULL,
      "Blocks that need reconstructing.", NULL},
@@ -735,6 +785,9 @@ static PyGetSetDef Par2Repairer_getset[] = {
     {"files", (getter)get_files, NULL, "Per-file state as a list of dicts.", NULL},
     {"progress_callback", (getter)get_progress_callback, (setter)set_progress_callback,
      "Callable invoked as (stage, filename, percent), or None.", NULL},
+    {"file_done_callback", (getter)get_file_done_callback, (setter)set_file_done_callback,
+     "Callable invoked as (filename, blocks_found, blocks_total) once per scanned file,\n"
+     "or None. blocks_found > 0 means that file contributed data to the repair.", NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 
 static PyTypeObject Par2RepairerType = {
