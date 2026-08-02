@@ -1,0 +1,66 @@
+name: Tests
+
+# Called once per operating system by ci_and_build_release.yml, so that each
+# wheel build can depend on just its own platform's tests. GitHub's needs: works
+# at job level and cannot name a subset of another job's matrix, so the only way
+# to gate per platform is for the tests to be separate jobs.
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: Runner image to test on.
+        required: true
+        type: string
+
+permissions: read-all
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ${{ inputs.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [ '3.10', '3.11', '3.12', '3.13', '3.14', '3.15-dev' ]
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        name: Install Python
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Without a ninja on PATH, scikit-build-core pulls the ninja wheel into a
+      # pip build-isolation directory that is deleted afterwards - and a cached
+      # build tree would then point CMake at a /tmp/build-env-*/bin/ninja that
+      # no longer exists. Install it where the path is stable for the life of
+      # the runner image, which is what the cache key is pinned to. Windows
+      # needs none: it builds with the Visual Studio generator.
+      - name: Install build tools
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install ninja
+          else
+            sudo apt-get install -y ninja-build
+          fi
+          command -v ninja && ninja --version
+
+      # Keyed per Python version: the build tree records the interpreter it was
+      # configured against, so trees cannot be shared between them.
+      - uses: ./.github/actions/build-cache
+        with:
+          scope: ci
+          variant: ${{ matrix.python-version }}
+
+      - name: Build module and run pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install --group test
+          pip install . -v
+          python -c "import sabctools; print('Version:', sabctools.__version__);"
+          python -c "import sabctools; print('SIMD:', sabctools.simd);"
+          python -c "import sabctools; print('OpenSSL linked:', sabctools.openssl_linked);"
+          pytest
