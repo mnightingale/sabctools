@@ -1,5 +1,6 @@
 [build-system]
-# cmake and ninja build the vendored par2cmdline-turbo; see src/par2/VENDOR.md
+# cmake and ninja build the vendored par2cmdline-turbo and rapidyenc;
+# see src/par2/VENDOR.md and src/rapidyenc/VENDOR.md
 requires = ["setuptools>=77.0.0", "wheel", "cmake>=3.13", "ninja; sys_platform != 'win32'"]
 build-backend = "setuptools.build_meta"
 

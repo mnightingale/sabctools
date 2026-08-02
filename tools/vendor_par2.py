@@ -25,66 +25,24 @@ Re-vendor src/par2/ from par2cmdline-turbo.
 Leaves the result in the working tree for review; does not commit.
 """
 
-import argparse
 import datetime
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
+
+import vendor_common
 
 REPO = "https://github.com/nzbgetcom/par2cmdline-turbo.git"
 REF = "6b6a69942478e4ad0556f5f3eda2cec8c46f3d0e"
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEST = os.path.join(ROOT, "src", "par2")
+DEST = os.path.join(vendor_common.ROOT, "src", "par2")
 
 # Only what we compile, plus upstream's CMake build and the provenance/licence files.
 # setup.py drives that CMake rather than reimplementing the per-file SIMD flag matrix.
 COPY_TREES = ("src", "include", "cmake", os.path.join("parpar", "gf16"), os.path.join("parpar", "hasher"))
 COPY_FILES = ("CMakeLists.txt", "COPYING", "AUTHORS", "ChangeLog", os.path.join("parpar", "gf16.cmake"),
               os.path.join("parpar", "hasher.cmake"))
-
-
-def run(command, **kwargs):
-    return subprocess.run(command, check=True, **kwargs)
-
-
-def fetch(ref: str, into: str) -> str:
-    """Check out any ref - tag, branch or commit - and return the resolved commit."""
-    run(["git", "init", "--quiet", into])
-    run(["git", "-C", into, "remote", "add", "origin", REPO])
-
-    # A shallow fetch of an exact object works on GitHub and is by far the cheapest,
-    # but not every host allows it; fall back to fetching everything.
-    try:
-        run(["git", "-C", into, "fetch", "--quiet", "--depth", "1", "origin", ref])
-    except subprocess.CalledProcessError:
-        print("==> Shallow fetch rejected, retrying with full history")
-        run(["git", "-C", into, "fetch", "--quiet", "origin"])
-        run(["git", "-C", into, "fetch", "--quiet", "--tags", "origin"])
-
-    try:
-        run(["git", "-C", into, "checkout", "--quiet", "FETCH_HEAD"])
-    except subprocess.CalledProcessError:
-        run(["git", "-C", into, "checkout", "--quiet", ref])
-
-    return subprocess.run(
-        ["git", "-C", into, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-    ).stdout.strip()
-
-
-def copy_sources(source: str):
-    if os.path.exists(DEST):
-        shutil.rmtree(DEST)
-    os.makedirs(DEST)
-
-    for tree in COPY_TREES:
-        shutil.copytree(os.path.join(source, tree), os.path.join(DEST, tree))
-    for name in COPY_FILES:
-        target = os.path.join(DEST, name)
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        shutil.copy(os.path.join(source, name), target)
 
 
 def prune():
@@ -107,42 +65,20 @@ def prune():
             os.remove(leftover)
 
 
-def patch(path: str, old: str, new: str, description: str):
-    """Apply one local patch, and fail loudly if it no longer applies.
-
-    A patch that stops matching means upstream changed underneath us - either it fixed
-    the problem itself, in which case delete the patch here, or it moved the code and
-    the patch needs rewriting. Silently carrying on is the one thing we must not do.
-    """
-    full = os.path.join(DEST, path)
-    with open(full, encoding="utf-8") as handle:
-        content = handle.read()
-
-    if new in content and old not in content:
-        raise SystemExit(
-            "ERROR: patch '%s' is already present upstream in %s.\n"
-            "       Remove it from %s." % (description, path, os.path.basename(__file__))
-        )
-    if old not in content:
-        raise SystemExit("ERROR: patch '%s' no longer matches anything in %s." % (description, path))
-
-    with open(full, "w", encoding="utf-8") as handle:
-        handle.write(content.replace(old, new))
-    print("==> Patched %s: %s" % (path, description))
-
-
 def apply_patches():
     # Upstream targets a standalone executable and links the static CRT. A CPython
     # extension must use the dynamic CRT so it shares a heap and a std:: runtime with
     # python3xx.dll, and an explicit add_compile_options(/MT) cannot be overridden by
     # CMAKE_MSVC_RUNTIME_LIBRARY.
-    patch(
+    vendor_common.patch(
+        DEST,
         os.path.join("cmake", "common.cmake"),
         "add_compile_options(/MTd /Zi /MP /W4 /utf-8)",
         "add_compile_options(/MDd /Zi /MP /W4 /utf-8)",
         "dynamic CRT (debug)",
     )
-    patch(
+    vendor_common.patch(
+        DEST,
         os.path.join("cmake", "common.cmake"),
         "add_compile_options(/MT /Oi /MP /utf-8 /guard:cf)",
         "add_compile_options(/MD /Oi /MP /utf-8 /guard:cf)",
@@ -202,19 +138,16 @@ matching, so a patch that upstream has since fixed cannot be carried silently.
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--ref", default=REF, help="tag, branch or commit to vendor (default: %(default)s)")
-    parser.add_argument("--repo", default=REPO, help=argparse.SUPPRESS)
-    arguments = parser.parse_args()
+    arguments = vendor_common.parse_args(__doc__, REF, REPO)
 
     with tempfile.TemporaryDirectory() as temporary:
         checkout = os.path.join(temporary, "par2")
         print("==> Fetching %s at %s" % (arguments.repo, arguments.ref))
-        commit = fetch(arguments.ref, checkout)
+        commit = vendor_common.fetch(arguments.repo, arguments.ref, checkout)
         print("==> Resolved to %s" % commit)
 
         print("==> Replacing %s" % DEST)
-        copy_sources(checkout)
+        vendor_common.copy_sources(checkout, DEST, COPY_TREES, COPY_FILES)
         prune()
         apply_patches()
         write_vendor_notes(commit, arguments.ref)
