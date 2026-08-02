@@ -95,6 +95,17 @@ class Par2Repairer:
         Par2Error if a named file does not exist.
         """
 
+    def set_known_blocks(self, mapping: Mapping[str, Sequence[object]]) -> None:
+        """Take {filename: per-block truth values} as already verified.
+
+        Listed files are neither read nor hashed during verify(); the blocks marked
+        true are trusted as-is and the rest are scanned normally, so a partial map is
+        fine and an empty one restores the default behaviour. Filenames are as recorded
+        in the par2 set, and each sequence runs from block 0.
+
+        Call after load(), which is when block_size becomes known, and before verify().
+        """
+
     def verify(self) -> Par2Result:
         """Scan the source files. Requires load() first."""
 
@@ -153,6 +164,8 @@ class Par2Repairer:
     """Whether enough recovery blocks are available to repair"""
     cancelled: bool
     """Whether cancel() was called"""
+    quick_verified_files: int
+    """How many files verify() took from set_known_blocks() instead of reading"""
     renames: Dict[str, str]
     """{path_on_disk: path_it_will_get} for files matched under another name.
 
