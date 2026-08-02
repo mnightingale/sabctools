@@ -22,6 +22,7 @@
 #include "crc32.h"
 #include "sparse.h"
 #include "utils.h"
+#include "par2.h"
 
 /* Function and exception declarations */
 PyMODINIT_FUNC PyInit_sabctools(void);
@@ -145,6 +146,11 @@ PyMODINIT_FUNC PyInit_sabctools(void) {
     }
     openssl_init();
     sparse_init();
+
+    if (!par2_init(m)) {
+        Py_DECREF(m);
+        return NULL;
+    }
 
     PyModule_AddStringConstant(m, "version", SABCTOOLS_VERSION);
     PyModule_AddStringConstant(m, "simd", kernel_name(rapidyenc_decode_kernel()));
