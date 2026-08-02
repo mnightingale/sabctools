@@ -118,6 +118,16 @@ public:
     void Cancel() { cancelled = true; }
     bool WasCancelled() const { return cancelled; }
 
+    /*
+     * Pull in another par2 file's packets after load(). Safe to call repeatedly:
+     * LoadPacketsFromFile skips anything already in the diskFileMap, and packets from a
+     * different set are rejected on setid. Only recoverypacketmap grows in practice,
+     * which is what makes "fetch more blocks and retry" possible without re-verifying:
+     * Process() re-runs CheckVerificationResults() on every call, but skips the
+     * verification pass once alreadyloaded is set.
+     */
+    bool LoadMore(const std::string& filename) { return LoadPacketsFromFile(filename); }
+
     void SetStage(const char* s) { stage = s; }
     const char* Stage() const { return stage; }
 
@@ -408,6 +418,80 @@ static PyObject* Par2Repairer_repair(Par2RepairerObject* self, PyObject* Py_UNUS
     return run_step(self, false, true);
 }
 
+/*
+ * Add recovery blocks from further par2 files to an already-loaded repairer.
+ *
+ * This is the point of keeping a repairer alive across a "not enough blocks, go and
+ * fetch more" cycle: the expensive verification pass is not repeated, only the new
+ * packets are read, and the next repair() re-evaluates repairability against the larger
+ * recoverypacketmap.
+ */
+static PyObject* Par2Repairer_load_more(Par2RepairerObject* self, PyObject* parfiles) {
+    if (self->repairer == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Par2Repairer is not initialised");
+        return NULL;
+    }
+    if (!self->loaded) {
+        PyErr_SetString(PyExc_RuntimeError, "call load() before load_more()");
+        return NULL;
+    }
+
+    PyObject* sequence = PySequence_Fast(parfiles, "load_more() takes a sequence of str");
+    if (sequence == NULL)
+        return NULL;
+
+    std::vector<std::string> paths;
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
+    for (Py_ssize_t i = 0; i < count; i++) {
+        const char* path = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(sequence, i));
+        if (path == NULL) {
+            Py_DECREF(sequence);
+            return NULL;
+        }
+        /* LoadPacketsFromFile shrugs off a file it cannot open, because PreProcess uses
+           it to probe for optional sibling volumes. Here the caller named the file, so
+           a missing one is a mistake worth reporting rather than a silent no-op that
+           leaves the block count unchanged. */
+        if (!Par2::DiskFile::FileExists(path)) {
+            PyErr_Format(Par2Error, "no such par2 file: %s", path);
+            Py_DECREF(sequence);
+            return NULL;
+        }
+        paths.push_back(path);
+    }
+    Py_DECREF(sequence);
+
+    bool ok = true;
+    bool threw = false;
+    std::string message;
+
+    self->repairer->SetStage(STAGE_LOADING);
+
+    Py_BEGIN_ALLOW_THREADS
+    try {
+        for (size_t i = 0; i < paths.size() && ok; i++)
+            ok = self->repairer->LoadMore(paths[i]);
+    } catch (const std::exception& e) {
+        threw = true;
+        message = e.what();
+    } catch (...) {
+        threw = true;
+        message = "unknown error in par2";
+    }
+    Py_END_ALLOW_THREADS
+
+    if (threw) {
+        PyErr_SetString(Par2Error, message.c_str());
+        return NULL;
+    }
+    if (!ok) {
+        PyErr_SetString(Par2Error, "par2 could not read one of the given files");
+        return NULL;
+    }
+
+    return PyLong_FromSize_t(self->repairer->RecoveryPacketCount());
+}
+
 static PyObject* Par2Repairer_cancel(Par2RepairerObject* self, PyObject* Py_UNUSED(ignored)) {
     if (self->repairer)
         self->repairer->Cancel();
@@ -417,6 +501,10 @@ static PyObject* Par2Repairer_cancel(Par2RepairerObject* self, PyObject* Py_UNUS
 static PyMethodDef Par2Repairer_methods[] = {
     {"load", (PyCFunction)Par2Repairer_load, METH_NOARGS,
      "load() -> Par2Result\n\nRead the par2 packets and work out the file set."},
+    {"load_more", (PyCFunction)Par2Repairer_load_more, METH_O,
+     "load_more(parfiles) -> int\n\nAdd recovery blocks from further par2 files and return the\n"
+     "new recovery_block_count. Does not re-verify: a following repair() reuses the\n"
+     "existing verification and only re-checks whether it now has enough blocks."},
     {"verify", (PyCFunction)Par2Repairer_verify, METH_NOARGS,
      "verify() -> Par2Result\n\nScan the source files. Requires load() first."},
     {"repair", (PyCFunction)Par2Repairer_repair, METH_NOARGS,

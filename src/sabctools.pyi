@@ -81,6 +81,15 @@ class Par2Repairer:
     def load(self) -> Par2Result:
         """Read the par2 packets and work out the file set."""
 
+    def load_more(self, parfiles: Sequence[str]) -> int:
+        """Add recovery blocks from further par2 files; returns recovery_block_count.
+
+        Does not re-verify. A following repair() reuses the existing verification and
+        only re-checks whether there are now enough blocks, which is what makes
+        "fetch more blocks and retry" cheap. Requires load() first, and raises
+        Par2Error if a named file does not exist.
+        """
+
     def verify(self) -> Par2Result:
         """Scan the source files. Requires load() first."""
 
