@@ -41,7 +41,9 @@
 #include <par2/descriptionpacket.h>
 #include <par2/verificationpacket.h>
 #include <par2/diskfile.h>
+#include <par2/datablock.h>
 
+#include <map>
 #include <ostream>
 #include <streambuf>
 #include <string>
@@ -131,15 +133,36 @@ public:
     void SetStage(const char* s) { stage = s; }
     const char* Stage() const { return stage; }
 
+    /*
+     * Blocks the caller already knows to be good, keyed on the filename as it appears
+     * in the par2 set. Anything listed here is taken on trust and never read from disk;
+     * see ScanDataFile below.
+     */
+    void SetKnownBlocks(const std::string& filename, std::vector<bool> blocks) {
+        knownBlocks[filename] = std::move(blocks);
+    }
+    void ClearKnownBlocks() { knownBlocks.clear(); }
+    Par2::u32 QuickVerifiedFiles() const { return quickVerifiedFiles; }
+
 protected:
     void SigFilename(std::string filename) override;
     void SigProgress(int progress) override;
     void SigDone(std::string filename, int available, int total) override;
     void BeginRepair() override;
+    bool ScanDataFile(Par2::DiskFile* diskfile,
+                      std::string basepath,
+                      const bool renameonly,
+                      Par2::Par2RepairerSourceFile*& sourcefile,
+                      Par2::MatchType& matchtype,
+                      Par2::MD5Hash& hashfull,
+                      Par2::MD5Hash& hash16k,
+                      Par2::u32& count) override;
 
 private:
     Par2RepairerObject* owner;
     const char* stage;
+    std::map<std::string, std::vector<bool>> knownBlocks;
+    Par2::u32 quickVerifiedFiles = 0;
 };
 
 typedef struct Par2RepairerObject {
@@ -242,6 +265,73 @@ void SabRepairer::SigDone(std::string filename, int available, int total) {
         Py_DECREF(result);
     }
     PyGILState_Release(gstate);
+}
+
+/*
+ * Substitute the caller's knowledge of which blocks are good for reading and hashing
+ * the file.
+ *
+ * The caller already checksummed every article as it arrived, so for a file it has
+ * ranges for there is nothing on disk worth re-reading: point each good block's
+ * DataBlock at its offset and report the match. DataBlock::SetLocation is exactly what
+ * par2's own scanner calls once a block's CRC and MD5 check out, so from here on the
+ * repair proceeds identically.
+ *
+ * Only ever applied to a source file being checked in place. ScanDataFile is also used
+ * to test unrelated files against a guessed sourcefile while hunting for renamed
+ * content, and the caller's block map says nothing about those - hence the target
+ * checks below. Anything not covered falls through to the real scan.
+ */
+bool SabRepairer::ScanDataFile(Par2::DiskFile* diskfile,
+                               std::string basepath,
+                               const bool renameonly,
+                               Par2::Par2RepairerSourceFile*& sourcefile,
+                               Par2::MatchType& matchtype,
+                               Par2::MD5Hash& hashfull,
+                               Par2::MD5Hash& hash16k,
+                               Par2::u32& count) {
+    /* Only during the source scan. par2 verifies again after repairing, and the block
+       map describes what was on disk *before* the repair - reusing it there would
+       report the freshly rebuilt file as still damaged. Those files are worth reading
+       properly anyway, and by then the expensive pass has already been skipped. */
+    if (stage == STAGE_VERIFYING && !knownBlocks.empty() && diskfile && sourcefile && !renameonly &&
+        sourcefile->GetTargetExists() && sourcefile->GetDescriptionPacket() &&
+        diskfile->FileName() == sourcefile->TargetFileName()) {
+
+        std::map<std::string, std::vector<bool>>::const_iterator known =
+            knownBlocks.find(sourcefile->GetDescriptionPacket()->FileName());
+
+        if (known != knownBlocks.end()) {
+            const std::vector<bool>& good = known->second;
+            Par2::u32 blockcount = sourcefile->BlockCount();
+            std::vector<Par2::DataBlock>::iterator blocks = sourcefile->SourceBlocks();
+
+            Par2::u32 available = 0;
+            for (Par2::u32 i = 0; i < blockcount && i < good.size(); i++) {
+                if (good[i]) {
+                    blocks[i].SetLocation(diskfile, (Par2::u64)i * blocksize);
+                    available++;
+                }
+            }
+
+            count = available;
+            matchtype = available == blockcount ? Par2::eFullMatch
+                        : available > 0        ? Par2::ePartialMatch
+                                               : Par2::eNoMatch;
+
+            std::string name;
+            Par2::DiskFile::SplitFilename(diskfile->FileName(), basepath, name);
+            SigFilename(name);
+            SigDone(name, available, blockcount);
+            SigProgress(1000);
+
+            quickVerifiedFiles++;
+            return true;
+        }
+    }
+
+    return Par2::Par2Repairer::ScanDataFile(
+        diskfile, basepath, renameonly, sourcefile, matchtype, hashfull, hash16k, count);
 }
 
 void SabRepairer::BeginRepair() {
@@ -521,6 +611,63 @@ static PyObject* Par2Repairer_load_more(Par2RepairerObject* self, PyObject* parf
     return PyLong_FromSize_t(self->repairer->RecoveryPacketCount());
 }
 
+/*
+ * Tell the repairer which blocks the caller already knows to be intact.
+ *
+ * Takes {filename: sequence of per-block truth values}, where filename is the name as
+ * recorded in the par2 set and the sequence runs from block 0. Listed files are not
+ * read or hashed during verify(); everything else is scanned normally, so a partial
+ * map is fine and an empty one restores the default behaviour.
+ *
+ * Trust is the caller's to give: a block marked good here is taken at its word. Call
+ * after load(), which is when block_size becomes known, and before verify().
+ */
+static PyObject* Par2Repairer_set_known_blocks(Par2RepairerObject* self, PyObject* mapping) {
+    if (self->repairer == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Par2Repairer is not initialised");
+        return NULL;
+    }
+    if (!self->loaded) {
+        PyErr_SetString(PyExc_RuntimeError, "call load() before set_known_blocks()");
+        return NULL;
+    }
+    if (!PyDict_Check(mapping)) {
+        PyErr_SetString(PyExc_TypeError, "set_known_blocks() takes a dict of {filename: blocks}");
+        return NULL;
+    }
+
+    self->repairer->ClearKnownBlocks();
+
+    PyObject *key, *value;
+    Py_ssize_t position = 0;
+    while (PyDict_Next(mapping, &position, &key, &value)) {
+        const char* filename = PyUnicode_AsUTF8(key);
+        if (filename == NULL)
+            return NULL;
+
+        PyObject* sequence = PySequence_Fast(value, "block values must be a sequence");
+        if (sequence == NULL)
+            return NULL;
+
+        Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
+        std::vector<bool> blocks;
+        blocks.reserve((size_t)count);
+        for (Py_ssize_t i = 0; i < count; i++) {
+            int good = PyObject_IsTrue(PySequence_Fast_GET_ITEM(sequence, i));
+            if (good < 0) {
+                Py_DECREF(sequence);
+                return NULL;
+            }
+            blocks.push_back(good != 0);
+        }
+        Py_DECREF(sequence);
+
+        self->repairer->SetKnownBlocks(filename, std::move(blocks));
+    }
+
+    Py_RETURN_NONE;
+}
+
 static PyObject* Par2Repairer_cancel(Par2RepairerObject* self, PyObject* Py_UNUSED(ignored)) {
     if (self->repairer)
         self->repairer->Cancel();
@@ -534,6 +681,9 @@ static PyMethodDef Par2Repairer_methods[] = {
      "load_more(parfiles) -> int\n\nAdd recovery blocks from further par2 files and return the\n"
      "new recovery_block_count. Does not re-verify: a following repair() reuses the\n"
      "existing verification and only re-checks whether it now has enough blocks."},
+    {"set_known_blocks", (PyCFunction)Par2Repairer_set_known_blocks, METH_O,
+     "set_known_blocks(mapping)\n\nTake {filename: per-block truth values} as already\n"
+     "verified. Those files are not read or hashed during verify(). Call after load()."},
     {"verify", (PyCFunction)Par2Repairer_verify, METH_NOARGS,
      "verify() -> Par2Result\n\nScan the source files. Requires load() first."},
     {"repair", (PyCFunction)Par2Repairer_repair, METH_NOARGS,
@@ -605,6 +755,11 @@ static PyObject* get_block_size(Par2RepairerObject* self, void*) {
 static PyObject* get_setid(Par2RepairerObject* self, void*) {
     REPAIRER_OR_NONE(self)
     return PyUnicode_FromString(self->repairer->SetId().c_str());
+}
+
+static PyObject* get_quick_verified_files(Par2RepairerObject* self, void*) {
+    REPAIRER_OR_NONE(self)
+    return PyLong_FromUnsignedLong(self->repairer->QuickVerifiedFiles());
 }
 
 static PyObject* get_cancelled(Par2RepairerObject* self, void*) {
@@ -780,6 +935,8 @@ static PyGetSetDef Par2Repairer_getset[] = {
     {"repair_possible", (getter)get_repair_possible, NULL,
      "Whether enough recovery blocks are available to repair.", NULL},
     {"cancelled", (getter)get_cancelled, NULL, "Whether cancel() was called.", NULL},
+    {"quick_verified_files", (getter)get_quick_verified_files, NULL,
+     "How many files verify() took from set_known_blocks() instead of reading.", NULL},
     {"renames", (getter)get_renames, NULL,
      "{name_on_disk: name_in_set} for files par2 matched under another name.", NULL},
     {"files", (getter)get_files, NULL, "Per-file state as a list of dicts.", NULL},
