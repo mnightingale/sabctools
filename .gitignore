@@ -54,6 +54,11 @@ test
 dist
 *.whl
 
+# Compiled extension, written into src/ by `build_ext --inplace`
+*.so
+*.pyd
+*.dylib
+
 # Visual studio
 cmake*/
 *.sln
