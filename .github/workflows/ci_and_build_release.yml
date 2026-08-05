@@ -46,7 +46,7 @@ jobs:
   # The ARM runners have no tests of their own, so they gate on the tests for
   # the same OS.
   wheels_linux:
-    name: Wheels ${{ matrix.os }} ${{ matrix.linux_arch }}
+    name: Wheels ${{ matrix.os }} ${{ matrix.linux_arch }} foobar
     needs: tests_linux
     runs-on: ${{ matrix.os }}
     strategy:
