@@ -59,6 +59,9 @@ jobs:
             linux_arch: aarch64
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/compiler-cache
+        with:
+          scope: wheels
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.1
       - name: Upload wheel artifacts
@@ -91,6 +94,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/compiler-cache
+        with:
+          scope: wheels
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.1
       - name: Upload wheel artifacts
