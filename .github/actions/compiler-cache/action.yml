@@ -30,11 +30,10 @@ inputs:
     default: none
   containers:
     description: >
-      Also hand the store to cibuildwheel's Linux build containers. Those
-      compile inside a manylinux or musllinux image, which can see neither the
-      runner's ccache binary nor its CCACHE_DIR, so without this a wheel job
-      caches nothing at all. The container installs its own ccache; see
-      before-all in pyproject.toml.
+      Also hand ccache and the store to cibuildwheel's Linux build containers.
+      Those compile inside a manylinux or musllinux image, which can see neither
+      the runner's ccache binary nor its CCACHE_DIR, so without this a wheel job
+      caches nothing at all.
     required: false
     default: 'false'
 
@@ -63,24 +62,53 @@ runs:
           ccache-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.variant }}-
           ccache-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-
 
-    - name: Point the build containers at the store
+    # Upstream's static build, rather than the container's package manager: the
+    # manylinux image is AlmaLinux 8, where ccache is not in the enabled repos,
+    # so dnf goes looking further afield and can sit there for a very long time.
+    # A statically linked binary also needs no equivalent for the musllinux
+    # image, and gives both containers the same ccache, so they can share one
+    # store.
+    - name: Fetch ccache for the build containers
+      if: inputs.containers == 'true' && runner.os == 'Linux'
+      shell: bash
+      env:
+        VERSION: 4.13.6
+        # sha256 of ccache-$VERSION-linux-<arch>-musl-static.tar.xz. To bump:
+        # change VERSION, then shasum -a 256 the two release assets.
+        SHA256_X64: 156ec57c5198cc849d92834023d09910b83dc5504c6cf405d09e6ae7b208a3e5
+        SHA256_ARM64: 2098d561e4a8e36bd06a29aedce53ea90c7e365f9573a93d91c230efbf96a958
+      run: |
+        set -euo pipefail
+        case "$RUNNER_ARCH" in
+          X64)   arch=x86_64;  sha=$SHA256_X64 ;;
+          ARM64) arch=aarch64; sha=$SHA256_ARM64 ;;
+          *) echo "::error::no ccache release build for $RUNNER_ARCH"; exit 1 ;;
+        esac
+        name="ccache-$VERSION-linux-$arch-musl-static"
+        cd "$RUNNER_TEMP"
+        curl -fsSL --retry 3 -O \
+          "https://github.com/ccache/ccache/releases/download/v$VERSION/$name.tar.xz"
+        # This binary runs as part of producing the wheels we publish, so it is
+        # worth knowing it is the one upstream released.
+        echo "$sha  $name.tar.xz" | sha256sum -c -
+        mkdir -p ccache-bin
+        tar -xJf "$name.tar.xz" -C ccache-bin --strip-components=1 "$name/ccache"
+        ccache-bin/ccache --version
+
+    - name: Point the build containers at ccache and the store
       if: inputs.containers == 'true' && runner.os == 'Linux'
       shell: bash
       run: |
-        # Bind-mount the store into the container and point CCACHE_DIR at the
-        # mount. AUDITWHEEL_PLAT - which cibuildwheel sets in the container -
-        # keeps the two libc flavours in separate stores: they have different
-        # compilers, so they would never share an entry anyway, and their
-        # package managers offer ccache versions whose on-disk formats differ.
-        # It stays unexpanded here on purpose; cibuildwheel expands it inside
-        # the container.
+        # Bind-mount the binary and the store, then put the binary on PATH so
+        # CMakeLists.txt finds it. $PATH stays unexpanded on purpose:
+        # cibuildwheel expands it inside the container.
         #
         # umask 000 matters: the container builds as root, and the post-job
         # cache upload runs as the runner user, which has to be able to read
         # what root wrote.
         {
-          echo "CIBW_CONTAINER_ENGINE=docker; create_args: --volume=${{ github.workspace }}/.ccache:/ccache"
-          echo "CIBW_ENVIRONMENT_LINUX=CCACHE_DIR=/ccache/\$AUDITWHEEL_PLAT CCACHE_MAXSIZE=500M CCACHE_UMASK=000"
+          echo "CIBW_CONTAINER_ENGINE=docker; create_args: --volume=${{ github.workspace }}/.ccache:/ccache --volume=$RUNNER_TEMP/ccache-bin:/ccache-bin:ro"
+          echo "CIBW_ENVIRONMENT_LINUX=PATH=/ccache-bin:\$PATH CCACHE_DIR=/ccache CCACHE_MAXSIZE=500M CCACHE_UMASK=000"
         } >> "$GITHUB_ENV"
 
     # Nothing on the host compiles when the build happens in a container.
