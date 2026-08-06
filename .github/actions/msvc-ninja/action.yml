@@ -41,11 +41,14 @@ runs:
         $after = Join-Path $env:RUNNER_TEMP 'msvc-env-after.txt'
         $shim = Join-Path $env:RUNNER_TEMP 'msvc-env.bat'
         $vcvarsall = Join-Path $root 'VC\Auxiliary\Build\vcvarsall.bat'
+        # Each line parenthesised: PowerShell's comma binds tighter than every
+        # other operator, so an unbracketed element would be spliced into the
+        # array a fragment at a time rather than concatenated.
         Set-Content -Path $shim -Encoding ascii -Value @(
           '@echo off',
-          'set > "' + $before + '"',
-          'call "' + $vcvarsall + '" ' + $arch + ' > nul || exit /b 1',
-          'set > "' + $after + '"'
+          ('set > "{0}"' -f $before),
+          ('call "{0}" {1} > nul || exit /b 1' -f $vcvarsall, $arch),
+          ('set > "{0}"' -f $after)
         )
         & cmd /c $shim
         if ($LASTEXITCODE -ne 0) { throw "vcvarsall $arch failed" }
