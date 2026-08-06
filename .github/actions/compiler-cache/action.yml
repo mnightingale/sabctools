@@ -1,9 +1,9 @@
 name: Compiler cache
 description: >
-  Install ccache and restore its store, so the vendored par2 and rapidyenc trees
-  are not recompiled from scratch on every run. Those are some 130 source files
-  with no Python in them, so they compile to identical objects for every Python
-  version in the matrix.
+  Install ccache and restore its store, so the vendored rapidyenc tree is not
+  recompiled from scratch on every run. That is some 130 source files with no
+  Python in them, so they compile to identical objects for every Python version
+  in the matrix.
 
   The key deliberately does not hash the sources. ccache is content-addressed -
   the compiler, the flags and the preprocessed source are already part of its
@@ -28,6 +28,15 @@ inputs:
       across variants on a miss, since the vendored objects do not differ.
     required: false
     default: none
+  containers:
+    description: >
+      Also hand the store to cibuildwheel's Linux build containers. Those
+      compile inside a manylinux or musllinux image, which can see neither the
+      runner's ccache binary nor its CCACHE_DIR, so without this a wheel job
+      caches nothing at all. The container installs its own ccache; see
+      before-all in pyproject.toml.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -54,8 +63,29 @@ runs:
           ccache-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.variant }}-
           ccache-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-
 
+    - name: Point the build containers at the store
+      if: inputs.containers == 'true' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        # Bind-mount the store into the container and point CCACHE_DIR at the
+        # mount. AUDITWHEEL_PLAT - which cibuildwheel sets in the container -
+        # keeps the two libc flavours in separate stores: they have different
+        # compilers, so they would never share an entry anyway, and their
+        # package managers offer ccache versions whose on-disk formats differ.
+        # It stays unexpanded here on purpose; cibuildwheel expands it inside
+        # the container.
+        #
+        # umask 000 matters: the container builds as root, and the post-job
+        # cache upload runs as the runner user, which has to be able to read
+        # what root wrote.
+        {
+          echo "CIBW_CONTAINER_ENGINE=docker; create_args: --volume=${{ github.workspace }}/.ccache:/ccache"
+          echo "CIBW_ENVIRONMENT_LINUX=CCACHE_DIR=/ccache/\$AUDITWHEEL_PLAT CCACHE_MAXSIZE=500M CCACHE_UMASK=000"
+        } >> "$GITHUB_ENV"
+
+    # Nothing on the host compiles when the build happens in a container.
     - name: Install ccache
-      if: runner.os != 'Windows'
+      if: runner.os != 'Windows' && !(runner.os == 'Linux' && inputs.containers == 'true')
       shell: bash
       run: |
         if ! command -v ccache > /dev/null; then

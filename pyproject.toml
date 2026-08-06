@@ -50,6 +50,19 @@ test-skip = "*"
 
 [tool.cibuildwheel.linux]
 archs = ["native"]
+# CMakeLists.txt uses a compiler cache when one is on PATH, and here the
+# compilers are the container's, not the host's - so the container is where
+# ccache has to be installed. It earns its keep even without a store carried in
+# from outside: one container builds every Python version in the matrix, and the
+# ~130 vendored sources have no Python in them, so all but the first build of
+# them is a hit. manylinux is dnf-based, musllinux apk-based. Failure to install
+# is not fatal; CMake simply finds nothing and compiles as before.
+before-all = """
+if command -v apk > /dev/null; then apk add ccache || true
+elif command -v dnf > /dev/null; then dnf install -y ccache || true
+fi
+ccache --version || true
+"""
 
 [tool.cibuildwheel.macos]
 archs = ["universal2"]

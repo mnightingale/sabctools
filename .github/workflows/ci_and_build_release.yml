@@ -36,12 +36,12 @@ jobs:
     with:
       os: macos-latest
 
-  # None of the wheel jobs are cached. These are what gets published, and a
-  # restored build tree is not content-addressed - a stale one can be wrong
-  # rather than merely unhelpful, and cibuildwheel wants a clean checkout in any
-  # case. A fresh checkout has no build/, so every wheel is built from scratch.
-  # The test jobs carry the cache instead, where a bad restore costs a failed
-  # run and nothing more.
+  # No wheel job restores a build *tree*. These are what gets published, and a
+  # build tree is not content-addressed - a stale one can be wrong rather than
+  # merely unhelpful, and cibuildwheel wants a clean checkout in any case. A
+  # fresh checkout has no build/, so every wheel is configured and linked from
+  # scratch. Only the ccache store is carried in, which cannot go stale: a
+  # changed source, flag or compiler simply misses.
   #
   # The ARM runners have no tests of their own, so they gate on the tests for
   # the same OS.
@@ -62,6 +62,7 @@ jobs:
       - uses: ./.github/actions/compiler-cache
         with:
           scope: wheels
+          containers: true
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.1
       - name: Upload wheel artifacts
