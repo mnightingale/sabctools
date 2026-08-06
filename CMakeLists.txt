@@ -48,10 +48,13 @@ endif()
 # up new kernels with no change here.
 #
 # ExternalProject inherits this project's generator, so the sub-builds target
-# the same toolchain the extension does. That matters on Windows: handing CMake
-# -G Ninja would make it take the first compiler on PATH, which on the GitHub
+# the same toolchain the extension does - and on Windows they inherit the
+# environment that decides which toolchain that is. Handing CMake -G Ninja with
+# nothing else makes it take the first compiler on PATH, which on the GitHub
 # runners is MinGW gcc, producing GNU-mangled symbols that link.exe cannot
-# resolve against an MSVC-built object.
+# resolve against an MSVC-built object. CI therefore runs vcvarsall before
+# asking for Ninja; see .github/actions/msvc-ninja. Build locally without either
+# and CMake defaults to Visual Studio, which is equally fine here.
 
 # A macOS universal2 build has to be sliced. Configured with several -arch flags
 # at once, CMake reports a single CMAKE_SYSTEM_PROCESSOR - so the vendored CMake
@@ -66,8 +69,8 @@ if(APPLE AND architecture_count GREATER 1)
     message(STATUS "Slicing vendored libraries per architecture: ${SLICE_ARCHES}")
 endif()
 
-# Multi-config generators - Visual Studio, which is what scikit-build-core
-# selects on Windows - put their output in a per-config subdirectory.
+# Multi-config generators - Visual Studio, CMake's default on Windows unless
+# something asks for Ninja - put their output in a per-config subdirectory.
 get_property(IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 set(CONFIG_SUBDIR "")
 if(IS_MULTI_CONFIG)

@@ -1,0 +1,96 @@
+name: MSVC environment and Ninja
+description: >
+  Put the MSVC toolchain into the job environment and ask CMake for the Ninja
+  generator. Does nothing off Windows.
+
+  scikit-build-core picks a Visual Studio generator on Windows by default, which
+  costs two things. It spends about ten seconds per configure just enumerating
+  installed VS instances - and twice per build, since the vendored tree is a
+  nested project - and it ignores CMAKE_<LANG>_COMPILER_LAUNCHER, so no compiler
+  cache can work at all. Ninja has neither problem.
+
+  What made Ninja unusable before is that CMake, handed -G Ninja with nothing
+  else, takes the first compiler on PATH; on these runners that is MinGW gcc,
+  whose GNU-mangled objects link.exe cannot resolve. vcvarsall puts the MSVC
+  toolchain in the environment first, which is what makes Ninja safe here. A
+  developer building locally sets neither, so CMake still defaults to Visual
+  Studio for them.
+
+runs:
+  using: composite
+  steps:
+    - name: Activate MSVC and select Ninja
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        $root = & $vswhere -latest -products * -property installationPath | Select-Object -First 1
+        if (-not $root) { throw 'no Visual Studio installation found' }
+
+        # Target the runner's own architecture; the arm64 images carry their own
+        # native toolchain rather than a cross one.
+        $arch = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64' } else { 'x64' }
+
+        # vcvarsall sets variables in its own process and exits, so run it
+        # between two dumps of the environment and keep whatever it changed. Via
+        # a batch file rather than a cmd /c string: the paths then need no
+        # quoting that survives both shells.
+        $before = Join-Path $env:RUNNER_TEMP 'msvc-env-before.txt'
+        $after = Join-Path $env:RUNNER_TEMP 'msvc-env-after.txt'
+        $shim = Join-Path $env:RUNNER_TEMP 'msvc-env.bat'
+        $vcvarsall = Join-Path $root 'VC\Auxiliary\Build\vcvarsall.bat'
+        Set-Content -Path $shim -Encoding ascii -Value @(
+          '@echo off',
+          'set > "' + $before + '"',
+          'call "' + $vcvarsall + '" ' + $arch + ' > nul || exit /b 1',
+          'set > "' + $after + '"'
+        )
+        & cmd /c $shim
+        if ($LASTEXITCODE -ne 0) { throw "vcvarsall $arch failed" }
+
+        function Read-EnvDump($path) {
+          $map = @{}
+          foreach ($line in Get-Content $path) {
+            $split = $line.IndexOf('=')
+            if ($split -lt 1) { continue }
+            $name = $line.Substring(0, $split)
+            # "set" cannot represent a value containing a newline, so anything
+            # that does not look like a variable name is a continuation line.
+            if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_()]*$') { continue }
+            $map[$name] = $line.Substring($split + 1)
+          }
+          return $map
+        }
+        $old = Read-EnvDump $before
+        $new = Read-EnvDump $after
+
+        # PATH goes through GITHUB_PATH, and only the entries vcvarsall added,
+        # so the runner's own ordering is left as it was.
+        $oldPath = $old['Path'] -split ';'
+        foreach ($entry in ($new['Path'] -split ';')) {
+          if ($entry -and $oldPath -notcontains $entry) {
+            Add-Content $env:GITHUB_PATH $entry
+          }
+        }
+
+        # INCLUDE, LIB, LIBPATH, WindowsSdkDir, VCToolsInstallDir and friends.
+        foreach ($name in $new.Keys) {
+          if ($name -eq 'Path') { continue }
+          if ($old[$name] -ne $new[$name]) {
+            Add-Content $env:GITHUB_ENV "$name=$($new[$name])"
+          }
+        }
+
+        # Visual Studio ships a Ninja. Using it spares scikit-build-core a trip
+        # to PyPI for one; if it moves, that fallback still applies.
+        $ninja = Join-Path $root 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'
+        if (Test-Path (Join-Path $ninja 'ninja.exe')) {
+          Add-Content $env:GITHUB_PATH $ninja
+        } else {
+          Write-Host "::warning::no bundled Ninja under $root"
+        }
+
+        Add-Content $env:GITHUB_ENV 'CMAKE_GENERATOR=Ninja'
+        Write-Host "MSVC $arch activated, generator Ninja"

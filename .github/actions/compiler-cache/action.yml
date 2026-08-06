@@ -13,10 +13,10 @@ description: >
   other 129 files matters most. A build *tree* is the opposite case and does need
   an exact key; see the git history for that variant.
 
-  Does nothing on Windows: scikit-build-core selects the Visual Studio generator
-  there, and only the Makefile and Ninja generators honour
-  CMAKE_<LANG>_COMPILER_LAUNCHER. Forcing Ninja instead would make CMake pick the
-  first compiler on PATH, which on these runners is MinGW gcc.
+  On Windows this only pays off alongside the msvc-ninja action: a compiler cache
+  is wired up through CMAKE_<LANG>_COMPILER_LAUNCHER, which only the Makefile and
+  Ninja generators honour, and Visual Studio is what CMake reaches for there by
+  default.
 
 inputs:
   scope:
@@ -41,16 +41,18 @@ runs:
   using: composite
   steps:
     - name: Configure ccache
-      if: runner.os != 'Windows'
       shell: bash
       run: |
-        echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> "$GITHUB_ENV"
+        # Forward slashes throughout: on Windows this shell is Git Bash, where
+        # the backslashes GITHUB_WORKSPACE arrives with would read as escapes.
+        # ccache is a native binary either way and accepts them.
+        ccache_dir="${GITHUB_WORKSPACE//\\//}/.ccache"
+        echo "CCACHE_DIR=$ccache_dir" >> "$GITHUB_ENV"
         echo "CCACHE_MAXSIZE=500M" >> "$GITHUB_ENV"
         # Stops actions/cache warning about a missing path on the first run.
-        mkdir -p "${{ github.workspace }}/.ccache"
+        mkdir -p "$ccache_dir"
 
     - name: Restore compiler cache
-      if: runner.os != 'Windows'
       uses: actions/cache@v6
       with:
         path: .ccache
@@ -110,6 +112,35 @@ runs:
           echo "CIBW_CONTAINER_ENGINE=docker; create_args: --volume=${{ github.workspace }}/.ccache:/ccache --volume=$RUNNER_TEMP/ccache-bin:/ccache-bin:ro"
           echo "CIBW_ENVIRONMENT_LINUX=PATH=/ccache-bin:\$PATH CCACHE_DIR=/ccache CCACHE_MAXSIZE=500M CCACHE_UMASK=000"
         } >> "$GITHUB_ENV"
+
+    # Upstream's build rather than the one Strawberry Perl happens to leave on
+    # PATH, whose version is not ours to pin - and this runs as part of producing
+    # published wheels. Keep the version in step with the container one above.
+    - name: Fetch ccache
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        VERSION: 4.13.6
+        # sha256 of ccache-$VERSION-windows-<arch>.zip
+        SHA256_X64: 3d7cebb05850ad704e197b3f1d3f0f924ab6c9fdfc561578e146184fe9d89380
+        SHA256_ARM64: bec01846b06d6d87bf35eda50544d7c8bf9b9a4859f218417a7081aa45d7fd47
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:RUNNER_ARCH -eq 'ARM64') {
+          $arch = 'aarch64'; $want = $env:SHA256_ARM64
+        } else {
+          $arch = 'x86_64'; $want = $env:SHA256_X64
+        }
+        $name = "ccache-$($env:VERSION)-windows-$arch"
+        $zip = Join-Path $env:RUNNER_TEMP "$name.zip"
+        Invoke-WebRequest -Uri "https://github.com/ccache/ccache/releases/download/v$($env:VERSION)/$name.zip" -OutFile $zip
+        $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+        if ($got -ne $want) { throw "checksum mismatch for $name.zip: $got" }
+        Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP -Force
+        $dir = Join-Path $env:RUNNER_TEMP $name
+        # Ahead of Strawberry Perl's copy, which CMake would otherwise find.
+        Add-Content $env:GITHUB_PATH $dir
+        & (Join-Path $dir 'ccache.exe') --version
 
     # Nothing on the host compiles when the build happens in a container.
     - name: Install ccache

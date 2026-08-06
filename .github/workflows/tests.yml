@@ -30,6 +30,12 @@ jobs:
         name: Install Python
         with:
           python-version: ${{ matrix.python-version }}
+          # Caches pip's downloads, not the installs. The test dependencies are
+          # the same every run, and pyproject.toml is where they are declared.
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - uses: ./.github/actions/msvc-ninja
 
       # Nothing here caches a build tree, so scikit-build-core is free to fetch
       # its own cmake and ninja into a pip build-isolation directory - the paths
