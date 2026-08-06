@@ -9,12 +9,13 @@ description: >
   nested project - and it ignores CMAKE_<LANG>_COMPILER_LAUNCHER, so no compiler
   cache can work at all. Ninja has neither problem.
 
-  What made Ninja unusable before is that CMake, handed -G Ninja with nothing
-  else, takes the first compiler on PATH; on these runners that is MinGW gcc,
-  whose GNU-mangled objects link.exe cannot resolve. vcvarsall puts the MSVC
-  toolchain in the environment first, which is what makes Ninja safe here. A
-  developer building locally sets neither, so CMake still defaults to Visual
-  Studio for them.
+  What made Ninja unusable before is the compiler CMake ends up with. Its search
+  list is "CC c++ g++ aCC cl ...", so both c++ and g++ outrank cl: on these
+  runners that finds MinGW gcc, or - once vcvarsall has put Visual Studio's own
+  LLVM on PATH - clang as c++.exe. Neither is what we ship. So this sets CC and
+  CXX to cl.exe outright, and being in an MSVC environment is what makes that
+  cl.exe findable and usable. A developer building locally sets none of this, so
+  CMake still defaults to Visual Studio for them.
 
 runs:
   using: composite
@@ -86,6 +87,23 @@ runs:
           }
         }
 
+        # Name cl.exe outright rather than leave the choice to CMake. Its search
+        # list for the Ninja generator is "CC c++ g++ aCC cl ...", so c++ and g++
+        # both outrank cl - and vcvarsall puts Visual Studio's own LLVM on PATH
+        # here, where c++.exe is clang. Being in an MSVC environment is not by
+        # itself enough to be compiled by MSVC. Taking the first cl.exe in
+        # vcvarsall's PATH picks exactly what a developer command prompt would.
+        $cl = $null
+        foreach ($entry in ($new['Path'] -split ';')) {
+          if ($entry -and (Test-Path (Join-Path $entry 'cl.exe'))) {
+            $cl = (Join-Path $entry 'cl.exe') -replace '\\', '/'
+            break
+          }
+        }
+        if (-not $cl) { throw 'no cl.exe in the MSVC environment' }
+        Add-Content $env:GITHUB_ENV "CC=$cl"
+        Add-Content $env:GITHUB_ENV "CXX=$cl"
+
         # Visual Studio ships a Ninja. Using it spares scikit-build-core a trip
         # to PyPI for one; if it moves, that fallback still applies.
         $ninja = Join-Path $root 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'
@@ -96,4 +114,4 @@ runs:
         }
 
         Add-Content $env:GITHUB_ENV 'CMAKE_GENERATOR=Ninja'
-        Write-Host "MSVC $arch activated, generator Ninja"
+        Write-Host "MSVC $arch activated, generator Ninja, compiler $cl"
