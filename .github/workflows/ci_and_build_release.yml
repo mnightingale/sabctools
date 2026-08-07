@@ -59,7 +59,6 @@ jobs:
             linux_arch: aarch64
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/compiler-cache
         with:
           scope: wheels
           containers: true
@@ -81,8 +80,6 @@ jobs:
         os: [ windows-latest, windows-11-arm ]
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/msvc-ninja
-      - uses: ./.github/actions/compiler-cache
         with:
           scope: wheels
       - name: Build wheels
@@ -99,7 +96,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/compiler-cache
         with:
           scope: wheels
       - name: Build wheels
