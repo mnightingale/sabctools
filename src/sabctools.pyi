@@ -19,6 +19,7 @@ def crc32_xpown(n: int) -> int: ...
 def crc32_zero_unpad(crc1: int, length: int) -> int: ...
 def sparse(file: Union[IO, int], length: int) -> None:
     """Deprecated in favour of FileWriter.preallocate, kept for existing callers."""
+
 def bytearray_malloc(size: int) -> bytearray: ...
 def rarfile_rar3_s2k(pwd, salt) -> tuple[bytes, bytes]: ...
 
@@ -87,7 +88,6 @@ class FileWriter:
 
     def __init__(self, path: Union[str, bytes, PathLike]) -> None:
         """Open path for writing, creating it if it does not exist."""
-
     closed: bool
     path: Optional[str]
     size: int
