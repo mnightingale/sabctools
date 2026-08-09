@@ -20,6 +20,11 @@
 #define SABCTOOLS_FILEWRITER_H
 
 #include <Python.h>
+// shared_mutex and shared_lock come from <shared_mutex>, unique_lock from <mutex>, and
+// placement new from <new>. libc++ happens to pull the latter two in transitively;
+// libstdc++ does not, so all three are named rather than relied on.
+#include <mutex>
+#include <new>
 #include <shared_mutex>
 
 #if defined(_WIN32) || defined(__CYGWIN__)

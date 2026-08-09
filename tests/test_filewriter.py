@@ -288,11 +288,22 @@ class TestReferenceCounting:
             assert sys.getrefcount(payload) == before
 
     def test_path_does_not_leak(self, target):
+        """The getter hands out a new reference each time, so a missing decref would
+        show up as growth proportional to the number of accesses.
+
+        Deliberately not asserting the count is unchanged. The path string is also held
+        by the fixture, by tmp_path's own bookkeeping and by whatever else the
+        environment keeps, and how many of those exist differs between platforms and
+        pytest versions; a one-off difference there says nothing about this getter. A
+        leak would add a reference per access, so only growth that scales matters.
+        """
+        accesses = 1000
         writer = sabctools.FileWriter(target)
         try:
-            before = sys.getrefcount(writer.path)
-            for _ in range(100):
+            path = writer.path
+            before = sys.getrefcount(path)
+            for _ in range(accesses):
                 writer.path
-            assert sys.getrefcount(writer.path) == before
+            assert sys.getrefcount(path) - before < accesses // 10
         finally:
             writer.close()

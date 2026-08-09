@@ -19,6 +19,8 @@
 #include "filewriter.h"
 
 #include <errno.h>
+// memset, for zeroing the OVERLAPPED on Windows
+#include <string.h>
 
 #if !defined(_WIN32) && !defined(__CYGWIN__)
 #include <fcntl.h>
@@ -34,7 +36,7 @@
  */
 #define FILEWRITER_MAX_CHUNK ((Py_ssize_t)0x3FFFF000)
 
-static PyObject *FileWriter_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
+static PyObject *FileWriter_new(PyTypeObject *type, PyObject *Py_UNUSED(args), PyObject *Py_UNUSED(kwargs)) {
     FileWriter *self = (FileWriter *)type->tp_alloc(type, 0);
     if (!self) return NULL;
     self->handle = SABCTOOLS_INVALID_HANDLE;
