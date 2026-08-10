@@ -21,6 +21,8 @@
 #include <errno.h>
 // memset, for zeroing the OVERLAPPED on Windows
 #include <string.h>
+// steady_clock, for probe()'s deadline
+#include <chrono>
 
 #if !defined(_WIN32) && !defined(__CYGWIN__)
 #include <fcntl.h>
@@ -213,6 +215,43 @@ Py_ssize_t filewriter_write_raw(FileWriter *writer, const char *buffer, Py_ssize
     return written_total;
 }
 
+/*
+ * Commit the file's cached data to the device, without touching the Python API.
+ *
+ * Deliberately fsync and not F_FULLFSYNC on macOS. fsync there hands the data to the
+ * drive without asking it to flush its own cache, so the barrier is weaker than on
+ * Linux or Windows - but it is exactly what os.fsync does, and matching the platform's
+ * usual meaning is worth more here than a stronger guarantee that costs an order of
+ * magnitude more. Callers wanting the data past the drive's cache on macOS need
+ * F_FULLFSYNC and should say so.
+ */
+static bool filewriter_sync_raw(FileWriter *writer, bool *was_closed, unsigned long *error_code) {
+    *was_closed = false;
+    *error_code = 0;
+
+    // Shared for the same reason writes are: only close() needs to exclude us
+    std::shared_lock<std::shared_mutex> guard(writer->lock);
+
+    if (writer->handle == SABCTOOLS_INVALID_HANDLE) {
+        *was_closed = true;
+        return false;
+    }
+
+#if defined(_WIN32) || defined(__CYGWIN__)
+    if (!FlushFileBuffers(writer->handle)) {
+        *error_code = (unsigned long)GetLastError();
+        return false;
+    }
+#else
+    while (fsync(writer->handle) != 0) {
+        if (errno == EINTR) continue;
+        *error_code = (unsigned long)errno;
+        return false;
+    }
+#endif
+    return true;
+}
+
 void filewriter_raise(FileWriter *writer, bool was_closed, unsigned long error_code) {
     if (was_closed) {
         PyErr_SetString(PyExc_ValueError, "write on closed FileWriter");
@@ -254,6 +293,120 @@ static PyObject *FileWriter_write(FileWriter *self, PyObject *args) {
         return NULL;
     }
     return PyLong_FromSsize_t(written_total);
+}
+
+static PyObject *FileWriter_sync(FileWriter *self, PyObject *Py_UNUSED(ignored)) {
+    bool was_closed = false;
+    unsigned long error_code = 0;
+    bool ok = false;
+
+    Py_BEGIN_ALLOW_THREADS
+    ok = filewriter_sync_raw(self, &was_closed, &error_code);
+    Py_END_ALLOW_THREADS
+
+    if (!ok) {
+        if (was_closed) {
+            PyErr_SetString(PyExc_ValueError, "sync on closed FileWriter");
+            return NULL;
+        }
+        filewriter_raise(self, false, error_code);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+/*
+ * Time durable writes at a caller-supplied set of offsets.
+ *
+ * Exists so that measuring a device measures the same code that will later write to
+ * it: the same handle, the same lock, the same positional write, and on Windows the
+ * same OVERLAPPED path rather than a seek-and-write stand-in. A probe assembled from
+ * os.pwrite and os.fsync in Python answers a slightly different question, and on
+ * Windows it answered a very different one.
+ *
+ * Policy stays with the caller. Which offsets, in what order, how big a block and how
+ * long to keep going are all arguments; the only decisions made here are that each
+ * write is followed by a sync, and that the deadline is checked after a completed
+ * operation rather than interrupting one. Offsets are copied out before the clock
+ * starts, so the timed section touches no Python object at all.
+ *
+ * Returns (operations completed, seconds elapsed). Stopping early because the deadline
+ * passed is ordinary and reported as a smaller count; anything else raises.
+ */
+static PyObject *FileWriter_probe(FileWriter *self, PyObject *args) {
+    Py_buffer data;
+    PyObject *offsets_obj;
+    double time_budget;
+
+    if (!PyArg_ParseTuple(args, "y*Od:probe", &data, &offsets_obj, &time_budget))
+        return NULL;
+
+    PyObject *offsets_fast = PySequence_Fast(offsets_obj, "offsets must be a sequence");
+    if (!offsets_fast) {
+        PyBuffer_Release(&data);
+        return NULL;
+    }
+
+    // A plain array rather than a container: the extension is built with
+    // -fno-exceptions, so an allocation that could throw would abort instead
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(offsets_fast);
+    long long *offsets = NULL;
+    if (count > 0) {
+        offsets = (long long *)PyMem_Malloc((size_t)count * sizeof(long long));
+        if (!offsets) {
+            Py_DECREF(offsets_fast);
+            PyBuffer_Release(&data);
+            return PyErr_NoMemory();
+        }
+    }
+
+    for (Py_ssize_t i = 0; i < count; i++) {
+        long long offset = PyLong_AsLongLong(PySequence_Fast_GET_ITEM(offsets_fast, i));
+        if ((offset == -1 && PyErr_Occurred()) || offset < 0) {
+            if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "offsets must not be negative");
+            PyMem_Free(offsets);
+            Py_DECREF(offsets_fast);
+            PyBuffer_Release(&data);
+            return NULL;
+        }
+        offsets[i] = offset;
+    }
+    Py_DECREF(offsets_fast);
+
+    Py_ssize_t ops = 0;
+    double elapsed = 0.0;
+    bool was_closed = false;
+    unsigned long error_code = 0;
+
+    Py_BEGIN_ALLOW_THREADS
+    std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point deadline =
+        started + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                      std::chrono::duration<double>(time_budget));
+
+    for (Py_ssize_t i = 0; i < count; i++) {
+        filewriter_write_raw(self, (const char *)data.buf, data.len, offsets[i], &was_closed, &error_code);
+        if (was_closed || error_code) break;
+        if (!filewriter_sync_raw(self, &was_closed, &error_code)) break;
+        ops++;
+        if (std::chrono::steady_clock::now() >= deadline) break;
+    }
+
+    elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    Py_END_ALLOW_THREADS
+
+    PyMem_Free(offsets);
+    PyBuffer_Release(&data);
+
+    if (was_closed) {
+        PyErr_SetString(PyExc_ValueError, "probe on closed FileWriter");
+        return NULL;
+    }
+    if (error_code) {
+        filewriter_raise(self, false, error_code);
+        return NULL;
+    }
+    return Py_BuildValue("(nd)", ops, elapsed);
 }
 
 /*
@@ -448,6 +601,12 @@ static PyObject *FileWriter_repr(FileWriter *self) {
 static PyMethodDef FileWriter_methods[] = {
     {"write", (PyCFunction)FileWriter_write, METH_VARARGS,
      PyDoc_STR("write(data, offset) -> int\n\nWrite all of data at an absolute offset, returning the bytes written.")},
+    {"sync", (PyCFunction)FileWriter_sync, METH_NOARGS,
+     PyDoc_STR("sync()\n--\n\nCommit written data to the device, as os.fsync does.")},
+    {"probe", (PyCFunction)FileWriter_probe, METH_VARARGS,
+     PyDoc_STR("probe(block, offsets, time_budget)\n--\n\nWrite block at each offset, syncing after "
+               "each, until the offsets run out or time_budget seconds have passed. Returns "
+               "(operations, seconds).")},
     {"preallocate", (PyCFunction)FileWriter_preallocate, METH_O,
      PyDoc_STR("preallocate(length)\n\nSet the file length, marking it sparse first where required.")},
     {"close", (PyCFunction)FileWriter_close, METH_NOARGS,

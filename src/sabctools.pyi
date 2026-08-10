@@ -1,7 +1,7 @@
 from enum import IntEnum
 from os import PathLike
 from types import TracebackType
-from typing import Tuple, Optional, IO, List, Iterator, Union, Type
+from typing import Tuple, Optional, IO, List, Iterator, Sequence, Union, Type
 from ssl import SSLSocket
 from _typeshed import ReadableBuffer, WriteableBuffer
 
@@ -137,6 +137,25 @@ class FileWriter:
 
     def preallocate(self, length: int) -> None:
         """Set the file length, marking it sparse first where the filesystem requires it."""
+
+    def sync(self) -> None:
+        """Commit written data to the device, as os.fsync does.
+
+        On macOS that means fsync and not F_FULLFSYNC, so the data reaches the drive
+        but not necessarily the platters.
+        """
+
+    def probe(self, block: ReadableBuffer, offsets: Sequence[int], time_budget: float) -> Tuple[int, float]:
+        """Time durable writes of block at each offset, returning (operations, seconds).
+
+        Writes block at each offset in turn, syncing after each one, and stops when the
+        offsets run out or time_budget seconds have passed - whichever comes first, with
+        the deadline checked between operations rather than interrupting one. Runs with
+        the GIL released and touches no Python object once started.
+
+        Measures the same handle, lock and positional write the real path uses, which a
+        probe assembled from os.pwrite and os.fsync does not.
+        """
 
     def close(self) -> None:
         """Close the file. Idempotent, and waits for any writes still in flight."""
