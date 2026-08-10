@@ -199,6 +199,124 @@ def descriptor_count() -> int:
         return 0
 
 
+class TestSync:
+    def test_written_data_survives_the_sync(self, target):
+        with sabctools.FileWriter(target) as writer:
+            writer.write(b"durable", 0)
+            writer.sync()
+            assert open(target, "rb").read() == b"durable"
+
+    def test_sync_on_an_untouched_file_is_fine(self, target):
+        with sabctools.FileWriter(target) as writer:
+            writer.sync()
+
+    def test_sync_is_repeatable(self, target):
+        with sabctools.FileWriter(target) as writer:
+            writer.write(b"x" * 4096, 0)
+            for _ in range(5):
+                writer.sync()
+
+    def test_sync_on_a_closed_writer_raises(self, target):
+        writer = sabctools.FileWriter(target)
+        writer.close()
+        with pytest.raises(ValueError):
+            writer.sync()
+
+
+class TestProbe:
+    """Timing a device through the same handle, lock and positional write the real path
+    uses, rather than through a Python reconstruction of them"""
+
+    @staticmethod
+    def scattered(count: int, block: int, span: int) -> list:
+        return [index * block for index in range(0, span // block, max(1, (span // block) // count))][:count]
+
+    def test_reports_the_operations_it_completed(self, target):
+        block = bytes(64 * 1024)
+        offsets = self.scattered(16, len(block), 16 * 1024 * 1024)
+        with sabctools.FileWriter(target) as writer:
+            writer.preallocate(16 * 1024 * 1024)
+            ops, seconds = writer.probe(block, offsets, 5.0)
+        assert ops == len(offsets)
+        assert seconds > 0
+
+    def test_the_data_lands_at_the_offsets_it_was_given(self, target):
+        """A probe that did not really write where it was told would be timing
+        something other than the operation being gated"""
+        block = b"P" * 4096
+        offsets = [0, 40960, 4096]
+        with sabctools.FileWriter(target) as writer:
+            writer.preallocate(65536)
+            ops, _ = writer.probe(block, offsets, 5.0)
+        assert ops == 3
+
+        contents = open(target, "rb").read()
+        for offset in offsets:
+            assert contents[offset : offset + len(block)] == block
+        # Untouched region between the two runs stayed a hole
+        assert contents[8192:40960] == bytes(40960 - 8192)
+
+    def test_the_deadline_stops_it_early(self, target):
+        block = bytes(64 * 1024)
+        offsets = self.scattered(64, len(block), 32 * 1024 * 1024)
+        with sabctools.FileWriter(target) as writer:
+            writer.preallocate(32 * 1024 * 1024)
+            ops, seconds = writer.probe(block, offsets, 0.0)
+        # Checked between operations, so one always completes
+        assert 1 <= ops < len(offsets)
+        assert seconds >= 0
+
+    def test_no_offsets_does_nothing(self, target):
+        with sabctools.FileWriter(target) as writer:
+            ops, seconds = writer.probe(b"x" * 512, [], 5.0)
+        assert ops == 0
+        # Not exactly zero: the clock is read either side of an empty loop
+        assert seconds < 0.01
+        assert os.path.getsize(target) == 0
+
+    def test_negative_offsets_are_rejected(self, target):
+        with sabctools.FileWriter(target) as writer:
+            with pytest.raises(ValueError):
+                writer.probe(b"x" * 512, [0, -4096], 5.0)
+
+    def test_offsets_must_be_a_sequence(self, target):
+        with sabctools.FileWriter(target) as writer:
+            with pytest.raises(TypeError):
+                writer.probe(b"x" * 512, 4096, 5.0)
+
+    def test_probe_on_a_closed_writer_raises(self, target):
+        writer = sabctools.FileWriter(target)
+        writer.close()
+        with pytest.raises(ValueError):
+            writer.probe(b"x" * 512, [0], 5.0)
+
+    def test_the_gil_is_released_while_it_runs(self, target):
+        """It runs for up to a time budget on a thread that has a connection waiting
+        elsewhere, so holding the GIL throughout would stall the whole process"""
+        block = bytes(1024 * 1024)
+        offsets = self.scattered(64, len(block), 128 * 1024 * 1024)
+        ticks = []
+        stop = threading.Event()
+
+        def count_ticks():
+            while not stop.is_set():
+                ticks.append(1)
+
+        ticker = threading.Thread(target=count_ticks)
+        ticker.start()
+        try:
+            with sabctools.FileWriter(target) as writer:
+                writer.preallocate(128 * 1024 * 1024)
+                before = len(ticks)
+                writer.probe(block, offsets, 0.2)
+                during = len(ticks) - before
+        finally:
+            stop.set()
+            ticker.join()
+
+        assert during > 0, "the other thread never ran while probe() was working"
+
+
 class TestConcurrency:
     """Concurrent positional writes are the reason this exists. os.pwrite gives them on
     Unix but does not exist on Windows, so SABnzbd holds a lock there instead."""
