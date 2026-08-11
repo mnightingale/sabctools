@@ -22,7 +22,7 @@
 #include <Python.h>
 #include "structmember.h"
 
-
+#include <string>
 #include <string_view>
 #include <charconv>
 #include <optional>
@@ -45,17 +45,15 @@
 #define NNTP_STAT                     223
 #define NNTP_MULTILINE                NNTP_BODY, NNTP_ARTICLE, NNTP_HEAD, NNTP_CAPABILITIES
 
-/* The =yend line cannot be crazy long */
-#define YENC_MAX_TAIL_BYTES 256
-
 /* Prevent strange yEnc sizes */
-#define YENC_MAX_PART_SIZE (UINT64_C(10) * UINT64_C(1024) * UINT64_C(1024))
-#define YENC_MAX_FILE_SIZE (UINT64_C(500) * UINT64_C(1024) * UINT64_C(1024) * UINT64_C(1024))
+constexpr Py_ssize_t YENC_MAX_PART_SIZE{10 * 1024 * 1024};
+/* The file size limit exceeds Py_ssize_t on 32-bit, so it stays 64-bit and callers widen before comparing */
+constexpr uint64_t YENC_MAX_FILE_SIZE{500ull * 1024 * 1024 * 1024};
 
 /* Minimum decoder internal buffer size */
-#define YENC_MIN_BUFFER_SIZE 1024
+constexpr Py_ssize_t YENC_MIN_BUFFER_SIZE{1024};
 /* How much raw data to process each loop */
-#define YENC_CHUNK_SIZE (64*1024)
+constexpr Py_ssize_t YENC_CHUNK_SIZE{64 * 1024};
 
 /* Functions */
 bool yenc_init(PyObject *);

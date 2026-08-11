@@ -335,7 +335,7 @@ static inline void NNTPResponse_process_yenc_header(NNTPResponse* instance, std:
     if (starts_with(line, "=ybegin ")) {
         line.remove_prefix(7);
         extract_int(line, " size=", instance->file_size);
-        if (instance->file_size > YENC_MAX_FILE_SIZE) {
+        if (instance->file_size < 0 || static_cast<uint64_t>(instance->file_size) > YENC_MAX_FILE_SIZE) {
             instance->file_size = 0;
         }
         if (!extract_int(line, " part=", instance->part)) {
