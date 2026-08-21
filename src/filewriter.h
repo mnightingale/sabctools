@@ -23,6 +23,8 @@
 // shared_mutex and shared_lock come from <shared_mutex>, unique_lock from <mutex>, and
 // placement new from <new>. libc++ happens to pull the latter two in transitively;
 // libstdc++ does not, so all three are named rather than relied on.
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <new>
 #include <shared_mutex>
@@ -62,6 +64,28 @@ typedef int FileHandle;
  * exclusively, so it waits for writes to drain rather than pulling the handle out
  * from under them.
  */
+/*
+ * What the device did with the writes it was given.
+ *
+ * The reason to keep this in C rather than time write() from Python is that the
+ * streaming path never returns to Python between writes - the decoder writes from
+ * inside its own GIL-free section - so a Python timer cannot see those writes at all.
+ *
+ * Relaxed ordering throughout. The counters are read to judge a trend over hundreds of
+ * writes, so a reader that catches bytes from one write and nanos from the next is off
+ * by an amount far below what it is looking for, and paying for a consistent snapshot
+ * across four counters on every write is not worth it.
+ */
+typedef struct {
+    std::atomic<uint64_t> count;
+    std::atomic<uint64_t> bytes;
+    std::atomic<uint64_t> nanos;
+    // Cumulative over the file's life, so it says what the worst write cost rather
+    // than what the recent ones cost. Diagnostic; a controller wants the mean of a
+    // window, which is what deltas of count and nanos give.
+    std::atomic<uint64_t> max_nanos;
+} FileWriterStats;
+
 typedef struct {
     PyObject_HEAD
 
@@ -69,6 +93,7 @@ typedef struct {
     PyObject *path;
     // Guards handle against close(), not the writes against each other
     std::shared_mutex lock;
+    FileWriterStats writes;
 } FileWriter;
 
 bool filewriter_init(PyObject *);

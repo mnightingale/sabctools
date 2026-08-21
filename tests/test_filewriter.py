@@ -481,3 +481,57 @@ class TestAccessors:
                 reader.join()
 
         assert not errors, errors[:3]
+
+
+class TestStats:
+    def test_an_untouched_writer_has_written_nothing(self, target):
+        with sabctools.FileWriter(target) as writer:
+            assert writer.stats == {"count": 0, "bytes": 0, "nanos": 0, "max_nanos": 0}
+
+    def test_every_write_is_counted(self, target):
+        with sabctools.FileWriter(target) as writer:
+            for index in range(4):
+                writer.write(b"x" * 1000, index * 1000)
+            stats = writer.stats
+            assert stats["count"] == 4
+            assert stats["bytes"] == 4000
+            assert stats["nanos"] > 0
+            assert 0 < stats["max_nanos"] <= stats["nanos"]
+
+    def test_preallocate_and_sync_are_not_writes(self, target):
+        """Only the write itself is timed, so what the counters report is the cost of
+        putting article bytes on the device and not of the file being set up."""
+        with sabctools.FileWriter(target) as writer:
+            writer.preallocate(1 << 20)
+            writer.sync()
+            assert writer.stats["count"] == 0
+
+    def test_a_write_to_a_closed_writer_is_not_counted(self, target):
+        writer = sabctools.FileWriter(target)
+        writer.write(b"payload", 0)
+        writer.close()
+        with pytest.raises(ValueError):
+            writer.write(b"payload", 0)
+        assert writer.stats["count"] == 1
+
+    def test_stats_survive_close(self, target):
+        """The LRU closes a writer when a file finishes, and what that file cost is
+        worth reading afterwards."""
+        writer = sabctools.FileWriter(target)
+        writer.write(b"x" * 500, 0)
+        writer.close()
+        assert writer.stats["count"] == 1
+        assert writer.stats["bytes"] == 500
+
+    def test_concurrent_writes_are_all_counted(self, target):
+        """Relaxed atomics still have to add up: the counters are incremented from
+        several threads at once, with only the shared lock held."""
+        with sabctools.FileWriter(target) as writer:
+            threads = [threading.Thread(target=writer.write, args=(b"y" * 4096, index * 4096)) for index in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            stats = writer.stats
+            assert stats["count"] == 8
+            assert stats["bytes"] == 8 * 4096

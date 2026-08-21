@@ -46,6 +46,8 @@ static PyObject *FileWriter_new(PyTypeObject *type, PyObject *Py_UNUSED(args), P
     // The mutex is a real C++ object inside a C struct, so it has to be constructed
     // and destroyed by hand
     new (&self->lock) std::shared_mutex();
+    // Value-initialised, so every counter starts at zero
+    new (&self->writes) FileWriterStats();
     return (PyObject *)self;
 }
 
@@ -143,6 +145,7 @@ static int FileWriter_init(FileWriter *self, PyObject *args, PyObject *kwargs) {
 static void FileWriter_dealloc(FileWriter *self) {
     filewriter_close_handle(self);
     Py_CLEAR(self->path);
+    self->writes.~FileWriterStats();
     self->lock.~shared_mutex();
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -168,6 +171,10 @@ Py_ssize_t filewriter_write_raw(FileWriter *writer, const char *buffer, Py_ssize
         *was_closed = true;
         return 0;
     }
+
+    // Timed from here rather than from the top of the function so the figure is the
+    // device's, not the lock's. Waiting on close() to finish is not write time.
+    std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
 
     while (written_total < length) {
         Py_ssize_t remaining = length - written_total;
@@ -210,6 +217,19 @@ Py_ssize_t filewriter_write_raw(FileWriter *writer, const char *buffer, Py_ssize
         }
         written_total += (Py_ssize_t)written;
 #endif
+    }
+
+    // Recorded even for a write that failed part way: the time was spent either way,
+    // and a device failing slowly is exactly the case worth seeing.
+    uint64_t elapsed =
+        (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
+            .count();
+    writer->writes.count.fetch_add(1, std::memory_order_relaxed);
+    writer->writes.bytes.fetch_add((uint64_t)written_total, std::memory_order_relaxed);
+    writer->writes.nanos.fetch_add(elapsed, std::memory_order_relaxed);
+    uint64_t worst = writer->writes.max_nanos.load(std::memory_order_relaxed);
+    while (elapsed > worst &&
+           !writer->writes.max_nanos.compare_exchange_weak(worst, elapsed, std::memory_order_relaxed)) {
     }
 
     return written_total;
@@ -586,6 +606,21 @@ static PyObject *FileWriter_get_path(FileWriter *self, void *Py_UNUSED(closure))
     return self->path;
 }
 
+/*
+ * What this file's writes have cost so far.
+ *
+ * No lock: the counters are atomic and are read for a trend, not for a snapshot. A
+ * write landing between two of the loads below shifts the answer by one write out of
+ * however many the caller is averaging over.
+ */
+static PyObject *FileWriter_get_stats(FileWriter *self, void *Py_UNUSED(closure)) {
+    return Py_BuildValue("{s:K,s:K,s:K,s:K}", "count",
+                         (unsigned long long)self->writes.count.load(std::memory_order_relaxed), "bytes",
+                         (unsigned long long)self->writes.bytes.load(std::memory_order_relaxed), "nanos",
+                         (unsigned long long)self->writes.nanos.load(std::memory_order_relaxed), "max_nanos",
+                         (unsigned long long)self->writes.max_nanos.load(std::memory_order_relaxed));
+}
+
 static PyObject *FileWriter_repr(FileWriter *self) {
     bool closed;
     Py_BEGIN_ALLOW_THREADS
@@ -620,6 +655,10 @@ static PyGetSetDef FileWriter_getset[] = {
     {"closed", (getter)FileWriter_get_closed, NULL, PyDoc_STR("Has the file been closed"), NULL},
     {"path", (getter)FileWriter_get_path, NULL, PyDoc_STR("Path the file was opened with"), NULL},
     {"size", (getter)FileWriter_get_size, NULL, PyDoc_STR("Current length of the file in bytes"), NULL},
+    {"stats", (getter)FileWriter_get_stats, NULL,
+     PyDoc_STR("Writes performed on this file: count, bytes, nanos spent in the write itself, and the "
+               "slowest single write in nanos."),
+     NULL},
     {NULL, NULL, NULL, NULL, NULL}
 };
 

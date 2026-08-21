@@ -31,9 +31,14 @@ For more details, see the [cpython pull request](https://github.com/python/cpyth
 writer = sabctools.FileWriter(path)
 writer.preallocate(size)    # set the length, marking the file sparse where needed
 writer.write(data, offset)  # short writes are retried internally
+writer.sync()               # commit to the device, as os.fsync does
 writer.close()              # idempotent, and waits for writes still in flight
 ```
 It owns its own descriptor, so nothing outside can close it while a write is in progress. On Windows the writes use `WriteFile` with an `OVERLAPPED` offset, because `os.pwrite` is not available there.
+
+`writer.stats` reports what the writes cost — `count`, `bytes`, `nanos` spent inside the write itself, and `max_nanos` for the slowest one. Only `write()` is timed, and the counters keep their values after `close()`. Timing in C rather than around `write()` in Python is what makes the streamed path measurable at all: the decoder writes from inside its own GIL-free section and never returns to Python between writes.
+
+`writer.probe(block, offsets, time_budget)` writes `block` at each offset in turn, syncing after each, and stops when the offsets run out or the budget expires. It returns `(operations, seconds)`, so a caller can time durable scattered writes through the same code path a real download uses.
 
 The decoder can write into one directly: pass a `FileWriter` as the `sink` argument of `Decoder.expect(context, sink)`, and each decoded body is written at the offset given by its yEnc headers rather than returned as a `bytearray`.
 
