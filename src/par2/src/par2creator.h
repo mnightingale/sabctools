@@ -1,0 +1,226 @@
+//  This file is part of par2cmdline (a PAR 2.0 compatible file verification and
+//  repair tool). See http://parchive.sourceforge.net for details of PAR 2.0.
+//
+//  Copyright (c) 2003 Peter Brian Clements
+//  Copyright (c) 2019 Michael D. Nahas
+//
+//  par2cmdline is free software; you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation; either version 2 of the License, or
+//  (at your option) any later version.
+//
+//  par2cmdline is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program; if not, write to the Free Software
+//  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+
+#ifndef __PAR2CREATOR_H__
+#define __PAR2CREATOR_H__
+
+namespace par2
+{
+
+class MainPacket;
+class CreatorPacket;
+class CriticalPacket;
+
+
+class Par2SetCreator
+{
+public:
+  Par2SetCreator(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel,
+              Backends backends = Backends());
+  ~Par2SetCreator(void);
+
+  // Ask the operation in progress to stop as soon as it can, from any thread.
+  // Process then returns eCancelled, having removed any file it created.
+  // The flag stays set, so it must be cleared before reusing this object.
+  void Cancel(void) {cancelled.store(true, std::memory_order_relaxed);}
+  void ClearCancel(void) {cancelled.store(false, std::memory_order_relaxed);}
+  bool IsCancelled(void) const {return cancelled.load(std::memory_order_relaxed);}
+
+  // Set an observer to be notified of progress and per-file results.
+  // Pass 0 to stop reporting. The observer must outlive this object.
+  void SetObserver(Par2Observer *_observer)
+  {
+    observer = _observer;
+    errorlog.SetObserver(_observer);
+  }
+
+  // Why the last operation failed, and forgetting it before the next one
+  bool GetLastError(Par2Error *error) const {return errorlog.First(error);}
+  void ClearLastError(void) {errorlog.Clear();}
+
+  // Create recovery files from the source files specified on the command line
+  Result Process(const size_t memorylimit,
+		 const std::string &basepath,
+		 const u32 nthreads,
+		 const u32 filethreads,
+		 const std::string &parfilename,
+		 const std::vector<std::string> &extrafiles,
+		 const u64 blocksize,
+		 const u32 firstblock,
+		 const Scheme recoveryfilescheme,
+		 const u32 recoveryfilecount,
+		 const u32 recoveryblockcount
+		 );
+
+protected:
+  // The phases a create goes through, in order. Each reads the settings
+  // Process was given, which it leaves on the object.
+
+  // Work out the shape of the set, and check that it can be written
+  Result PrepareCreation(void);
+
+  // Read every source file and record what it contains
+  Result HashSourceFiles(void);
+
+  // Create the recovery files, after which they all exist at full size
+  Result CreateOutputFiles(void);
+
+  // Compute the recovery blocks and write them
+  Result ComputeRecoveryData(void);
+
+  // Write what describes the set, and close everything
+  Result WriteCriticalData(void);
+
+  // Apply the thread counts, leaving either at its default when it is zero
+  void ApplyThreadCounts(const u32 nthreads, const u32 filethreads);
+
+  // Steps in the creation process:
+
+  // Check permissions in the basepath
+  bool CheckBasepath(const std::string &parfilename);
+
+  // Compute block size from block count or vice versa depending on which was
+  // specified on the command line
+  bool ComputeBlockCount(void);
+
+  // Determine how much recovery data can be computed on one pass
+  bool CalculateProcessBlockSize(size_t memorylimit);
+
+  // Open all of the source files, compute the Hashes and CRC values, and store
+  // the results in the file verification and file description packets.
+  bool OpenSourceFiles(void);
+
+  // Create the main packet and determine the set_id_hash to use with all packets
+  bool CreateMainPacket(void);
+
+  // Create the creator packet.
+  bool CreateCreatorPacket(void);
+
+  // Initialise all of the source blocks ready to start reading data from the source files.
+  bool CreateSourceBlocks(void);
+
+  // Create all of the output files and allocate all packets to appropriate file offsets.
+  bool InitialiseOutputFiles(void);
+
+  // Allocate memory buffers for reading and writing data to disk.
+  bool AllocateBuffers(size_t memorylimit);
+
+  // Compute the Reed Solomon matrix
+  bool ComputeRSMatrix(void);
+
+  // Read source data, process it through the RS matrix and write it to disk.
+  bool ProcessData(u64 blockoffset, size_t blocklength, ProgressMeter<u64> &progress);
+
+  // Finish computation of the recovery packets and write the headers to disk.
+  bool WriteRecoveryPacketHeaders(void);
+
+  // Finish computing the full file hash values of the source files
+  bool FinishFileHashComputation(void);
+
+  // Fill in all remaining details in the critical packets.
+  bool FinishCriticalPackets(void);
+
+  // Write all other critical packets to disk.
+  bool WriteCriticalPackets(void);
+
+  // Close all files.
+  bool CloseFiles(void);
+
+  // Delete every recovery file created so far, so that a create which stops
+  // part way leaves nothing of the set behind.
+  void DeleteIncompleteRecoveryFiles(void);
+
+  u32                                 GetFileThreads(void) const {return filethreads;}
+
+protected:
+  std::ostream &sout; // stream for output (for commandline, this is cout)
+  std::ostream &serr; // stream for errors (for commandline, this is cerr)
+
+  // What Process was given, kept for the phases to read
+  std::string parfilename;                // The name of the set being created
+  std::string basepath;                   // What the source file names are relative to
+  std::vector<std::string> extrafiles;    // The source files
+  size_t memorylimit{};                   // How much memory the work may use
+
+  ErrorLog errorlog;           // Why the last operation failed
+
+  const NoiseLevel noiselevel; // How noisy we should be
+  const Backends backends;     // The implementations the application supplied
+
+  Par2Observer *observer;      // Notified of progress, or 0
+
+  std::atomic<bool> cancelled; // Set by Cancel from any thread
+
+  u32 totalthreads;            // Number of threads the whole create may use
+  u32 filethreads;             // Number of threads for file processing
+
+  u64 blocksize;      // The size of each block.
+  size_t chunksize;   // How much of each block will be processed at a
+                      // time (due to memory constraints).
+
+  void *transferbuffer; // chunksize * NUM_TRANSFER_BUFFERS
+  void *outputbuffer; // chunksize
+  std::unique_ptr<Processor> processor; // Multiplies the input blocks by the RS matrix
+
+  u32 sourcefilecount;   // Number of source files for which recovery data will be computed.
+  u32 sourceblockcount;  // Total number of data blocks that the source files will be
+                         // virtually sliced into.
+
+  u64 largestfilesize;   // The size of the largest source file
+  u64 totaldatasize;     // The size of all of the source files together
+
+  Scheme recoveryfilescheme;  // What scheme will be used to select the
+                                           // sizes for the recovery files.
+
+  u32 recoveryfilecount;  // The number of recovery files that will be created
+  u32 recoveryblockcount; // The number of recovery blocks that will be placed
+                          // in the recovery files.
+
+  u32 firstrecoveryblock; // The lowest exponent value to use for the recovery blocks.
+
+  MainPacket    *mainpacket;    // The main packet
+  CreatorPacket *creatorpacket; // The creator packet
+
+  std::vector<Par2CreatorSourceFile*> sourcefiles;  // Array containing details of the source files
+                                               // as well as the file verification and file
+                                               // description packets for them.
+  std::mutex                      sourcefilesMutex; // Guards sourcefiles and criticalpackets while
+                                                    // the source files are opened in parallel.
+
+  std::vector<DataBlock>          sourceblocks;     // Array with one entry for every source block.
+
+  std::vector<DiskFile>           recoveryfiles;    // Array with one entry for every recovery file.
+  std::vector<RecoveryPacket>     recoverypackets;  // Array with one entry for every recovery packet.
+
+  std::list<CriticalPacket*>      criticalpackets;  // A list of all of the critical packets.
+  std::list<CriticalPacketEntry>  criticalpacketentries; // A list of which critical packet will
+                                                    // be written to which recovery file.
+
+  ReedSolomon<Galois16> rs;   // The Reed Solomon matrix.
+
+  bool deferhashcomputation; // If we have enough memory to compute all recovery data
+                             // in one pass, then we can defer the computation of
+                             // the full file hash and block crc and hashes until
+                             // the recovery data is computed.
+};
+
+} // namespace par2
+
+#endif // __PAR2CREATOR_H__

@@ -19,14 +19,863 @@
 
 #include "libpar2internal.h"
 
-#include <vector>
-#include <string>
-#include <ostream>
-
-using namespace std;
-
-namespace Par2
+namespace par2
 {
+
+// This webpage has code to get physical memory size on many OSes
+// http://nadeausoftware.com/articles/2012/09/c_c_tip_how_get_physical_memory_size_system
+
+#ifdef _WIN32
+u64 GetTotalPhysicalMemory(void)
+{
+  u64 TotalPhysicalMemory = 0;
+
+  HMODULE hLib = ::LoadLibraryA("kernel32.dll");
+  if (NULL != hLib)
+  {
+    BOOL (WINAPI *pfn)(LPMEMORYSTATUSEX) = (BOOL (WINAPI*)(LPMEMORYSTATUSEX))::GetProcAddress(hLib, "GlobalMemoryStatusEx");
+
+    if (NULL != pfn)
+    {
+      MEMORYSTATUSEX mse;
+      mse.dwLength = sizeof(mse);
+      if (pfn(&mse))
+      {
+	TotalPhysicalMemory = mse.ullTotalPhys;
+      }
+    }
+
+    ::FreeLibrary(hLib);
+  }
+
+  if (TotalPhysicalMemory == 0)
+  {
+    MEMORYSTATUS ms;
+    ::ZeroMemory(&ms, sizeof(ms));
+    ::GlobalMemoryStatus(&ms);
+
+    TotalPhysicalMemory = ms.dwTotalPhys;
+  }
+
+  return TotalPhysicalMemory;
+}
+#elif defined(_SC_PHYS_PAGES) && defined(_SC_PAGESIZE)
+// POSIX compliant OSes, including OSX/MacOS and Cygwin.  Also works for Linux.
+u64 GetTotalPhysicalMemory(void)
+{
+  long pages = sysconf(_SC_PHYS_PAGES);
+  long page_size = sysconf(_SC_PAGESIZE);
+  if (pages <= 0 || page_size <= 0)
+    return 0;
+
+  return (u64)pages * (u64)page_size;
+}
+#else
+// default version == unable to request memory size
+u64 GetTotalPhysicalMemory(void)
+{
+  return 0;
+}
+#endif
+
+size_t DefaultMemoryLimit(void)
+{
+  // 1/8th of total physical memory, floored to 256MiB on a machine with more
+  // than that, and 256MiB when it cannot be found
+  const u64 total = GetTotalPhysicalMemory() / 1048576;
+  u64 limit = total / 8;
+  if (limit < 256 && (total == 0 || total > 256))
+    limit = 256;
+
+  // limit to 1GB on 32-bit platforms to avoid exhausing the addressable memory space
+  if (sizeof(uintptr_t) < 8 && limit > 1024)
+    limit = 1024;
+
+  return (size_t)limit * 1048576;
+}
+
+// Par2Repairer carries out the work; deriving from it reaches the individual
+// steps without making them part of its public interface.
+class Par2Verifier::Impl : public Par2Repairer
+{
+public:
+  Impl(std::ostream &sout, std::ostream &serr, NoiseLevel noiselevel,
+       const std::string &_basepath, const Backends &backends)
+    : Par2Repairer(sout, serr, noiselevel, backends)
+  {
+    basepath = _basepath;
+  }
+
+  // setchanged reports whether the set the packets describe is now a
+  // different shape, which is what makes an earlier scan of the data useless
+  Result Add(const std::string &parfilename, bool *setchanged)
+  {
+    ClearLastError();
+
+    const std::vector<std::string> none;
+
+    const u32 blocksbefore = sourceblockcount;
+    const size_t filesbefore = sourcefiles.size();
+
+    // LoadPackets moves on quietly when nothing can be read, but a caller
+    // naming one file at a time needs to know whether the name was any use.
+    // The name may be that of a file or of a whole set, and its packets may
+    // already have been read, so it is only useless when there is no such
+    // file and nothing new arrived.
+    const u32 before = packetsloaded;
+
+    // Read it again even if it has been seen before
+    if (!LoadPackets(parfilename, none, true))
+    {
+      if (IsCancelled())
+        return eCancelled;
+
+      errorlog.Record(ecInternalError, "Could not load the PAR2 packets", parfilename);
+      return eLogicError;
+    }
+
+    if (packetsloaded == before && !DiskFile::FileExists(parfilename))
+    {
+      errorlog.Record(ecPar2FileMissing, "There is no such PAR2 file", parfilename);
+      return eFileIOError;
+    }
+
+    // Loading stops where the cancel reached it, so the packets read so far do
+    // not describe the whole of what was named and are not worth preparing
+    if (IsCancelled())
+      return eCancelled;
+
+    const Result result = PreparePackets();
+
+    if (setchanged)
+      *setchanged = (sourceblockcount != blocksbefore) || (sourcefiles.size() != filesbefore);
+
+    return result;
+  }
+
+  void SetBasePath(const std::string &_basepath)
+  {
+    basepath = _basepath;
+  }
+
+  // Whether the recovery data covers what the last scan found missing
+  bool CanRepair(void) const
+  {
+    return recoverypacketmap.size() >= missingblockcount;
+  }
+
+  // Work out again whether the data found by an earlier scan can be repaired
+  // with the recovery blocks available now
+  Result Reassess(void)
+  {
+    ClearLastError();
+
+    if (0 == mainpacket)
+    {
+      errorlog.Record(ecMainPacketMissing, "The PAR2 files do not describe a set");
+      return eInsufficientCriticalData;
+    }
+
+    UpdateVerificationResults();
+
+    if (!CheckVerificationResults())
+      return eRepairNotPossible;
+
+    if (completefilecount < mainpacket->RecoverableFileCount())
+      return eRepairPossible;
+
+    return eSuccess;
+  }
+
+  Result Scan(const std::string &filename, const size_t memorylimit,
+              const u32 _nthreads, const u32 _filethreads)
+  {
+    ApplyThreadCounts(_nthreads, _filethreads);
+    ApplyMemoryLimit(memorylimit);
+
+    return ScanFile(filename, basepath);
+  }
+
+  void SetDataSkipping(const bool _skipdata, const u64 _skipleaway)
+  {
+    skipdata = _skipdata;
+    skipleaway = _skipleaway;
+  }
+
+  Result Check(const std::vector<std::string> &_extrafiles,
+               const size_t memorylimit,
+               const u32 _nthreads,
+               const u32 _filethreads)
+  {
+    ClearLastError();
+
+    if (0 == mainpacket)
+    {
+      errorlog.Record(ecMainPacketMissing, "The PAR2 files do not describe a set");
+      return eInsufficientCriticalData;
+    }
+
+    ApplyThreadCounts(_nthreads, _filethreads);
+    ApplyMemoryLimit(memorylimit);
+
+    std::vector<std::string> extrafiles = _extrafiles;
+
+    return VerifyFiles(basepath, extrafiles, false);
+  }
+
+  Result Rebuild(const size_t memorylimit,
+                 const u32 _nthreads,
+                 const u32 _filethreads,
+                 const bool verifyafter)
+  {
+    ClearLastError();
+
+    if (0 == mainpacket)
+    {
+      errorlog.Record(ecMainPacketMissing, "The PAR2 files do not describe a set");
+      return eInsufficientCriticalData;
+    }
+
+    ApplyThreadCounts(_nthreads, _filethreads);
+
+    return RepairFiles(memorylimit, basepath, verifyafter);
+  }
+
+  bool SetInfo(Par2SetInfo *info) const
+  {
+    if (0 == info || 0 == mainpacket)
+      return false;
+
+    memcpy(info->setid.data(), setid.hash, sizeof(setid.hash));
+    info->blocksize = blocksize;
+    info->datablocks = sourceblockcount;
+    info->recoveryblocks = (u32)recoverypacketmap.size();
+    info->recoverablefilecount = mainpacket->RecoverableFileCount();
+    info->otherfilecount = mainpacket->TotalFileCount() - mainpacket->RecoverableFileCount();
+    info->datasize = totaldatasize;
+    if (creatorpacket)
+      info->creator = creatorpacket->Client();
+
+    return true;
+  }
+};
+
+// Append a path separator unless there is one already. Empty is left alone.
+static std::string WithSeparator(const std::string &path)
+{
+  if (path.empty())
+    return path;
+
+  const std::string last = path.substr(path.length() - 1);
+  if (PATHSEP == last || ALTPATHSEP == last)
+    return path;
+
+  return path + PATHSEP;
+}
+
+// Absolute and ending in a separator, which is the form every path this API
+// reports. The separator goes on first, so "." names the directory itself.
+// Empty is left alone.
+static std::string NormaliseBasePath(const std::string &path)
+{
+  if (path.empty())
+    return path;
+
+  return WithSeparator(DiskFile::GetCanonicalPathname(WithSeparator(path)));
+}
+
+// The directory a PAR2 file is in, which is where the tool looks with no -B
+static std::string BasePathFor(const std::string &parfilename)
+{
+  std::string path;
+  std::string name;
+  DiskFile::SplitFilename(parfilename, path, name);
+
+  std::string basepath = DiskFile::GetCanonicalPathname(path);
+
+  if (basepath.empty())
+    basepath = DiskFile::GetCanonicalPathname("./");
+
+  return basepath;
+}
+
+// Verifying leaves a Par2Repairer with the results of that one pass, so a
+// second pass has to start from a new one. The PAR2 files that were added are
+// read again, which is cheap next to scanning the data files.
+void Par2Verifier::Restart(void)
+{
+  const bool wascancelled = impl->IsCancelled();
+
+  impl = std::make_unique<Impl>(sout, serr, noiselevel, basepath, backends);
+
+  // The replay repeats work the observer has already been told about, so it is
+  // told none of it. The observer is attached once the handle is back where it
+  // was, and the cancel with it, so that neither affects the replay itself.
+  impl->SetDataSkipping(skipdata, skipleaway);
+
+  for (std::map<std::string, std::vector<bool> >::const_iterator kb = knownblocks.begin();
+       kb != knownblocks.end();
+       ++kb)
+  {
+    impl->SetKnownBlocks(kb->first, kb->second);
+  }
+
+  for (const auto &par2file : par2files)
+  {
+    impl->Add(par2file, 0);
+  }
+
+  verified = false;
+  scanned = false;
+
+  const std::vector<std::string> rescan = scannedfiles;
+  scannedfiles.clear();
+
+  for (const auto &f : rescan)
+  {
+    VerifyFile(f);
+  }
+
+  impl->SetObserver(observer);
+
+  if (wascancelled)
+    impl->Cancel();
+}
+
+// Discards everything written to it
+class NullStream : public std::ostream
+{
+public:
+  NullStream(void)
+  : std::ostream(&buffer)
+  , buffer()
+  {
+  }
+
+private:
+  class Buffer : public std::streambuf
+  {
+  protected:
+    int_type overflow(int_type c) override
+    {
+      return c;
+    }
+
+    std::streamsize xsputn(const char *, std::streamsize n) override
+    {
+      return n;
+    }
+  };
+
+  Buffer buffer;
+};
+
+Par2Verifier::Par2Verifier(std::ostream &sout, std::ostream &serr, NoiseLevel noiselevel,
+                           const std::string &_basepath, Backends _backends)
+: nullstream()
+, sout(sout)
+, serr(serr)
+, noiselevel(noiselevel)
+, backends(std::move(_backends))
+, observer(0)
+, memorylimit(DefaultMemoryLimit())
+, nthreads(0)
+, filethreads(0)
+, skipdata(false)
+, skipleaway(DEFAULT_SKIP_LEAWAY)
+, par2files()
+, scannedfiles()
+, knownblocks()
+, verified(false)
+, scanned(false)
+, basepath(NormaliseBasePath(_basepath))
+, lasterror()
+, impl(new Impl(sout, serr, noiselevel, basepath, backends))
+{
+}
+
+Par2Verifier::Par2Verifier(const std::string &_basepath, Backends _backends)
+: nullstream(new NullStream)
+, sout(*nullstream)
+, serr(*nullstream)
+, noiselevel(nlSilent)
+, backends(std::move(_backends))
+, observer(0)
+, memorylimit(DefaultMemoryLimit())
+, nthreads(0)
+, filethreads(0)
+, skipdata(false)
+, skipleaway(DEFAULT_SKIP_LEAWAY)
+, par2files()
+, scannedfiles()
+, knownblocks()
+, verified(false)
+, scanned(false)
+, basepath(NormaliseBasePath(_basepath))
+, lasterror()
+, impl(new Impl(sout, serr, noiselevel, basepath, backends))
+{
+}
+
+Par2Verifier::~Par2Verifier() = default;
+
+// The engine records the error, but Restart throws the engine away, so the
+// handle keeps its own copy of what the call it is returning from recorded.
+void Par2Verifier::TakeLastError(void)
+{
+  lasterror = Par2Error();
+  impl->GetLastError(&lasterror);
+}
+
+// What the handle itself has to report, rather than the work it delegates
+void Par2Verifier::RecordLastError(const ErrorCode code, const std::string &message)
+{
+  lasterror = Par2Error();
+  lasterror.code = code;
+  lasterror.message = message;
+
+  if (observer)
+    observer->OnError(lasterror);
+}
+
+bool Par2Verifier::GetLastError(Par2Error *error) const
+{
+  if (0 == error || ecNone == lasterror.code)
+    return false;
+
+  *error = lasterror;
+  return true;
+}
+
+void Par2Verifier::SetObserver(Par2Observer *_observer)
+{
+  observer = _observer;
+  impl->SetObserver(_observer);
+}
+
+void Par2Verifier::SetMemoryLimit(const size_t _memorylimit)
+{
+  memorylimit = (_memorylimit != 0) ? _memorylimit : DefaultMemoryLimit();
+}
+
+void Par2Verifier::SetDataSkipping(const bool enabled, const u64 leaway)
+{
+  skipdata = enabled;
+  skipleaway = (leaway != 0) ? leaway : DEFAULT_SKIP_LEAWAY;
+
+  impl->SetDataSkipping(skipdata, skipleaway);
+}
+
+void Par2Verifier::SetThreadCounts(const u32 _nthreads, const u32 _filethreads)
+{
+  nthreads = _nthreads;
+  filethreads = _filethreads;
+}
+
+Result Par2Verifier::AddPar2File(const std::string &parfilename)
+{
+  // Naming the same file again is not an error, there is simply nothing to do
+  if (std::find(par2files.begin(), par2files.end(), parfilename) != par2files.end())
+  {
+    lasterror = Par2Error();
+    return eSuccess;
+  }
+
+  // Take it from the first PAR2 file named, before any packets are read
+  if (basepath.empty())
+  {
+    basepath = NormaliseBasePath(BasePathFor(parfilename));
+    impl->SetBasePath(basepath);
+  }
+
+  bool setchanged = false;
+  const Result result = impl->Add(parfilename, &setchanged);
+
+  // Restart replays the scans through VerifyFile, which would otherwise leave
+  // the handle holding what the replay found rather than what Add recorded
+  TakeLastError();
+  const Par2Error added = lasterror;
+
+  // Remembered even without the critical packets, so that a later restart
+  // replays it alongside the file that completes the set. A cancelled load is
+  // not remembered, so that naming it again after ClearCancel reads the rest.
+  if (result != eFileIOError && result != eCancelled)
+    par2files.push_back(parfilename);
+
+  // Extra recovery data leaves what the scan found still true, so it is kept
+  // and Reassess can use it. A set of a different shape does not, even when the
+  // scan was cancelled. Files scanned before the set was known are replayed by
+  // the same restart.
+  if (setchanged && (scanned || !scannedfiles.empty()))
+    Restart();
+
+  lasterror = added;
+
+  return result;
+}
+
+Result Par2Verifier::Reassess(void)
+{
+  if (!verified)
+  {
+    RecordLastError(ecNotVerified, "Nothing has been verified yet");
+    return eLogicError;
+  }
+
+  const Result result = impl->Reassess();
+  TakeLastError();
+
+  return result;
+}
+
+bool Par2Verifier::GetSetInfo(Par2SetInfo *info) const
+{
+  return impl->SetInfo(info);
+}
+
+bool Par2Verifier::GetFileInfo(std::vector<Par2FileInfo> *files) const
+{
+  return impl->GetFileInfo(files);
+}
+
+bool Par2Verifier::GetBlockChecksums(const std::string &filename,
+                                    std::vector<u32> *crcs) const
+{
+  return impl->GetBlockChecksums(filename, crcs);
+}
+
+// Guarded by verified, unlike GetBlockChecksums: before anything has been
+// scanned every block would read as not found, which is not the same as
+// nothing having been looked at.
+bool Par2Verifier::GetFoundBlocks(const std::string &filename,
+                                  std::vector<bool> *blocks) const
+{
+  if (!verified)
+    return false;
+
+  return impl->GetFoundBlocks(filename, blocks);
+}
+
+bool Par2Verifier::GetBackupFiles(std::vector<std::string> *files) const
+{
+  return impl->GetBackupFiles(files);
+}
+
+bool Par2Verifier::GetRenamedFiles(std::vector<std::pair<std::string, std::string> > *files) const
+{
+  return impl->GetRenamedFiles(files);
+}
+
+bool Par2Verifier::GetVerifyResult(Par2VerifyResult *result) const
+{
+  if (!verified)
+    return false;
+
+  return impl->GetVerifyResult(result);
+}
+
+bool Par2Verifier::SetKnownBlocks(const std::string &filename,
+                                 const std::vector<bool> &blocks)
+{
+  if (!impl->SetKnownBlocks(filename, blocks))
+    return false;
+
+  if (blocks.empty())
+    knownblocks.erase(filename);
+  else
+    knownblocks[filename] = blocks;
+
+  return true;
+}
+
+Result Par2Verifier::Verify(const std::vector<std::string> &extrafiles)
+{
+  // A full pass covers everything the individual scans did, so they are dropped
+  // rather than replayed into it. Whatever was scanned before, by a pass that
+  // was cancelled too, is started afresh.
+  scannedfiles.clear();
+
+  if (scanned)
+    Restart();
+
+  const Result result = impl->Check(extrafiles, memorylimit, nthreads, filethreads);
+  TakeLastError();
+
+  if (result != eInsufficientCriticalData)
+    scanned = true;
+
+  if (result != eInsufficientCriticalData && result != eCancelled)
+    verified = true;
+
+  return result;
+}
+
+Result Par2Verifier::VerifyFile(const std::string &filename)
+{
+  const Result result = impl->Scan(filename, memorylimit, nthreads, filethreads);
+  TakeLastError();
+
+  if (result != eInsufficientCriticalData)
+    scanned = true;
+
+  if (result == eCancelled)
+    return result;
+
+  // Remembered even when the set is not known yet, so that adding the PAR2 file
+  // which describes it replays the scan rather than losing it. Scanning one
+  // again replaces what the last scan of it found, so it is remembered once.
+  if (std::find(scannedfiles.begin(), scannedfiles.end(), filename) == scannedfiles.end())
+    scannedfiles.push_back(filename);
+
+  if (result != eInsufficientCriticalData)
+    verified = true;
+
+  return result;
+}
+
+Result Par2Verifier::Repair(const bool verifyafter)
+{
+  if (!verified)
+  {
+    RecordLastError(ecNotVerified, "Nothing has been verified yet");
+    return eLogicError;
+  }
+
+  if (!impl->CanRepair())
+  {
+    lasterror = Par2Error();
+    return eRepairNotPossible;
+  }
+
+  const Result result = impl->Rebuild(memorylimit, nthreads, filethreads, verifyafter);
+  TakeLastError();
+
+  return result;
+}
+
+void Par2Verifier::Cancel(void)
+{
+  impl->Cancel();
+}
+
+void Par2Verifier::ClearCancel(void)
+{
+  impl->ClearCancel();
+}
+
+
+
+// Par2SetCreator carries out the work; deriving from it reaches the
+// individual steps without making them part of its public interface.
+class Par2Creator::Impl : public Par2SetCreator
+{
+public:
+  Impl(std::ostream &sout, std::ostream &serr, NoiseLevel noiselevel, const Backends &backends)
+    : Par2SetCreator(sout, serr, noiselevel, backends)
+  {
+  }
+};
+
+// A create leaves the engine holding the packets of the set it wrote, so a
+// second one has to start from a new engine. Nothing is replayed into it:
+// every setting lives on the handle and is passed into the run.
+void Par2Creator::Restart(void)
+{
+  impl = std::make_unique<Impl>(sout, serr, noiselevel, backends);
+  impl->SetObserver(observer);
+
+  if (cancelled)
+    impl->Cancel();
+}
+
+// The engine records the error, but Restart throws the engine away, so the
+// handle keeps its own copy of what the call it is returning from recorded.
+void Par2Creator::TakeLastError(void)
+{
+  lasterror = Par2Error();
+  impl->GetLastError(&lasterror);
+}
+
+Par2Creator::Par2Creator(std::ostream &sout, std::ostream &serr, NoiseLevel noiselevel,
+                         const std::string &_basepath, Backends _backends)
+: nullstream()
+, sout(sout)
+, serr(serr)
+, noiselevel(noiselevel)
+, backends(std::move(_backends))
+, observer(0)
+, sourcefiles()
+, blocksize(0)
+, recoveryblockcount(0)
+, recoveryfilescheme(scVariable)
+, recoveryfilecount(0)
+, firstrecoveryblock(0)
+, memorylimit(DefaultMemoryLimit())
+, nthreads(0)
+, filethreads(0)
+, cancelled(false)
+, basepath(NormaliseBasePath(_basepath))
+, lasterror()
+, impl(new Impl(sout, serr, noiselevel, backends))
+{
+}
+
+Par2Creator::Par2Creator(const std::string &_basepath, Backends _backends)
+: nullstream(new NullStream)
+, sout(*nullstream)
+, serr(*nullstream)
+, noiselevel(nlSilent)
+, backends(std::move(_backends))
+, observer(0)
+, sourcefiles()
+, blocksize(0)
+, recoveryblockcount(0)
+, recoveryfilescheme(scVariable)
+, recoveryfilecount(0)
+, firstrecoveryblock(0)
+, memorylimit(DefaultMemoryLimit())
+, nthreads(0)
+, filethreads(0)
+, cancelled(false)
+, basepath(NormaliseBasePath(_basepath))
+, lasterror()
+, impl(new Impl(sout, serr, noiselevel, backends))
+{
+}
+
+Par2Creator::~Par2Creator() = default;
+
+void Par2Creator::SetObserver(Par2Observer *_observer)
+{
+  observer = _observer;
+  impl->SetObserver(_observer);
+}
+
+void Par2Creator::AddSourceFile(const std::string &filename)
+{
+  sourcefiles.push_back(filename);
+}
+
+void Par2Creator::AddSourceFiles(const std::vector<std::string> &filenames)
+{
+  sourcefiles.insert(sourcefiles.end(), filenames.begin(), filenames.end());
+}
+
+void Par2Creator::SetBlockSize(const u64 _blocksize)
+{
+  blocksize = _blocksize;
+}
+
+void Par2Creator::SetRecoveryBlockCount(const u32 _recoveryblockcount)
+{
+  recoveryblockcount = _recoveryblockcount;
+}
+
+void Par2Creator::SetRecoveryFileScheme(const Scheme scheme, const u32 _recoveryfilecount)
+{
+  recoveryfilescheme = scheme;
+  recoveryfilecount = _recoveryfilecount;
+}
+
+void Par2Creator::SetFirstRecoveryBlock(const u32 firstblock)
+{
+  firstrecoveryblock = firstblock;
+}
+
+void Par2Creator::SetMemoryLimit(const size_t _memorylimit)
+{
+  memorylimit = (_memorylimit != 0) ? _memorylimit : DefaultMemoryLimit();
+}
+
+void Par2Creator::SetThreadCounts(const u32 _nthreads, const u32 _filethreads)
+{
+  nthreads = _nthreads;
+  filethreads = _filethreads;
+}
+
+Result Par2Creator::Create(const std::string &parfilename)
+{
+  // Taken from the name of each set when none was given, before any file is
+  // read
+  const std::string setbasepath = basepath.empty()
+    ? NormaliseBasePath(BasePathFor(parfilename))
+    : basepath;
+
+  // The volume files are named after the set rather than after its index file,
+  // so the name is taken either way round
+  std::string setname = parfilename;
+  if (setname.length() > 5 &&
+      0 == stricmp(setname.substr(setname.length()-5, 5).c_str(), ".par2"))
+  {
+    setname = setname.substr(0, setname.length()-5);
+  }
+
+  // Resolved against the working directory, so that the names the set records
+  // come out relative to the basepath whatever the caller wrote them as
+  std::vector<std::string> files;
+  files.reserve(sourcefiles.size());
+  for (const auto &sourcefile : sourcefiles)
+  {
+    files.push_back(DiskFile::GetCanonicalPathname(sourcefile));
+  }
+
+  // A set records each name relative to the basepath, so a file outside it
+  // cannot be described
+  for (const auto &file : files)
+  {
+    if (file.compare(0, setbasepath.length(), setbasepath) != 0)
+    {
+      lasterror = Par2Error();
+      lasterror.code = ecInvalidSetting;
+      lasterror.message = "The file is not inside the basepath";
+      lasterror.filename = file;
+
+      if (observer)
+        observer->OnError(lasterror);
+
+      return eInvalidCommandLineArguments;
+    }
+  }
+
+  Restart();
+
+  const Result result = impl->Process(memorylimit,
+                                      setbasepath,
+                                      nthreads,
+                                      filethreads,
+                                      setname,
+                                      files,
+                                      blocksize,
+                                      firstrecoveryblock,
+                                      recoveryfilescheme,
+                                      recoveryfilecount,
+                                      recoveryblockcount);
+  TakeLastError();
+
+  return result;
+}
+
+void Par2Creator::Cancel(void)
+{
+  cancelled = true;
+  impl->Cancel();
+}
+
+void Par2Creator::ClearCancel(void)
+{
+  cancelled = false;
+  impl->ClearCancel();
+}
+
+bool Par2Creator::GetLastError(Par2Error *error) const
+{
+  if (0 == error || ecNone == lasterror.code)
+    return false;
+
+  *error = lasterror;
+  return true;
+}
+
 
 Result par2create(std::ostream &sout,
 		  std::ostream &serr,
@@ -41,10 +890,11 @@ Result par2create(std::ostream &sout,
 		  const u32 firstblock,
 		  const Scheme recoveryfilescheme,
 		  const u32 recoveryfilecount,
-		  const u32 recoveryblockcount
+		  const u32 recoveryblockcount,
+		  const Backends &backends
 		  )
 {
-  Par2Creator creator(sout, serr, noiselevel);
+  Par2SetCreator creator(sout, serr, noiselevel, backends);
   Result result = creator.Process(
 				  memorylimit,
 				  basepath,
@@ -75,10 +925,12 @@ Result par2repair(std::ostream &sout,
 		  const bool purgefiles,
 		  const bool renameonly,
 		  const bool skipdata,
-		  const u64 skipleaway
+		  const u64 skipleaway,
+		  const bool fullhash,
+		  const Backends &backends
 		  )
 {
-  Par2Repairer repairer(sout, serr, noiselevel);
+  Par2Repairer repairer(sout, serr, noiselevel, backends);
   Result result = repairer.Process(
 				   memorylimit,
 				   basepath,
@@ -90,7 +942,8 @@ Result par2repair(std::ostream &sout,
 				   purgefiles,
 				   renameonly,
 				   skipdata,
-				   skipleaway);
+				   skipleaway,
+				   fullhash);
 
   return result;
 }
@@ -197,4 +1050,4 @@ bool ComputeRecoveryFileCount(std::ostream &sout,
   return true;
 }
 
-}
+} // namespace par2

@@ -20,13 +20,6 @@
 
 #include "libpar2internal.h"
 
-#include <ostream>
-#include <string>
-#include <list>
-
-using namespace Par2;
-using namespace std;
-
 #ifdef _MSC_VER
 #ifdef _DEBUG
 #undef THIS_FILE
@@ -40,20 +33,39 @@ static char THIS_FILE[]=__FILE__;
 #define BLKGETSIZE64 DIOCGMEDIASIZE
 #endif
 
+#if !defined(_WIN32) && !defined(O_NOFOLLOW)
+#define O_NOFOLLOW 0
+#endif
+
+
+#ifdef _WIN32
+#include "utf8.h"
+#include <cwctype>
+#include <iostream>
+#endif
+
+namespace par2
+{
+
+DiskFile::Failure::~Failure(void)
+{
+  LockedStream(*file.serr) << message.str() << std::endl;
+
+  if (file.errorlog)
+    file.errorlog->Record(code, message.str(), name);
+}
+
 
 #ifdef _WIN32
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#include <par2/utf8.h>
-#include <cwctype>
-
 #define OffsetType __int64
 #define MaxOffset 0x7fffffffffffffffI64
 
-DiskFile::DiskFile(std::ostream &sout, std::ostream &serr, std::mutex &serr_lock)
+DiskFile::DiskFile(std::ostream &sout, std::ostream &serr, ErrorLog *errorlog)
 : sout(&sout)
 , serr(&serr)
-, serr_lock(&serr_lock)
+, errorlog(errorlog)
 {
   filename = "";
   filesize = 0;
@@ -88,22 +100,25 @@ bool DiskFile::CreateParentDirectory(std::string _pathname)
       return true;
     }
 
-    auto wpath = utf8::Utf8ToWide(path);
-    if (!wpath) return false;
+    std::wstring wpath;
+    if (!utf8::Utf8ToWide(path, wpath))
+    {
+      Failure(*this, ecFileCreateFailed, path) << "Could not convert \"" << path << "\" to a wide string.";
+      return false;
+    }
 
     struct _stati64 st;
-    if (_wstati64(wpath->c_str(), &st) == 0)
+    if (_wstati64(wpath.c_str(), &st) == 0)
       return true; // let the caller deal with non-directories
 
     if (!DiskFile::CreateParentDirectory(path))
       return false;
 
-    if (!CreateDirectoryW(wpath->c_str(), NULL))
+    if (!CreateDirectoryW(wpath.c_str(), NULL))
     {
       DWORD error = ::GetLastError();
 
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not create the " << path << " directory: " << ErrorMessage(error) << std::endl;
+      Failure(*this, ecFileCreateFailed, path) << "Could not create the " << path << " directory: " << ErrorMessage(error);
 
       return false;
     }
@@ -124,15 +139,19 @@ bool DiskFile::Create(std::string _filename, u64 _filesize)
     return false;
 
   // Create the file
-  auto wfilename = utf8::Utf8ToWide(_filename);
-  if (!wfilename) return false;
-  hFile = ::CreateFileW(wfilename->c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
+  std::wstring wfilename;
+  if (!utf8::Utf8ToWide(_filename, wfilename))
+  {
+    Failure(*this, ecFileCreateFailed, _filename) << "Could not convert \"" << _filename << "\" to a wide string.";
+    return false;
+  }
+
+  hFile = ::CreateFileW(wfilename.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
   if (hFile == INVALID_HANDLE_VALUE)
   {
     DWORD error = ::GetLastError();
 
-    std::lock_guard<std::mutex> lock(*serr_lock);
-    *serr << "Could not create \"" << _filename << "\": " << ErrorMessage(error) << std::endl;
+    Failure(*this, ecFileCreateFailed, _filename) << "Could not create \"" << _filename << "\": " << ErrorMessage(error);
 
     return false;
   }
@@ -148,14 +167,11 @@ bool DiskFile::Create(std::string _filename, u64 _filesize)
     {
       DWORD error = ::GetLastError();
 
-      {
-        std::lock_guard<std::mutex> lock(*serr_lock);
-        *serr << "Could not set size of \"" << _filename << "\": " << ErrorMessage(error) << std::endl;
-      }
+      Failure(*this, ecFileCreateFailed, _filename) << "Could not set size of \"" << _filename << "\": " << ErrorMessage(error);
 
       ::CloseHandle(hFile);
       hFile = INVALID_HANDLE_VALUE;
-      ::DeleteFileW(wfilename->c_str());
+      ::DeleteFileW(wfilename.c_str());
 
       return false;
     }
@@ -165,14 +181,11 @@ bool DiskFile::Create(std::string _filename, u64 _filesize)
     {
       DWORD error = ::GetLastError();
 
-      {
-        std::lock_guard<std::mutex> lock(*serr_lock);
-        *serr << "Could not set size of \"" << _filename << "\": " << ErrorMessage(error) << std::endl;
-      }
+      Failure(*this, ecFileCreateFailed, _filename) << "Could not set size of \"" << _filename << "\": " << ErrorMessage(error);
 
       ::CloseHandle(hFile);
       hFile = INVALID_HANDLE_VALUE;
-      ::DeleteFileW(wfilename->c_str());
+      ::DeleteFileW(wfilename.c_str());
 
       return false;
     }
@@ -201,8 +214,7 @@ bool DiskFile::Write(u64 _offset, const void *buffer, size_t length, LengthType 
     {
       DWORD error = ::GetLastError();
 
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not write " << (u64)length << " bytes to \"" << filename << "\" at offset " << _offset << ": " << ErrorMessage(error) << std::endl;
+      Failure(*this, ecFileWriteFailed, filename) << "Could not write " << (u64)length << " bytes to \"" << filename << "\" at offset " << _offset << ": " << ErrorMessage(error);
 
       return false;
     }
@@ -224,16 +236,20 @@ bool DiskFile::Write(u64 _offset, const void *buffer, size_t length, LengthType 
     {
       DWORD error = ::GetLastError();
 
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not write " << write << " bytes to \"" << filename << "\" at offset " << _offset << ": " << ErrorMessage(error) << std::endl;
+      Failure(*this, ecFileWriteFailed, filename) << "Could not write " << write << " bytes to \"" << filename << "\" at offset " << _offset << ": " << ErrorMessage(error);
 
       return false;
     }
 
     if (wrote != write)
     {
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "INFO: Incomplete write to \"" << filename << "\" at offset " << _offset << ".  Expected to write " << write << " bytes and wrote " << wrote << " bytes." << std::endl;
+      std::ostringstream message;
+      message << "Incomplete write to \"" << filename << "\" at offset " << _offset << ".  Expected to write " << write << " bytes and wrote " << wrote << " bytes.";
+
+      LockedStream(*serr) << "INFO: " << message.str() << std::endl;
+
+      if (errorlog)
+        errorlog->Warn(wcIncompleteWrite, message.str(), filename);
     }
 
     offset += wrote;
@@ -258,9 +274,14 @@ bool DiskFile::Open(const std::string &_filename, u64 _filesize)
   filename = _filename;
   filesize = _filesize;
 
-  auto wfilename = utf8::Utf8ToWide(_filename);
-  if (!wfilename) return false;
-  hFile = ::CreateFileW(wfilename->c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+  std::wstring wfilename;
+  if (!utf8::Utf8ToWide(_filename, wfilename))
+  {
+    Failure(*this, ecFileOpenFailed, _filename) << "Could not convert \"" << _filename << "\" to a wide string.";
+    return false;
+  }
+
+  hFile = ::CreateFileW(wfilename.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
   if (hFile == INVALID_HANDLE_VALUE)
   {
     DWORD error = ::GetLastError();
@@ -271,8 +292,7 @@ bool DiskFile::Open(const std::string &_filename, u64 _filesize)
     case ERROR_PATH_NOT_FOUND:
       break;
     default:
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not open \"" << _filename << "\": " << ErrorMessage(error) << std::endl;
+      Failure(*this, ecFileOpenFailed, _filename) << "Could not open \"" << _filename << "\": " << ErrorMessage(error);
     }
 
     return false;
@@ -290,25 +310,6 @@ bool DiskFile::Read(u64 _offset, void *buffer, size_t length, LengthType maxleng
 {
   assert(hFile != INVALID_HANDLE_VALUE);
 
-  if (offset != _offset)
-  {
-    LONG* ptroffset = (LONG*)&_offset;
-    LONG lowoffset = ptroffset[0];
-    LONG highoffset = ptroffset[1];
-
-    // Seek to the required offset
-    if (INVALID_SET_FILE_POINTER == SetFilePointer(hFile, lowoffset, &highoffset, FILE_BEGIN))
-    {
-      DWORD error = ::GetLastError();
-
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not read " << (u64)length << " bytes from \"" << filename << "\" at offset " << _offset << ": " << ErrorMessage(error) << std::endl;
-
-      return false;
-    }
-    offset = _offset;
-  }
-
   while (length > 0) {
 
     DWORD want;
@@ -318,28 +319,46 @@ bool DiskFile::Read(u64 _offset, void *buffer, size_t length, LengthType maxleng
       want = (LengthType)length;
     DWORD got = 0;
 
+    // Read from the given position without using the handle's file pointer
+    ULARGE_INTEGER position;
+    position.QuadPart = (ULONGLONG)_offset;
+
+    OVERLAPPED overlapped;
+    memset(&overlapped, 0, sizeof(overlapped));
+    overlapped.Offset = position.LowPart;
+    overlapped.OffsetHigh = position.HighPart;
+
     // Read the data
-    if (!::ReadFile(hFile, buffer, want, &got, NULL))
+    if (!::ReadFile(hFile, buffer, want, &got, &overlapped))
     {
       DWORD error = ::GetLastError();
 
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not read " << (u64)length << " bytes from \"" << filename << "\" at offset " << _offset << ": " << ErrorMessage(error) << std::endl;
+      Failure(*this, ecFileReadFailed, filename) << "Could not read " << (u64)length << " bytes from \"" << filename << "\" at offset " << _offset << ": " << ErrorMessage(error);
+
+      return false;
+    }
+
+    if (got == 0)
+    {
+      Failure(*this, ecFileReadFailed, filename) << "Could not read " << (u64)length << " bytes from \"" << filename << "\" at offset " << _offset << ": unexpected end of file.";
 
       return false;
     }
 
     if (want != got)
     {
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Incomplete read from \"" << filename << "\" at offset " << offset << ".  Tried to read " << want << " bytes and received " << got << " bytes." << std::endl;
+      std::ostringstream message;
+      message << "Incomplete read from \"" << filename << "\" at offset " << _offset << ".  Tried to read " << want << " bytes and received " << got << " bytes.";
+
+      LockedStream(*serr) << message.str() << std::endl;
+
+      if (errorlog)
+        errorlog->Warn(wcIncompleteRead, message.str(), filename);
     }
 
-    offset += got;
+    _offset += got;
     length -= got;
     buffer = ((char *) buffer) + got;
-
-    // write updates filesize.  Do we want to do that here?
   }
 
   return true;
@@ -356,11 +375,15 @@ void DiskFile::Close(void)
 
 std::string DiskFile::GetCanonicalPathname(std::string filename)
 {
-  auto wfilename = utf8::Utf8ToWide(filename);
-  if (!wfilename) return filename;
+  std::wstring wfilename;
+  if (!utf8::Utf8ToWide(filename, wfilename))
+  {
+    LockedStream(std::cerr) << "Could not convert \"" << filename << "\" to a wide string." << std::endl;
+    return filename;
+  }
 
   // First call to get required buffer size
-  DWORD length = GetFullPathNameW(wfilename->c_str(), 0, nullptr, nullptr);
+  DWORD length = GetFullPathNameW(wfilename.c_str(), 0, nullptr, nullptr);
   if (length == 0) 
   {
     return filename; 
@@ -370,7 +393,7 @@ std::string DiskFile::GetCanonicalPathname(std::string filename)
   auto wfullname = std::make_unique<wchar_t[]>(length);
 
   // Second call to get the actual path
-  length = GetFullPathNameW(wfilename->c_str(), length, wfullname.get(), nullptr);
+  length = GetFullPathNameW(wfilename.c_str(), length, wfullname.get(), nullptr);
   if (length == 0)
   {
     return filename;
@@ -379,10 +402,14 @@ std::string DiskFile::GetCanonicalPathname(std::string filename)
   wfullname[0] = towupper(wfullname[0]);
   std::replace(wfullname.get(), wfullname.get() + length, L'/', L'\\');
 
-  return utf8::WideToUtf8(wfullname.get()).value_or(filename);
+  std::string fullname;
+  if (!utf8::WideToUtf8(wfullname.get(), fullname))
+    return filename;
+
+  return fullname;
 }
 
-std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, std::string wildcard, bool recursive)
+std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, std::string wildcard, bool recursive, bool followlinks)
 {
   // check path, if not ending with path separator, add one
   char pathend = *path.rbegin();
@@ -390,41 +417,45 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
   {
     path += PATHSEP;
   }
-
-  std::string pathWithWildcard = path + wildcard;
-  auto wwildcard = utf8::Utf8ToWide(pathWithWildcard);
-  if (!wwildcard) return nullptr;
-
   std::list<std::string> *matches = new std::list<std::string>;
+
+  std::wstring wwildcard;
+  if (!utf8::Utf8ToWide(path + wildcard, wwildcard))
+  {
+    LockedStream(std::cerr) << "Could not convert \"" << path + wildcard << "\" to a wide string." << std::endl;
+    return std::unique_ptr< std::list<std::string> >(matches);
+  }
+
   WIN32_FIND_DATAW fd;
-  HANDLE h = ::FindFirstFileW(wwildcard->c_str(), &fd);
+  HANDLE h = ::FindFirstFileW(wwildcard.c_str(), &fd);
   if (h != INVALID_HANDLE_VALUE)
   {
     do
     {
       if (0 == (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
       {
-        auto wcFileName = utf8::WideToUtf8(fd.cFileName);
-        if (wcFileName)
-        {
-          matches->push_back(path + *wcFileName);
-        }
+        std::string name;
+        if (utf8::WideToUtf8(fd.cFileName, name))
+          matches->push_back(path + name);
       }
       else if (recursive == true)
       {
         if (fd.cFileName[0] == '.') {
           continue;
         }
-        auto wcFileName = utf8::WideToUtf8(fd.cFileName);
-        if (wcFileName)
-        {
-          std::string nwwildcard="*";
-          std::unique_ptr< std::list<std::string> > dirmatches(
-             DiskFile::FindFiles(path + *wcFileName, nwwildcard, true)
-          );
-          // append without requiring ordering
+
+        std::string name;
+        if (!utf8::WideToUtf8(fd.cFileName, name))
+          continue;
+
+        std::string nwwildcard="*";
+        std::unique_ptr< std::list<std::string> > dirmatches(
+          DiskFile::FindFiles(path + name, nwwildcard, true, followlinks)
+        );
+
+        // append without requiring ordering
+        if (dirmatches)
           matches->splice(matches->end(), *dirmatches);
-        }
       }
     } while (::FindNextFileW(h, &fd));
     ::FindClose(h);
@@ -435,10 +466,15 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
 
 u64 DiskFile::GetFileSize(std::string filename)
 {
-  auto wfilename = utf8::Utf8ToWide(filename);
-  if (!wfilename) return 0;
+  std::wstring wfilename;
+  if (!utf8::Utf8ToWide(filename, wfilename))
+  {
+    LockedStream(std::cerr) << "Could not convert \"" << filename << "\" to a wide string." << std::endl;
+    return 0;
+  }
+
   struct _stati64 st;
-  if ((0 == _wstati64(wfilename->c_str(), &st)) && (0 != (st.st_mode & S_IFREG)))
+  if ((0 == _wstati64(wfilename.c_str(), &st)) && (0 != (st.st_mode & S_IFREG)))
   {
     return st.st_size;
   }
@@ -450,10 +486,15 @@ u64 DiskFile::GetFileSize(std::string filename)
 
 bool DiskFile::FileExists(std::string filename)
 {
-  auto wfilename = utf8::Utf8ToWide(filename);
-  if (!wfilename) return 0;
+  std::wstring wfilename;
+  if (!utf8::Utf8ToWide(filename, wfilename))
+  {
+    LockedStream(std::cerr) << "Could not convert \"" << filename << "\" to a wide string." << std::endl;
+    return false;
+  }
+
   struct _stati64 st;
-  return ((0 == _wstati64(wfilename->c_str(), &st)) && (0 != (st.st_mode & _S_IFREG))); 
+  return ((0 == _wstati64(wfilename.c_str(), &st)) && (0 != (st.st_mode & _S_IFREG)));
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -461,24 +502,17 @@ bool DiskFile::FileExists(std::string filename)
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_FSEEKO
-# define OffsetType off_t
-# define MaxOffset ((off_t)0x7fffffffffffffffULL)
 # define fseek fseeko
-#else
-# if _FILE_OFFSET_BITS == 64
-#  define OffsetType unsigned long long
-#  define MaxOffset 0x7fffffffffffffffULL
-# else
-#  define OffsetType long
-#  define MaxOffset 0x7fffffffUL
-# endif
 #endif
 
+#define OffsetType off_t
+#define MaxOffset ((std::numeric_limits<OffsetType>::max)())
 
-DiskFile::DiskFile(std::ostream &sout, std::ostream &serr, std::mutex &serr_lock)
+
+DiskFile::DiskFile(std::ostream &sout, std::ostream &serr, ErrorLog *errorlog)
 : sout(&sout)
 , serr(&serr)
-, serr_lock(&serr_lock)
+, errorlog(errorlog)
 {
   //filename;
   filesize = 0;
@@ -520,8 +554,7 @@ bool DiskFile::CreateParentDirectory(std::string _pathname)
 
     if (mkdir(path.c_str(), S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH))
     {
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not create the " << path << " directory: " << strerror(errno) << std::endl;
+      Failure(*this, ecFileCreateFailed, path) << "Could not create the " << path << " directory: " << strerror(errno);
       return false;
     }
   }
@@ -540,28 +573,30 @@ bool DiskFile::Create(std::string _filename, u64 _filesize)
   if (!DiskFile::CreateParentDirectory(filename))
     return false;
 
-  // This is after CreateParentDirectory because
-  // the Windows code would error out after too.
-  if (FileExists(filename))
-  {
-    std::lock_guard<std::mutex> lock(*serr_lock);
-    *serr << "Could not create \"" << _filename << "\": File already exists." << std::endl;
-    return false;
-  }
-
-  file = fopen(_filename.c_str(), "wb");
-  if (file == 0)
-  {
-    std::lock_guard<std::mutex> lock(*serr_lock);
-    *serr << "Could not create " << _filename << ": " << strerror(errno) << std::endl;
-
-    return false;
-  }
-
   if (_filesize > (u64)MaxOffset)
   {
-    std::lock_guard<std::mutex> lock(*serr_lock);
-    *serr << "Requested file size for " << _filename << " is too large." << std::endl;
+    Failure(*this, ecFileCreateFailed, _filename) << "Requested file size for " << _filename << " is too large.";
+    return false;
+  }
+
+  int fd = open(_filename.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+  if (fd < 0)
+  {
+    Failure(*this, ecFileCreateFailed, _filename) << "Could not create " << _filename << ": " << strerror(errno);
+
+    return false;
+  }
+
+  file = fdopen(fd, "wb");
+  if (file == 0)
+  {
+    int savederrno = errno;
+    close(fd);
+    ::remove(filename.c_str());
+    errno = savederrno;
+
+    Failure(*this, ecFileCreateFailed, _filename) << "Could not create " << _filename << ": " << strerror(errno);
+
     return false;
   }
 
@@ -569,10 +604,7 @@ bool DiskFile::Create(std::string _filename, u64 _filesize)
   {
     if (fseek(file, (OffsetType)_filesize-1, SEEK_SET))
     {
-      {
-        std::lock_guard<std::mutex> lock(*serr_lock);
-        *serr << "Could not set end of file of " << _filename << ": " << strerror(errno) << std::endl;
-      }
+      Failure(*this, ecFileCreateFailed, _filename) << "Could not set end of file of " << _filename << ": " << strerror(errno);
 
       fclose(file);
       file = 0;
@@ -582,10 +614,7 @@ bool DiskFile::Create(std::string _filename, u64 _filesize)
 
     if (1 != fwrite(&_filesize, 1, 1, file))
     {
-      {
-        std::lock_guard<std::mutex> lock(*serr_lock);
-        *serr << "Could not set end of file of " << _filename << ": " << strerror(errno) << std::endl;
-      }
+      Failure(*this, ecFileCreateFailed, _filename) << "Could not set end of file of " << _filename << ": " << strerror(errno);
 
       fclose(file);
       file = 0;
@@ -610,16 +639,14 @@ bool DiskFile::Write(u64 _offset, const void *buffer, size_t length, LengthType 
   {
     if (_offset > (u64)MaxOffset)
     {
-        std::lock_guard<std::mutex> lock(*serr_lock);
-        *serr << "Could not write " << (u64)length << " bytes to " << filename << " at offset " << _offset << std::endl;
+        Failure(*this, ecFileWriteFailed, filename) << "Could not write " << (u64)length << " bytes to " << filename << " at offset " << _offset;
       return false;
     }
 
 
     if (fseek(file, (OffsetType)_offset, SEEK_SET))
     {
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not write " << (u64)length << " bytes to " << filename << " at offset " << _offset << ": " << strerror(errno) << std::endl;
+      Failure(*this, ecFileWriteFailed, filename) << "Could not write " << (u64)length << " bytes to " << filename << " at offset " << _offset << ": " << strerror(errno);
       return false;
     }
     offset = _offset;
@@ -636,8 +663,7 @@ bool DiskFile::Write(u64 _offset, const void *buffer, size_t length, LengthType 
     LengthType wrote = fwrite(buffer, 1, write, file);
     if (wrote != write)
     {
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not write " << (u64)length << " bytes to " << filename << " at offset " << _offset << ": " << strerror(errno) << std::endl;
+      Failure(*this, ecFileWriteFailed, filename) << "Could not write " << (u64)length << " bytes to " << filename << " at offset " << _offset << ": " << strerror(errno);
       return false;
     }
 
@@ -665,8 +691,7 @@ bool DiskFile::Open(const std::string &_filename, u64 _filesize)
 
   if (_filesize > (u64)MaxOffset)
   {
-    std::lock_guard<std::mutex> lock(*serr_lock);
-    *serr << "File size for " << _filename << " is too large." << std::endl;
+    Failure(*this, ecFileOpenFailed, _filename) << "File size for " << _filename << " is too large.";
     return false;
   }
 
@@ -688,25 +713,13 @@ bool DiskFile::Read(u64 _offset, void *buffer, size_t length, LengthType maxleng
 {
   assert(file != 0);
 
-  if (offset != _offset)
+  if (_offset > (u64)MaxOffset)
   {
-    if (_offset > (u64)MaxOffset)
-    {
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not read " << (u64)length << " bytes from " << filename << " at offset " << _offset << std::endl;
-      return false;
-    }
-
-
-    if (fseek(file, (OffsetType)_offset, SEEK_SET))
-    {
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not read " << (u64)length << " bytes from " << filename << " at offset " << _offset << ": " << strerror(errno) << std::endl;
-      return false;
-    }
-    offset = _offset;
+    Failure(*this, ecFileReadFailed, filename) << "Could not read " << (u64)length << " bytes from " << filename << " at offset " << _offset;
+    return false;
   }
 
+  int fd = fileno(file);
 
   while (length > 0) {
 
@@ -716,21 +729,18 @@ bool DiskFile::Read(u64 _offset, void *buffer, size_t length, LengthType maxleng
     else
       want = length;
 
-    LengthType got = fread(buffer, 1, want, file);
-    if (got != want)
+    ssize_t got = pread(fd, buffer, want, (OffsetType)_offset);
+    if (got != (ssize_t)want)
     {
       // NOTE: This can happen on error or when hitting the end-of-file.
 
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << "Could not read " << (u64)length << " bytes from " << filename << " at offset " << _offset << ": " << strerror(errno) << std::endl;
+      Failure(*this, ecFileReadFailed, filename) << "Could not read " << (u64)length << " bytes from " << filename << " at offset " << _offset << ": " << strerror(errno);
       return false;
     }
 
-    offset += got;
+    _offset += got;
     length -= got;
     buffer = ((char *) buffer) + got;
-
-    // Write() updates filesize.  Should we do that here too?
   }
 
   return true;
@@ -818,7 +828,7 @@ std::string DiskFile::GetCanonicalPathname(std::string filename)
   return result;
 }
 
-std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, std::string wildcard, bool recursive)
+std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, std::string wildcard, bool recursive, bool followlinks)
 {
   // check path, if not ending with path separator, add one
   char pathend = *path.rbegin();
@@ -864,13 +874,21 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
 
                 std::string nwwildcard="*";
                 std::unique_ptr< std::list<std::string> > dirmatches(
-							 DiskFile::FindFiles(fn, nwwildcard, true)
+							 DiskFile::FindFiles(fn, nwwildcard, true, followlinks)
 							 );
                 matches->splice(matches->end(), *dirmatches);
               }
               else if (S_ISREG(st.st_mode))
               {
                 matches->push_back(path + name);
+              }
+              else if (followlinks && S_ISLNK(st.st_mode))
+              {
+                struct stat stt;
+                if (stat(fn.c_str(), &stt) == 0 && S_ISREG(stt.st_mode))
+                {
+                  matches->push_back(path + name);
+                }
               }
             }
           }
@@ -901,7 +919,7 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
 
                   std::string nwwildcard="*";
 		  std::unique_ptr< std::list<std::string> > dirmatches(
-							   DiskFile::FindFiles(fn, nwwildcard, true)
+							   DiskFile::FindFiles(fn, nwwildcard, true, followlinks)
 							   );
 
                   matches->splice(matches->end(), *dirmatches);
@@ -909,6 +927,14 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
                 else if (S_ISREG(st.st_mode))
                 {
                   matches->push_back(path + name);
+                }
+                else if (followlinks && S_ISLNK(st.st_mode))
+                {
+                  struct stat stt;
+                  if (stat(fn.c_str(), &stt) == 0 && S_ISREG(stt.st_mode))
+                  {
+                    matches->push_back(path + name);
+                  }
                 }
               }
             }
@@ -930,7 +956,7 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
       {
         std::string nwwildcard="*";
 	std::unique_ptr< std::list<std::string> > dirmatches(
-						 DiskFile::FindFiles(fn, nwwildcard, true)
+						 DiskFile::FindFiles(fn, nwwildcard, true, followlinks)
 						 );
 
         matches->splice(matches->end(), *dirmatches);
@@ -938,6 +964,14 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
       else if (S_ISREG(st.st_mode))
       {
         matches->push_back(path + wildcard);
+      }
+      else if (followlinks && S_ISLNK(st.st_mode))
+      {
+        struct stat stt;
+        if (stat(fn.c_str(), &stt) == 0 && S_ISREG(stt.st_mode))
+        {
+          matches->push_back(path + wildcard);
+        }
       }
     }
   }
@@ -985,9 +1019,8 @@ bool DiskFile::Delete(void)
 #ifdef _WIN32
   assert(hFile == INVALID_HANDLE_VALUE);
 
-  auto wfilename = utf8::Utf8ToWide(filename);
-  if (!wfilename) return 0;
-  if (filename.size() > 0 && ::DeleteFileW(wfilename->c_str()))
+  std::wstring wfilename;
+  if (!filename.empty() && utf8::Utf8ToWide(filename, wfilename) && ::DeleteFileW(wfilename.c_str()))
   {
     exists = false;
     return true;
@@ -1003,8 +1036,7 @@ bool DiskFile::Delete(void)
 #endif
   else
   {
-    std::lock_guard<std::mutex> lock(*serr_lock);
-    *serr << "Cannot delete " << filename << std::endl;
+    LockedStream(*serr) << "Cannot delete " << filename << std::endl;
 
     return false;
   }
@@ -1064,12 +1096,15 @@ bool DiskFile::Rename(void)
     // Check path length against maximum
     if (newname.length() > _MAX_PATH)
     {
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << filename << " pathlength is more than " << _MAX_PATH << "." << std::endl;
+      Failure(*this, ecFileRenameFailed, filename) << filename << " pathlength is more than " << _MAX_PATH << ".";
       return false;
     }
 
-    wnewname = utf8::Utf8ToWide(newname).value_or(L"");
+    if (!utf8::Utf8ToWide(newname, wnewname))
+    {
+      Failure(*this, ecFileRenameFailed, filename) << "Could not convert \"" << newname << "\" to a wide string.";
+      return false;
+    }
 
     // Check if file exists using wide-character stat
   } while (_wstati64(wnewname.c_str(), &st) == 0);
@@ -1091,8 +1126,7 @@ bool DiskFile::Rename(void)
     // Check path length against maximum
     if (newname.length() > _MAX_PATH)
     {
-      std::lock_guard<std::mutex> lock(*serr_lock);
-      *serr << filename << " pathlength is more than " << _MAX_PATH << "." << std::endl;
+      Failure(*this, ecFileRenameFailed, filename) << filename << " pathlength is more than " << _MAX_PATH << ".";
       return false;
     }
   } while (stat(newname.c_str(), &st) == 0);
@@ -1104,8 +1138,6 @@ bool DiskFile::Rename(void)
 #ifdef _WIN32
 std::string DiskFile::ErrorMessage(DWORD error)
 {
-  std::string result;
-
   LPVOID lpMsgBuf;
   if (::FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
                        NULL,
@@ -1115,37 +1147,35 @@ std::string DiskFile::ErrorMessage(DWORD error)
                        0,
                        NULL))
   {
-    result = utf8::WideToUtf8(static_cast<wchar_t*>(lpMsgBuf)).value_or("");
+    std::string converted;
+    const bool ok = utf8::WideToUtf8((wchar_t*)lpMsgBuf, converted);
     LocalFree(lpMsgBuf);
-  }
-  else
-  {
-    char message[40];
-    snprintf(message, sizeof(message), "Unknown error code (%lu)", error);
-    result = message;
+
+    if (ok)
+    {
+      return converted;
+    }
   }
 
-  return result;
+  char message[40];
+  snprintf(message, sizeof(message), "Unknown error code (%lu)", error);
+
+  return message;
 }
 
 bool DiskFile::Rename(std::string _filename)
 {
   assert(hFile == INVALID_HANDLE_VALUE);
 
-  auto wfilename = utf8::Utf8ToWide(filename);
-  if (!wfilename) return false;
-  auto _wfilename = utf8::Utf8ToWide(_filename);
-  if (!_wfilename) return false;
-
-  if (::MoveFileW(wfilename->c_str(), _wfilename->c_str()))
+  std::wstring wfilename, _wfilename;
+  if (utf8::Utf8ToWide(filename, wfilename) && utf8::Utf8ToWide(_filename, _wfilename) && ::MoveFileW(wfilename.c_str(), _wfilename.c_str()))
   {
     filename.swap(_filename);
 
     return true;
   }
 
-  std::lock_guard<std::mutex> lock(*serr_lock);
-  *serr << filename << " cannot be renamed to " << _filename << std::endl;
+  Failure(*this, ecFileRenameFailed, filename) << filename << " cannot be renamed to " << _filename;
 
   return false;
 }
@@ -1161,8 +1191,7 @@ bool DiskFile::Rename(std::string _filename)
     return true;
   }
 
-  std::lock_guard<std::mutex> lock(*serr_lock);
-  *serr << filename << " cannot be renamed to " << _filename << std::endl;
+  Failure(*this, ecFileRenameFailed, filename) << filename << " cannot be renamed to " << _filename;
 
   return false;
 }
@@ -1230,3 +1259,5 @@ u64 FileSizeCache::get(const std::string &filename) {
   //  }
   return filesize;
 }
+
+} // namespace par2

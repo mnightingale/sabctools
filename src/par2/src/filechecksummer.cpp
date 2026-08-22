@@ -20,11 +20,8 @@
 
 #include "libpar2internal.h"
 
-#include <future>
-#include <thread>
-
-using namespace Par2;
-using namespace std;
+namespace par2
+{
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -38,11 +35,14 @@ static char THIS_FILE[]=__FILE__;
 
 FileCheckSummer::FileCheckSummer(DiskFile   *_diskfile,
                                  u64         _blocksize,
-                                 const u32 (&_windowtable)[256])
+                                 const u32 (&_windowtable)[256],
+                                 bool        _computefilehashes)
 : diskfile(_diskfile)
 , blocksize(_blocksize)
 , windowtable(_windowtable)
 , filesize(_diskfile->FileSize())
+, computefilehashes(_computefilehashes)
+, hashesvalid(false)
 , currentoffset(0)
 , buffer(0)
 , outpointer(0)
@@ -50,10 +50,7 @@ FileCheckSummer::FileCheckSummer(DiskFile   *_diskfile,
 , tailpointer(0)
 , readoffset(0)
 , checksum(0)
-, hasblockhash(false)
-, contextfull()
-, context16k()
-, hasher(NULL)
+, filehasher(_computefilehashes)
 {
   buffer = new char[(size_t)blocksize*2];
 }
@@ -61,42 +58,27 @@ FileCheckSummer::FileCheckSummer(DiskFile   *_diskfile,
 FileCheckSummer::~FileCheckSummer(void)
 {
   delete [] buffer;
-  if (hasher)
-    hasher->destroy();
 }
 
-void FileCheckSummer::StopHasher(void)
+// Start reading the file at the beginning, or at the given offset
+bool FileCheckSummer::Start(u64 startoffset)
 {
-  if (!hasher)
-    return;
+  // The file hashes can only be computed from the start of the file
+  hashesvalid = (startoffset == 0);
 
-  // Extract file hash from multi-hash
-  hasher->extractFileMD5(contextfull);
-  // Stop using the hasher
-  hasher->destroy();
-  hasher = NULL;
-
-  // Resync file MD5 to be consistent with UpdateHashes
-  if (tailpointer > inpointer)
-    contextfull.update(inpointer, tailpointer - inpointer);
-}
-
-// Start reading the file at the beginning
-bool FileCheckSummer::Start(void)
-{
-  currentoffset = readoffset = 0;
+  currentoffset = readoffset = startoffset;
 
   tailpointer = outpointer = buffer;
   inpointer = &buffer[blocksize];
 
-  hasher = HasherInput_Create();
+  BlankPastEndOfFile();
 
   // Fill the buffer with new data
   if (!Fill())
     return false;
 
-  // Compute the checksum + hash for the initial block
-  ComputeCurrentChecksum(true);
+  // Compute the checksum for the block
+  checksum = ~0 ^ CRCUpdateBlock(~0, (size_t)blocksize, buffer);
 
   return true;
 }
@@ -117,14 +99,6 @@ bool FileCheckSummer::Jump(u64 distance)
   // Not allowed to jump more than one block
   if (distance > blocksize)
     distance = blocksize;
-
-  // If we're advancing by less than one block (and not at the end of the file),
-  // the file/block hash won't be in sync any more
-  if (distance != blocksize && currentoffset + distance < filesize)
-    StopHasher();
-
-  // We don't have a cached block hash any more
-  hasblockhash = false;
 
   // Advance the current offset and check if we have reached the end of the file
   currentoffset += distance;
@@ -158,54 +132,23 @@ bool FileCheckSummer::Jump(u64 distance)
   outpointer = buffer;
   inpointer = &buffer[blocksize];
 
-  // If we already have a block of data available, we can compute the hash whilst waiting for the Fill operation
-  if (keep >= blocksize && distance == blocksize)
-  {
-    std::future<void> asynchash = std::async(std::launch::async, [this]() {
-      ComputeCurrentChecksum(true);
-    });
-    bool success = Fill();
-    asynchash.get();
-    return success;
-  }
-  else
-  {
-    if (!Fill())
-      return false;
-    
-    // If we're advancing by a whole block, we'll assume the next block is likely to be valid, so compute the MD5 in advance
-    ComputeCurrentChecksum(distance == blocksize);
-  }
+  BlankPastEndOfFile();
+
+  if (!Fill())
+    return false;
+
+  // Compute the checksum for the block
+  checksum = ~0 ^ CRCUpdateBlock(~0, (size_t)blocksize, buffer);
 
   return true;
 }
 
-void FileCheckSummer::ComputeCurrentChecksum(bool domd5)
+// The scan window slides beyond the end of the file, where the data reads as
+// zeros. Once the whole file has been read, blank the rest of the buffer.
+void FileCheckSummer::BlankPastEndOfFile() const
 {
-  // Compute the checksum/hash for the block
-  if (hasher)
-  {
-    // File/block hash is in sync, so compute all hashes
-    size_t blocklen = (size_t)std::min(blocksize, filesize - currentoffset);
-    size_t zeropad = blocksize - blocklen;
-    hasher->update(buffer, blocklen);
-    checksum = HasherGetBlock(hasher, blockhash, zeropad);
-    hasblockhash = true;
-  }
-  else
-  {
-    // File/block hash not in sync, so can only compute block checksum/hash
-    if (domd5)
-    {
-      checksum = MD5CRC_Calc(buffer, (size_t)blocksize, 0, blockhash.hash);
-      hasblockhash = true;
-    }
-    else
-    {
-      // Some issue was found, so defer block MD5 computation
-      checksum = CRCCompute((size_t)blocksize, buffer);
-    }
-  }
+  if (readoffset >= filesize)
+    memset(tailpointer, 0, static_cast<size_t>(&buffer[2 * blocksize] - tailpointer));
 }
 
 // Fill the buffer from disk
@@ -231,62 +174,73 @@ bool FileCheckSummer::Fill(bool longfill)
     if (!diskfile->Read(readoffset, tailpointer, want))
       return false;
 
-    UpdateHashes(readoffset, tailpointer, want);
+    if (hashesvalid)
+      filehasher.Update(readoffset, tailpointer, want);
     readoffset += want;
     tailpointer += want;
   }
 
-  // Did we fill the buffer
-  want = target - tailpointer;
-  if (want > 0)
-  {
-    // Blank the rest of the buffer
-    memset(tailpointer, 0, want);
-  }
+  // Blank whatever part of the buffer was not filled
+  BlankPastEndOfFile();
 
   return true;
 }
 
-// Update the full file hash and the 16k hash using the new data
-void FileCheckSummer::UpdateHashes(u64 offset, const void *buffer, size_t length)
+FileHasher::FileHasher(bool _wholefile)
+: wholefile(_wholefile)
+, contextfull()
+, context16k()
+{
+}
+
+// Add the next part of the file
+void FileHasher::Update(u64 offset, const void *buffer, size_t length)
 {
   // Are we already beyond the first 16k
   if (offset >= 16384)
   {
-    // If hasher is being used, the file hash is updated along with the block hash
-    if (!hasher)
-      contextfull.update(buffer, length);
+    if (wholefile)
+      contextfull.Update(buffer, length);
   }
   // Would we reach the 16k mark
   else if (offset+length >= 16384)
   {
     // Finish the 16k hash
     size_t first = (size_t)(16384-offset);
-    context16k.update(buffer, first);
+    context16k.Update(buffer, first);
 
-    // Continue with the full hash, if not using the hasher
-    if (!hasher)
+    if (wholefile)
     {
+      // Continue with the full hash
       contextfull = context16k;
-      
+
       // Do we go beyond the 16k mark
       if (offset+length > 16384)
       {
-        contextfull.update(&((const char*)buffer)[first], length-first);
+        contextfull.Update(&((const char*)buffer)[first], length-first);
       }
     }
   }
   else
   {
-    context16k.update(buffer, length);
+    context16k.Update(buffer, length);
   }
 }
 
-// Return the full file hash and the 16k file hash; FileCheckSummer cannot be used afterwards
-void FileCheckSummer::GetFileHashes(MD5Hash &hashfull, MD5Hash &hash16k)
+// Return the full file hash and the 16k file hash
+void FileCheckSummer::GetFileHashes(MD5Hash &hashfull, MD5Hash &hash16k) const
+{
+  assert(hashesvalid);
+
+  filehasher.GetHashes(filesize, hashfull, hash16k);
+}
+
+// Return the full file hash and the 16k file hash
+void FileHasher::GetHashes(u64 filesize, MD5Hash &hashfull, MD5Hash &hash16k) const
 {
   // Compute the hash of the first 16k
-  context16k.end(hash16k.hash);
+  MD5Context context = context16k;
+  context.Final(hash16k);
 
   // Is the file smaller than 16k
   if (filesize < 16384)
@@ -294,25 +248,17 @@ void FileCheckSummer::GetFileHashes(MD5Hash &hashfull, MD5Hash &hash16k)
     // The hashes are the same
     hashfull = hash16k;
   }
-  // If we're using the hasher, get file hash from there
-  else if(hasher)
-  {
-    hasher->end(hashfull.hash);
-  }
-  else
+  else if (wholefile)
   {
     // Compute the hash of the full file
-    contextfull.end(hashfull.hash);
+    context = contextfull;
+    context.Final(hashfull);
   }
 }
 
 // Compute and return the current hash
 MD5Hash FileCheckSummer::Hash(void)
 {
-  // Did we pre-compute the hash?
-  if (hasblockhash)
-    return blockhash;
-
   MD5Context context;
   context.Update(outpointer, (size_t)blocksize);
 
@@ -324,12 +270,14 @@ MD5Hash FileCheckSummer::Hash(void)
 
 u32 FileCheckSummer::ShortChecksum(u64 blocklength)
 {
-  u32 crc = CRCCompute((size_t)blocklength, outpointer);
+  u32 crc = CRCUpdateBlock(~0, (size_t)blocklength, outpointer);
 
   if (blocksize > blocklength)
   {
-    crc = ~CRCUpdateBlock(~crc, (size_t)(blocksize-blocklength));
+    crc = CRCUpdateBlock(crc, (size_t)(blocksize-blocklength));
   }
+
+  crc ^= ~0;
 
   return crc;
 }
@@ -350,3 +298,5 @@ MD5Hash FileCheckSummer::ShortHash(u64 blocklength)
 
   return hash;
 }
+
+} // namespace par2

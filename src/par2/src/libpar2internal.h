@@ -40,7 +40,6 @@
 
 #define snprintf _snprintf_s
 #define unlink   _unlink
-#define stat _stat64
 
 #define __LITTLE_ENDIAN 1234
 #define __BIG_ENDIAN    4321
@@ -73,6 +72,8 @@ typedef unsigned int     size_t;
 #ifdef HAVE_STDIO_H
 #  include <stdio.h>
 #endif
+
+#include <fcntl.h>
 
 #if HAVE_DIRENT_H
 #  include <dirent.h>
@@ -176,9 +177,16 @@ typedef unsigned int     size_t;
 #endif
 #endif
 
-#define NUM_TRANSFER_BUFFERS 2 // must be >= 2
-#define NUM_PARPAR_BUFFERS 12 // maximum number of internal ParPar staging buffers
+// Input blocks held in flight, so that a backend still working on one block
+// does not stop the next being read.
+#define NUM_TRANSFER_BUFFERS 2
+
 #define MAX_CHUNK_SIZE 32*1048576 // too large chunks are likely detrimental to performance; set to 0 to disable
+#define SCAN_BATCH_PER_THREAD 2 // blocks in a batch for each thread checking it, so one which finishes early has more to take
+
+// How far either side of where a block should be that data skipping searches
+// when the caller sets no distance of its own
+#define DEFAULT_SKIP_LEAWAY 64
 
 #define LONGMULTIPLY
 
@@ -190,12 +198,52 @@ typedef unsigned int     size_t;
 #include <sstream>
 #include <algorithm>
 #include <memory>
+#include <new>
+#include <limits>
 
 #include <ctype.h>
 #include <iomanip>
-#include <codecvt>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 #include <cassert>
+
+// Holds a lock for the duration of one output statement, so that lines written
+// from several threads do not interleave.
+class LockedStream
+{
+public:
+  explicit LockedStream(std::ostream &stream)
+    : stream(stream)
+    , lock(Mutex())
+  {
+  }
+
+  template<typename T>
+  LockedStream& operator<<(const T &value)
+  {
+    stream << value;
+    return *this;
+  }
+
+  LockedStream& operator<<(std::ostream& (*manipulator)(std::ostream&))
+  {
+    stream << manipulator;
+    return *this;
+  }
+
+private:
+  static std::mutex& Mutex(void)
+  {
+    static std::mutex mutex;
+    return mutex;
+  }
+
+  std::ostream &stream;
+  std::lock_guard<std::mutex> lock;
+};
 
 #ifdef offsetof
 #undef offsetof
@@ -203,36 +251,83 @@ typedef unsigned int     size_t;
 #define offsetof(TYPE, MEMBER) ((size_t) ((char*)(&((TYPE *)1)->MEMBER) - (char*)1))
 
 // par2cmdline includes
-#include <par2/commandline.h>
-#include <par2/crc.h>
-#include <par2/creatorpacket.h>
-#include <par2/criticalpacket.h>
-#include <par2/datablock.h>
-#include <par2/descriptionpacket.h>
-#include <par2/diskfile.h>
-#include <par2/filechecksummer.h>
-#include <par2/foreach_parallel.h>
-#include <par2/galois.h>
-#include <par2/hasher.h>
-#include <par2/letype.h>
 #include <par2/libpar2.h>
-#include <par2/mainpacket.h>
-#include <par2/md5.h>
-#include <par2/par1fileformat.h>
-#include <par2/par1repairer.h>
-#include <par2/par1repairersourcefile.h>
-#include <par2/par2creator.h>
-#include <par2/par2creatorsourcefile.h>
-#include <par2/par2fileformat.h>
-#include <par2/par2repairer.h>
-#include <par2/par2repairersourcefile.h>
-#include <par2/recoverypacket.h>
-#include <par2/reedsolomon.h>
-#include <par2/verificationhashtable.h>
-#include <par2/verificationpacket.h>
+
+// Case-insensitive string comparison
+#ifdef _WIN32
+#  define stricmp  _stricmp
+#else
+#  include <string.h>
+#  define stricmp strcasecmp
+#endif
+
+// Path separators
+#ifdef _WIN32
+#  define PATHSEP "\\"
+#  define ALTPATHSEP "/"
+#else
+#  define PATHSEP "/"
+#  define ALTPATHSEP "\\"
+#endif
+
+// Default number of file threads
+#define _FILE_THREADS 2
+
+namespace par2
+{
+
+// The physical memory of the machine in bytes, or 0 if it cannot be found
+u64 GetTotalPhysicalMemory(void);
+
+// What the work may use when the caller sets no limit of its own: an eighth of
+// the physical memory, and no less than 256MB on a machine with more, or 256MB
+// when the memory cannot be found
+size_t DefaultMemoryLimit(void);
+
+} // namespace par2
+
+
+#include "letype.h"
+#include "errorlog.h"
+#include "foreach_parallel.h"
+#include "bufferpool.h"
+#include "taskpool.h"
+#include "progressmeter.h"
+
+#include "galois.h"
+#include "crc.h"
+#include "md5.h"
+#include "par2fileformat.h"
+#include "reedsolomon.h"
+#include "reference_processor.h"
+
+#include "diskfile.h"
+#include "datablock.h"
+
+#include "criticalpacket.h"
+#include "par2creatorsourcefile.h"
+
+#include "mainpacket.h"
+#include "creatorpacket.h"
+#include "descriptionpacket.h"
+#include "verificationpacket.h"
+#include "recoverypacket.h"
+
+#include "par2repairersourcefile.h"
+
+#include "filechecksummer.h"
+#include "reference_hasher.h"
+#include "verificationhashtable.h"
+
+#include "par2creator.h"
+#include "par2repairer.h"
+
+#include "par1fileformat.h"
+#include "par1repairersourcefile.h"
+#include "par1repairer.h"
 
 #ifdef _WIN32
-#include <par2/utf8.h>
+#include "utf8.h"
 #endif
 
 // Heap checking

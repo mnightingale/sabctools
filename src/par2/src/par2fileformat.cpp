@@ -19,9 +19,9 @@
 
 #include "libpar2internal.h"
 
-namespace Par2
+namespace par2
 {
-    
+
 MAGIC      packet_magic                = {{'P', 'A', 'R', '2', '\0','P', 'K', 'T'}};
 PACKETTYPE fileverificationpacket_type = {{'P', 'A', 'R', ' ', '2', '.', '0', '\0', 'I', 'F', 'S', 'C', '\0','\0','\0','\0'}};
 PACKETTYPE filedescriptionpacket_type  = {{'P', 'A', 'R', ' ', '2', '.', '0', '\0', 'F', 'i', 'l', 'e', 'D', 'e', 's', 'c' }};
@@ -29,4 +29,4 @@ PACKETTYPE mainpacket_type             = {{'P', 'A', 'R', ' ', '2', '.', '0', '\
 PACKETTYPE recoveryblockpacket_type    = {{'P', 'A', 'R', ' ', '2', '.', '0', '\0', 'R', 'e', 'c', 'v', 'S', 'l', 'i', 'c' }};
 PACKETTYPE creatorpacket_type          = {{'P', 'A', 'R', ' ', '2', '.', '0', '\0', 'C', 'r', 'e', 'a', 't', 'o', 'r', '\0'}};
 
-}
+} // namespace par2
