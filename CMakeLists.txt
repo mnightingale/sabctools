@@ -255,13 +255,9 @@ function(_vendored_build name source_dir subdir libraries cmake_args arch out_ar
     set(${out_binary_dir} "${binary_dir}" PARENT_SCOPE)
 endfunction()
 
-add_vendored_project(
-    NAME par2
-    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/par2"
-    SUBDIR ""
-    LIBRARIES par2-turbo gf16 hasher
-    CMAKE_ARGS -DBUILD_LIB=ON -DBUILD_TOOL=OFF
-)
+# par2 has no upstream CMake to drive, so it is compiled directly here rather
+# than as a nested project. See cmake/par2.cmake.
+include(cmake/par2.cmake)
 
 # Only the static library is wanted; the shared one and the CLI tools would be
 # built for nothing. Its archive lands in a subdirectory of its own, set by a
@@ -315,28 +311,14 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 #    ~vector() is constexpr and gets eagerly instantiated, which gfmat_inv.h's
 #    std::vector<Galois16RecMatrixWorker> of an incomplete type does not survive.
 add_library(par2_glue OBJECT src/par2.cc)
-add_dependencies(par2_glue par2_built)
 
 set_target_properties(par2_glue PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
-target_include_directories(par2_glue PRIVATE
-    src
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/par2/include"
-    # par2's CMake generates config.h into its build directory
-    "${par2_BINARY_DIR}"
-)
-target_link_libraries(par2_glue PRIVATE Python::Module)
-
-# The glue has to agree with the libraries it links against on every macro that
-# changes a layout. PARPAR_INVERT_SUPPORT in particular decides whether
-# Galois16RecMatrix exists in gfmat_inv.h, which par2repairer.h embeds; these
-# mirror the add_compile_definitions() in the vendored cmake/common.cmake.
-target_compile_definitions(par2_glue PRIVATE
-    HAVE_CONFIG_H
-    PARPAR_ENABLE_HASHER_MD5CRC
-    PARPAR_INVERT_SUPPORT
-    PARPAR_SLIM_GF16
-)
+# Only the public header, which is self-contained. Nothing here needs par2's
+# internal headers, its config.h or any macro that has to agree with how the
+# library was compiled - which is the whole point of moving to libpar2.h.
+target_include_directories(par2_glue PRIVATE src)
+target_link_libraries(par2_glue PRIVATE par2 Python::Module)
 
 if(MSVC)
     # /EHsc because the glue catches par2's exceptions and the defaults omit it;
@@ -366,7 +348,7 @@ python_add_library(sabctools MODULE WITH_SOABI
     $<TARGET_OBJECTS:par2_glue>
 )
 
-add_dependencies(sabctools par2_built rapidyenc_built)
+add_dependencies(sabctools rapidyenc_built)
 
 target_include_directories(sabctools PRIVATE src)
 target_compile_options(sabctools PRIVATE ${SABCTOOLS_FLAGS})
@@ -379,7 +361,7 @@ endif()
 # The vendored archives go last: a static library only satisfies symbols already
 # demanded to its left, and it is our own objects that demand them.
 target_link_libraries(sabctools PRIVATE
-    ${par2_ARCHIVES}
+    par2
     ${rapidyenc_ARCHIVES}
     ${CMAKE_DL_LIBS}  # dlopen, for the unlocked SSL reads
 )

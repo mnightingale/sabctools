@@ -67,7 +67,11 @@ src/par2/include/par2/version.h
 
 # Visual studio
 cmake*/
-# ...but the vendored par2 build system is not a Visual Studio artefact
+# ...but neither our own CMake modules nor the vendored build system are Visual
+# Studio artefacts. These re-include the directories themselves: cmake*/ excludes
+# the directory, and git will not look inside an excluded directory to find a
+# negated file within it.
+!/cmake/
 !src/par2/cmake/
 *.sln
 *.vcxproj*
