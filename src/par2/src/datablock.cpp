@@ -19,8 +19,8 @@
 
 #include "libpar2internal.h"
 
-using namespace Par2;
-using namespace std;
+namespace Par2
+{
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -111,3 +111,5 @@ bool DataBlock::WriteData(u64         position, // Position within the block
 
   return true;
 }
+
+} // namespace Par2

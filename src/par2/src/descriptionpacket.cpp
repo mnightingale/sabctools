@@ -20,10 +20,8 @@
 
 #include "libpar2internal.h"
 
-#include <string>
-
-using namespace Par2;
-using namespace std;
+namespace Par2
+{
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -108,8 +106,6 @@ bool DescriptionPacket::Load(DiskFile *diskfile, u64 offset, PACKET_HEADER &head
                       &packet->fileid,
                       (size_t)packet->header.length - sizeof(PACKET_HEADER)))
     return false;
-
-  filename = utf8::Latin1ToUtf8((char*)((FILEDESCRIPTIONPACKET*)packetdata)->name);
 
   // Are the file and 16k hashes consistent
   if (packet->length <= 16384 && packet->hash16k != packet->hashfull)
@@ -311,12 +307,12 @@ std::string DescriptionPacket::TranslateFilenameFromPar2ToLocal(std::ostream &so
 #else
     if (ch == '\\')
     {
+      // This is a legal Par2 character, but assume someone screwed up.
       if (noiselevel >= nlQuiet)
       {
-	// This is a legal Par2 character, but assume someone screwed up.
 	serr << "INFO: Found Windows-style slash in filename.  Changing to UNIX-style slash." << std::endl;
-	ch = '/';
       }
+      ch = '/';
     }
 #endif
 
@@ -330,9 +326,9 @@ std::string DescriptionPacket::TranslateFilenameFromPar2ToLocal(std::ostream &so
       if (noiselevel >= nlQuiet)
       {
 	serr << "INFO: Found illegal character '" << ch << "' in filename.  Changed it to \"" << UrlEncodeChar(ch) << "\"" << std::endl;
-	// convert problem characters to hex
-	local_filename += UrlEncodeChar(ch);
       }
+      // convert problem characters to hex
+      local_filename += UrlEncodeChar(ch);
     }
 
     ++p;
@@ -388,3 +384,5 @@ std::string DescriptionPacket::TranslateFilenameFromPar2ToLocal(std::ostream &so
 
   return local_filename;
 }
+
+} // namespace Par2

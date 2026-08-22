@@ -1,21 +1,35 @@
-# Vendored par2cmdline-turbo
+# Vendored par2cmdline
 
 | | |
 |---|---|
-| Upstream | https://github.com/nzbgetcom/par2cmdline-turbo.git |
-| Ref | `6b6a69942478e4ad0556f5f3eda2cec8c46f3d0e` |
-| Commit | `6b6a69942478e4ad0556f5f3eda2cec8c46f3d0e` |
-| Vendored | 2026-08-07 |
+| Upstream | https://github.com/mnightingale/par2cmdline.git |
+| Ref | `42a0d49ac064aab9421bd8190ded265d38666117` |
+| Commit | `42a0d49ac064aab9421bd8190ded265d38666117` |
+| Vendored | 2026-08-22 |
 
-This is [nzbgetcom/par2cmdline-turbo](https://github.com/nzbgetcom/par2cmdline-turbo)'s
-`nzbget` branch, a fork of [animetosho/par2cmdline-turbo](https://github.com/animetosho/par2cmdline-turbo)
-that wraps the sources in `namespace Par2`, moves headers under `include/par2/`, and adds the
-virtual `Sig*` hooks and `cancelled` flag that let `Par2Repairer` be driven as a library.
+This is a fork of [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) carrying
+a stack of `libpar2/*` topic branches that make par2 usable as a library, being prepared
+for upstream. The pinned commit is the tip of that stack.
+
+## Why this rather than par2cmdline-turbo
+
+The lineage is upstream -> [animetosho/par2cmdline-turbo](https://github.com/animetosho/par2cmdline-turbo)
+-> [nzbgetcom/par2cmdline-turbo](https://github.com/nzbgetcom/par2cmdline-turbo). We used
+the nzbgetcom fork first, because it was the only one that could be driven as a library at
+all - but doing so meant subclassing `Par2Repairer` and reading its protected members.
+
+This fork instead exposes a real public API in `include/par2/libpar2.h`: a `Par2Verifier`
+handle and a `Par2Observer` callback interface, with the implementation behind a pimpl. The
+glue therefore depends on nothing but that header, which is the point - once these changes
+reach turbo, moving there is a re-vendor rather than a rewrite.
+
+The trade for now is that upstream has neither turbo's CMake nor its ParPar SIMD backend,
+so repair throughput is the scalar implementation.
 
 ## Licensing
 
-par2cmdline-turbo is GPL-2.0-or-later (see `COPYING`); the ParPar `gf16`/`hasher` backend
-under `parpar/` is Public Domain / CC0. sabctools is GPL-2.0-or-later, so both are compatible.
+par2cmdline is GPL-2.0-or-later (see `COPYING`). sabctools is GPL-2.0-or-later, so they are
+compatible.
 
 ## Updating
 
@@ -28,18 +42,15 @@ match, so a plain re-run reproduces the same tree.
 
 ## How it is built
 
-Our top-level `CMakeLists.txt` runs upstream's own CMake (`CMakeLists.txt` + `cmake/` +
-`parpar/*.cmake`) as a nested project to produce the `par2-turbo`, `gf16` and `hasher`
-static libraries, and links them into the extension. Upstream owns the ~100-file per-ISA
-SIMD flag matrix and the probes that gate it, so re-vendoring picks up new kernels without
-any change here.
+Upstream builds with autotools, which does not fit a Python extension build and does not
+cover MSVC. Our own `CMakeLists.txt` compiles the sources in `src/` into a static library
+instead. That is viable here precisely because there is no ParPar: no per-ISA flag matrix,
+no compiler probes, nothing upstream needs to own.
+
+`src/par2.cc` calls only the public API in `include/par2/libpar2.h`. The headers under
+`src/` are upstream's internals and are not part of its compatibility promise.
 
 ### Local patches
 
-Applied by `tools/vendor_par2.py` on every run. Each one fails the vendoring if it stops
-matching, so a patch that upstream has since fixed cannot be carried silently.
-
-1. `cmake/common.cmake`: `/MT` -> `/MD` (and `/MTd` -> `/MDd`). Upstream targets a standalone
-   executable and links the static CRT. A CPython extension must use the dynamic CRT so it
-   shares a heap and a std:: runtime with `python3xx.dll`, and an explicit
-   `add_compile_options(/MT)` cannot be overridden by `CMAKE_MSVC_RUNTIME_LIBRARY`.
+None. The vendoring script fails loudly if a patch it carries stops matching, so this
+section is the one to check when adding one.

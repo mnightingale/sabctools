@@ -16,11 +16,11 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 """
-Re-vendor src/par2/ from par2cmdline-turbo.
+Re-vendor src/par2/ from par2cmdline.
 
     python tools/vendor_par2.py                     # the pinned ref below
-    python tools/vendor_par2.py --ref v1.4.0        # a tag or branch
-    python tools/vendor_par2.py --ref 6b6a699       # or a commit
+    python tools/vendor_par2.py --ref libpar2/...   # a tag or branch
+    python tools/vendor_par2.py --ref 138c411       # or a commit
 
 Leaves the result in the working tree for review; does not commit.
 """
@@ -33,70 +33,49 @@ import tempfile
 
 import vendor_common
 
-REPO = "https://github.com/nzbgetcom/par2cmdline-turbo.git"
-REF = "6b6a69942478e4ad0556f5f3eda2cec8c46f3d0e"
+REPO = "https://github.com/mnightingale/par2cmdline.git"
+
+# Tip of the libpar2/* stack, which is where the library API lives. Pinned to the
+# commit rather than the branch: these are topic branches being prepared for
+# upstream, so they are rebased, and a branch name would not name the same tree
+# twice running.
+REF = "138c411357df2e31f6f5303225667165fdba4ec4"
 
 DEST = os.path.join(vendor_common.ROOT, "src", "par2")
 
-# Only what we compile, plus upstream's CMake build and the provenance/licence files.
-# Our own CMakeLists.txt drives that CMake rather than reimplementing the per-file SIMD
-# flag matrix.
-COPY_TREES = ("src", "include", "cmake", os.path.join("parpar", "gf16"), os.path.join("parpar", "hasher"))
-COPY_FILES = (
-    "CMakeLists.txt",
-    "COPYING",
-    "AUTHORS",
-    "ChangeLog",
-    os.path.join("parpar", "gf16.cmake"),
-    os.path.join("parpar", "hasher.cmake"),
-)
+# The library sources and the public header. Upstream ships no CMake, so nothing
+# of its build system is worth copying - our own CMakeLists.txt compiles these
+# directly, which it can because there is no per-ISA flag matrix to honour.
+COPY_TREES = ("src", "include")
+COPY_FILES = ("COPYING", "AUTHORS", "ChangeLog", "README.md", "config.h.in")
 
 
 def prune():
-    """Drop what we do not build: upstream's unit tests, MSBuild projects and OpenCL.
+    """Drop upstream's unit tests and the command line tool.
 
-    controller_ocl* is already left out of upstream's own CMake source list.
+    Only the library is wanted. par2cmdline.cpp is the tool's entry point, and
+    the *_test.cpp files are built by `make check` against a test framework we
+    do not vendor.
     """
-    for directory, _dirs, files in os.walk(DEST, topdown=False):
-        for name in files:
-            if name.endswith("_test.cpp") or ".vcxproj" in name or name.startswith("controller_ocl"):
-                os.remove(os.path.join(directory, name))
-
-    for leftover in (
-        os.path.join(DEST, "parpar", "gf16", "opencl-include"),
-        os.path.join(DEST, "parpar", "gf16", "suppressions-valgrind.supp"),
-    ):
-        if os.path.isdir(leftover):
-            shutil.rmtree(leftover)
-        elif os.path.exists(leftover):
-            os.remove(leftover)
+    for name in os.listdir(os.path.join(DEST, "src")):
+        if name.endswith("_test.cpp") or name in ("par2cmdline.cpp",):
+            os.remove(os.path.join(DEST, "src", name))
 
 
 def apply_patches():
-    # Upstream targets a standalone executable and links the static CRT. A CPython
-    # extension must use the dynamic CRT so it shares a heap and a std:: runtime with
-    # python3xx.dll, and an explicit add_compile_options(/MT) cannot be overridden by
-    # CMAKE_MSVC_RUNTIME_LIBRARY.
-    vendor_common.patch(
-        DEST,
-        os.path.join("cmake", "common.cmake"),
-        "add_compile_options(/MTd /Zi /MP /W4 /utf-8)",
-        "add_compile_options(/MDd /Zi /MP /W4 /utf-8)",
-        "dynamic CRT (debug)",
-    )
-    vendor_common.patch(
-        DEST,
-        os.path.join("cmake", "common.cmake"),
-        "add_compile_options(/MT /Oi /MP /utf-8 /guard:cf)",
-        "add_compile_options(/MD /Oi /MP /utf-8 /guard:cf)",
-        "dynamic CRT (release)",
-    )
+    """No local patches.
+
+    The /MT -> /MD patch the nzbgetcom fork needed was against its CMake, which
+    upstream does not have; our own CMakeLists.txt picks the runtime library, and
+    CMake defaults to the dynamic one a CPython extension needs. Kept as the place
+    to add a patch, and vendor_common.patch() fails loudly once one stops matching.
+    """
 
 
 def write_vendor_notes(commit: str, ref: str):
     with open(os.path.join(DEST, "VENDOR.md"), "w", encoding="utf-8") as handle:
         handle.write(
-            """# Vendored par2cmdline-turbo
+            """# Vendored par2cmdline
 
 | | |
 |---|---|
@@ -105,15 +84,29 @@ def write_vendor_notes(commit: str, ref: str):
 | Commit | `{commit}` |
 | Vendored | {date} |
 
-This is [nzbgetcom/par2cmdline-turbo](https://github.com/nzbgetcom/par2cmdline-turbo)'s
-`nzbget` branch, a fork of [animetosho/par2cmdline-turbo](https://github.com/animetosho/par2cmdline-turbo)
-that wraps the sources in `namespace Par2`, moves headers under `include/par2/`, and adds the
-virtual `Sig*` hooks and `cancelled` flag that let `Par2Repairer` be driven as a library.
+This is a fork of [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) carrying
+a stack of `libpar2/*` topic branches that make par2 usable as a library, being prepared
+for upstream. The pinned commit is the tip of that stack.
+
+## Why this rather than par2cmdline-turbo
+
+The lineage is upstream -> [animetosho/par2cmdline-turbo](https://github.com/animetosho/par2cmdline-turbo)
+-> [nzbgetcom/par2cmdline-turbo](https://github.com/nzbgetcom/par2cmdline-turbo). We used
+the nzbgetcom fork first, because it was the only one that could be driven as a library at
+all - but doing so meant subclassing `Par2Repairer` and reading its protected members.
+
+This fork instead exposes a real public API in `include/par2/libpar2.h`: a `Par2Verifier`
+handle and a `Par2Observer` callback interface, with the implementation behind a pimpl. The
+glue therefore depends on nothing but that header, which is the point - once these changes
+reach turbo, moving there is a re-vendor rather than a rewrite.
+
+The trade for now is that upstream has neither turbo's CMake nor its ParPar SIMD backend,
+so repair throughput is the scalar implementation.
 
 ## Licensing
 
-par2cmdline-turbo is GPL-2.0-or-later (see `COPYING`); the ParPar `gf16`/`hasher` backend
-under `parpar/` is Public Domain / CC0. sabctools is GPL-2.0-or-later, so both are compatible.
+par2cmdline is GPL-2.0-or-later (see `COPYING`). sabctools is GPL-2.0-or-later, so they are
+compatible.
 
 ## Updating
 
@@ -126,21 +119,18 @@ match, so a plain re-run reproduces the same tree.
 
 ## How it is built
 
-Our top-level `CMakeLists.txt` runs upstream's own CMake (`CMakeLists.txt` + `cmake/` +
-`parpar/*.cmake`) as a nested project to produce the `par2-turbo`, `gf16` and `hasher`
-static libraries, and links them into the extension. Upstream owns the ~100-file per-ISA
-SIMD flag matrix and the probes that gate it, so re-vendoring picks up new kernels without
-any change here.
+Upstream builds with autotools, which does not fit a Python extension build and does not
+cover MSVC. Our own `CMakeLists.txt` compiles the sources in `src/` into a static library
+instead. That is viable here precisely because there is no ParPar: no per-ISA flag matrix,
+no compiler probes, nothing upstream needs to own.
+
+`src/par2.cc` calls only the public API in `include/par2/libpar2.h`. The headers under
+`src/` are upstream's internals and are not part of its compatibility promise.
 
 ### Local patches
 
-Applied by `tools/vendor_par2.py` on every run. Each one fails the vendoring if it stops
-matching, so a patch that upstream has since fixed cannot be carried silently.
-
-1. `cmake/common.cmake`: `/MT` -> `/MD` (and `/MTd` -> `/MDd`). Upstream targets a standalone
-   executable and links the static CRT. A CPython extension must use the dynamic CRT so it
-   shares a heap and a std:: runtime with `python3xx.dll`, and an explicit
-   `add_compile_options(/MT)` cannot be overridden by `CMAKE_MSVC_RUNTIME_LIBRARY`.
+None. The vendoring script fails loudly if a patch it carries stops matching, so this
+section is the one to check when adding one.
 """.format(repo=REPO, ref=ref, commit=commit, date=datetime.date.today().isoformat())
         )
 

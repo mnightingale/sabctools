@@ -20,6 +20,9 @@
 
 #include "libpar2internal.h"
 
+namespace Par2
+{
+
 #ifdef _MSC_VER
 #ifdef _DEBUG
 #undef THIS_FILE
@@ -27,9 +30,6 @@ static char THIS_FILE[]=__FILE__;
 #define new DEBUG_NEW
 #endif
 #endif
-
-namespace Par2
-{
 
 // The one and only CCITT CRC32 lookup table
 //
@@ -124,4 +124,4 @@ u32 CRCUpdateBlock(u32 crc, u64 length)
   return GF32Multiply(crc, CRCExp8(length), ccitttable.polynom);
 }
 
-}
+} // namespace Par2

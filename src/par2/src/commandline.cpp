@@ -19,13 +19,12 @@
 //  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 // iostream is included here, so that cout and cerr are not used elsewhere.
-#include<iostream>
-#include<algorithm>
-
 #include "libpar2internal.h"
 
-using namespace Par2;
-using namespace std;
+#include<iostream>
+#include<algorithm>
+#include "commandline.h"
+#include <fstream>  //ADDED for @FILELIST FUNCTIONALY
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -33,9 +32,17 @@ using namespace std;
 static char THIS_FILE[]=__FILE__;
 #define new DEBUG_NEW
 #endif
+#else
+#include <unistd.h>
 #endif
 
-#include <thread>
+// OpenMP
+#ifdef _OPENMP
+# include <omp.h>
+#endif
+
+namespace Par2
+{
 
 CommandLine::CommandLine(void)
 : filesize_cache()
@@ -69,24 +76,24 @@ CommandLine::CommandLine(void)
 
 void CommandLine::showversion(void)
 {
-  std::string version = X_PACKAGE " version " X_VERSION;
+  std::string version = PACKAGE " version " VERSION;
   std::cout << version << std::endl;
 }
 
 void CommandLine::banner(void)
 {
-  std::cout << "Copyright (C) 2003-2015 Peter Brian Clements." << std::endl
-    << "Copyright (C) 2011-2012 Marcel Partap." << std::endl
-    << "Copyright (C) 2012-2026 Ike Devolder." << std::endl
-    << "Copyright (C) 2014-2017 Jussi Kansanen." << std::endl
-    << "Copyright (C) 2019 Michael Nahas." << std::endl
-    << std::endl
-    << "par2cmdline comes with ABSOLUTELY NO WARRANTY." << std::endl
-    << std::endl
-    << "This is free software, and you are welcome to redistribute it and/or modify" << std::endl
-    << "it under the terms of the GNU General Public License as published by the" << std::endl
-    << "Free Software Foundation; either version 2 of the License, or (at your" << std::endl
-    << "option) any later version. See COPYING for details." << std::endl
+  std::cout << "Copyright (C) 2003-2015 Peter Brian Clements.\n"
+    "Copyright (C) 2011-2012 Marcel Partap.\n"
+    "Copyright (C) 2012-2026 Ike Devolder.\n"
+    "Copyright (C) 2014-2017 Jussi Kansanen.\n"
+    "Copyright (C) 2019 Michael Nahas.\n"
+    "\n"
+    "par2cmdline comes with ABSOLUTELY NO WARRANTY.\n"
+    "\n"
+    "This is free software, and you are welcome to redistribute it and/or modify\n"
+    "it under the terms of the GNU General Public License as published by the\n"
+    "Free Software Foundation; either version 2 of the License, or (at your\n"
+    "option) any later version. See COPYING for details.\n"
     << std::endl;
 }
 
@@ -106,14 +113,18 @@ void CommandLine::usage(void)
     "\"par2verify\", or \"par2repair\" instead.\n"
     "\n"
     "Options: (all uses)\n"
+    "  -a<file> : Set the main PAR2 archive name\n"
     "  -B<path> : Set the basepath to use as reference for the datafiles\n"
     "  -v [-v]  : Be more verbose\n"
     "  -q [-q]  : Be more quiet (-q -q gives silence)\n"
     "  -m<n>    : Memory (in MB) to use (default is half of total physical memory)\n";
+#ifdef _OPENMP
   std::cout <<
-    "  -t<n>    : Number of threads used for main processing (" << std::thread::hardware_concurrency() << " detected)\n"
-    "  -T<n>    : Number of files hashed in parallel\n"
-    "             (" << _FILE_THREADS << " are the default)\n";
+    "  -t<n>    : Number of threads used for main processing (" << omp_get_max_threads() << " detected)\n"
+    "  -T<n>    : Number of files hashed in parallel (" << _FILE_THREADS << " are the default)\n"
+    "             Threads not busy with another file share out the blocks of a\n"
+    "             single file, so that one large file is not left to a single thread\n";
+#endif
   std::cout <<
     "  --       : Treat all following arguments as filenames\n"
     "Options: (verify or repair)\n"
@@ -124,7 +135,6 @@ void CommandLine::usage(void)
     "  -N       : Data skipping (find badly mispositioned data blocks)\n"
     "  -S<n>    : Skip leaway (distance +/- from expected block position, default 64)\n"
     "Options: (create)\n"
-    "  -a<file> : Set the main PAR2 archive name\n"
     "  -b<n>    : Set the Block-Count (default 2000)\n"
     "  -s<n>    : Set the Block-Size (don't use both -b and -s)\n"
     "  -r<n>    : Level of redundancy (%, default 5%)\n"
@@ -136,6 +146,8 @@ void CommandLine::usage(void)
     "  -n<n>    : Number of recovery files (max 31) (don't use both -n and -l)\n"
     "  -R       : Recurse into subdirectories\n"
     "             (Be aware of wildcard shell expansion)\n"
+    "   @       : Process a listing of files specified in text (file) input \n"
+    "             (eg. @filelist.txt, or bare @ to read from stdin) \n"
     "\n";
   std::cout <<
     "Example:\n"
@@ -167,6 +179,12 @@ bool CommandLine::Parse(int argc, const char * const *argv)
       {
 	largestfilesize = filesize;
       }
+    }
+
+    if (sourceblockcount > 32768)
+    {
+      std::cerr << "Too many source blocks (" << sourceblockcount << " > 32768)." << std::endl;
+      return false;
     }
 
     if (!ComputeRecoveryBlockCount(&recoveryblockcount,
@@ -217,7 +235,7 @@ bool CommandLine::ReadArgs(int argc, const char * const *argv)
       else if (argv[0] == std::string("-VV"))
       {
 	showversion();
-	std::cout << "A " PACKAGE " version " VERSION " fork, using a ParPar processing backend" << std::endl << std::endl;
+	std::cout << '\n';
 	banner();
 	return true;
       }
@@ -285,35 +303,33 @@ bool CommandLine::ReadArgs(int argc, const char * const *argv)
   {
     if (argv[0][0])
     {
-      if (options && argv[0][0] != '-')
+    //MODIFIED FOR @FILELIST FUNCTIONALITY
+      if (options && argv[0][0] != '-' && argv[0][0] != '@')
         options = false;
-
-      if (options)
+    //MODIFIED FOR @FILELIST FUNCTIONALITY
+      if (options && argv[0][0] == '-')
       {
         switch (argv[0][1])
         {
         case 'a':
           {
-            if (operation == opCreate)
+            std::string str = argv[0];
+            bool setparfile = false;
+            if (str == "-a")
             {
-              std::string str = argv[0];
-              bool setparfile = false;
-              if (str == "-a")
-              {
-                setparfile = SetParFilename(argv[1]);
-                argc--;
-                argv++;
-              }
-              else
-              {
-                setparfile = SetParFilename(str.substr(2));
-              }
+              setparfile = SetParFilename(argv[1]);
+              argc--;
+              argv++;
+            }
+            else
+            {
+              setparfile = SetParFilename(str.substr(2));
+            }
 
-              if (! setparfile)
-              {
-                std::cerr << "failed to set the main par file" << std::endl;
-                return false;
-              }
+            if (! setparfile)
+            {
+              std::cerr << "failed to set the main par file" << std::endl;
+              return false;
             }
           }
           break;
@@ -386,6 +402,7 @@ bool CommandLine::ReadArgs(int argc, const char * const *argv)
           }
           break;
 
+#ifdef _OPENMP
         case 't':  // Set amount of threads
           {
             nthreads = 0;
@@ -423,6 +440,7 @@ bool CommandLine::ReadArgs(int argc, const char * const *argv)
             }
           }
           break;
+#endif
 
         case 'r':  // Set the amount of redundancy required
           {
@@ -849,6 +867,57 @@ bool CommandLine::ReadArgs(int argc, const char * const *argv)
           }
         }
       }
+//START SECTION FOR ADDING @FILELIST FUNCTIONALITY
+      else if (argv[0][0] == '@') // Handle list files
+      {
+        std::istream* input = nullptr;
+        std::ifstream listfile;
+
+        // 1. Check if the '@' is followed by a filename
+        if (argv[0][1] == '\0')
+        {
+          // Bare '@' - read filelist from stdin
+          input = &std::cin;
+        }
+        else
+        {
+          listfile.open(&argv[0][1]);
+          if (!listfile.is_open())
+          {
+            std::cerr << "Could not open list file: " << &argv[0][1] << std::endl;
+            return false;
+          }
+          input = &listfile;
+        }
+
+        std::string line;
+        while (std::getline(*input, line))
+        {
+          // 2. Trim whitespace or skip whitespace-only lines
+          // This finds the first non-whitespace character
+          size_t first = line.find_first_not_of(" \t\r\n");
+          if (first == std::string::npos)
+            continue; // Line is empty or only whitespace
+
+          // 3. Removed the 'parfilename.length() == 0' block.
+          // All files in the list are now treated as source files.
+
+          std::string lpath, lname;
+          DiskFile::SplitFilename(line, lpath, lname);
+          std::unique_ptr< std::list<std::string> > filenames(
+            DiskFile::FindFiles(lpath, lname, recursive)
+          );
+
+          if (filenames)
+          {
+            for (auto const& fn : *filenames)
+            {
+              rawfilenames.push_back(DiskFile::GetCanonicalPathname(fn));
+            }
+          }
+        }
+      }  //END SECTION FOR ADDING @filelist FUNCTIONALITY
+
       else if (parfilename.length() == 0)
       {
         std::string filename = argv[0];
@@ -865,20 +934,17 @@ bool CommandLine::ReadArgs(int argc, const char * const *argv)
         std::string path;
         std::string name;
         DiskFile::SplitFilename(argv[0], path, name);
-	std::unique_ptr< std::list<std::string> > filenames(
-						DiskFile::FindFiles(path, name, recursive)
-						);
+        std::unique_ptr< std::list<std::string> > filenames(
+          DiskFile::FindFiles(path, name, recursive)
+        );
 
-        std::list<std::string>::iterator fn = filenames->begin();
-        while (fn != filenames->end())
+        if (filenames)
         {
-          // Convert filename from command line into a full path + filename
-          std::string filename = DiskFile::GetCanonicalPathname(*fn);
-          rawfilenames.push_back(filename);
-          ++fn;
+          for (auto const& fn : *filenames)
+          {
+            rawfilenames.push_back(DiskFile::GetCanonicalPathname(fn));
+          }
         }
-
-        // delete filenames;   Taken care of by unique_ptr<>
       }
     }
 
@@ -958,20 +1024,29 @@ bool CommandLine::CheckValuesAndSetDefaults() {
     noiselevel = nlNormal;
   }
 
-  // Default memorylimit of 128MB
+  // Default memorylimit of 256MB
   if (memorylimit == 0)
   {
     u64 TotalPhysicalMemory = GetTotalPhysicalMemory();
 
     if (TotalPhysicalMemory == 0)
     {
-      // Default/error case:
-      // NOTE: In 2019, Ubuntu's minimum requirements are 256MiB.
-      TotalPhysicalMemory = 256 * 1048576;
-    }
+      if (noiselevel >= nlDebug)
+        std::cout << "[DEBUG] could not detect physical memory" << std::endl;
 
-    // Half of total physical memory
-    memorylimit = (size_t)(TotalPhysicalMemory / 1048576 / 2);
+      // Default/error case:
+      memorylimit = 256;
+    }
+    else
+    {
+      if (noiselevel >= nlDebug)
+        std::cout << "[DEBUG] detected physical memory: " << TotalPhysicalMemory << " bytes" << std::endl;
+
+      // 1/8th of total physical memory or floor to 256MiB if lower:
+      memorylimit = (size_t)(TotalPhysicalMemory / 1048576 / 8);
+      if (memorylimit < 256)
+        memorylimit = 256;
+    }
   }
 
   // limit to 1GB on 32-bit platforms to avoid exhausing the addressable memory space
@@ -1037,7 +1112,7 @@ bool CommandLine::CheckValuesAndSetDefaults() {
       std::cout << "Ignoring non-existent source file: " << filename << std::endl;
     }
     // skip files outside basepath
-    else if (filename.find(basepath) == std::string::npos)
+    else if (filename.compare(0, basepath.size(), basepath) != 0)
     {
       std::cout << "Ignoring out of basepath source file: " << filename << std::endl;
     }
@@ -1129,11 +1204,28 @@ bool CommandLine::CheckValuesAndSetDefaults() {
       return false;
     }
 
-    // If neither block count not block size is specified
+    // If neither block count nor block size is specified, derive a default
+    // block size from total source data, targeting ~2000 blocks (as previous
+    // default). This replaces the old hard-coded blockcount=2000 which failed
+    // when file count exceeded 2000, and avoids inflated block sizes when file
+    // sizes vary widely. The minimum is clamped so that the total source block
+    // count stays within the PAR2 limit of 32768.
     if (blockcount == 0 && blocksize == 0)
     {
-      // Use a block count of 2000
-      blockcount = 2000;
+        u64 totalsize = 0;
+        for (auto &f : extrafiles)
+            totalsize += filesize_cache.get(f);
+
+        blocksize = (totalsize + 1999) / 2000; // 2000 = target (previous default)
+        blocksize = std::max(blocksize, (u64)4);
+        blocksize = (blocksize + 3) & ~3;
+
+        u64 minblocksize = (totalsize + 32767) / 32768; // 32768 = maximum PAR2
+        minblocksize = std::max(minblocksize, (u64)4);
+        minblocksize = (minblocksize + 3) & ~3;
+
+        if (blocksize < minblocksize)
+            blocksize = minblocksize;
     }
 
     // If no recovery file size scheme is specified then use Variable
@@ -1437,3 +1529,5 @@ bool CommandLine::SetParFilename(std::string filename)
 
   return result;
 }
+
+} // namespace Par2

@@ -17,11 +17,33 @@
 //  along with this program; if not, write to the Free Software
 //  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-#include "libpar2internal.h"
+#ifndef __CREATORPACKET_H__
+#define __CREATORPACKET_H__
 
 namespace Par2
 {
 
-PAR1MAGIC    par1_magic                = {{'P', 'A', 'R', '\0', '\0', '\0', '\0', '\0'}};
+// The creator packet records details as to which PAR2 client
+// created a particular recovery file.
+
+// The PAR 2.0 specification requires the presence of a
+// creator packet, but it is not actually needed for the
+// verification or recovery of damaged files.
+
+class CreatorPacket : public CriticalPacket
+{
+public:
+  // Construct the packet
+  CreatorPacket(void) {};
+  ~CreatorPacket(void) {};
+
+  // Create a creator packet for a specified set id hash value
+  bool Create(const MD5Hash &set_id_hash);
+
+  // Load a creator packet from a specified file
+  bool Load(DiskFile *diskfile, u64 offset, PACKET_HEADER &header);
+};
 
 } // namespace Par2
+
+#endif // __CREATORPACKET_H__

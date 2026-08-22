@@ -19,10 +19,8 @@
 
 #include "libpar2internal.h"
 
-#include <vector>
-
-using namespace Par2;
-using namespace std;
+namespace Par2
+{
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -133,3 +131,5 @@ bool MainPacket::Load(DiskFile *diskfile, u64 offset, PACKET_HEADER &header)
 
   return true;
 }
+
+} // namespace Par2

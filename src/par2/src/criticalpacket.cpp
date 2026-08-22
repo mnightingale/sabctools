@@ -20,7 +20,8 @@
 
 #include "libpar2internal.h"
 
-using namespace Par2;
+namespace Par2
+{
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -134,3 +135,5 @@ bool CriticalPacket::CompareLess(const CriticalPacket* const &left, const Critic
     return false;
   }
 }
+
+} // namespace Par2

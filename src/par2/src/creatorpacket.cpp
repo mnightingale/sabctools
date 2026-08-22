@@ -19,8 +19,8 @@
 
 #include "libpar2internal.h"
 
-using namespace Par2;
-using namespace std;
+namespace Par2
+{
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -38,7 +38,7 @@ static char THIS_FILE[]=__FILE__;
 
 bool CreatorPacket::Create(const MD5Hash &setid)
 {
-  std::string creator = "Created by " X_PACKAGE " version " X_VERSION ".";
+  std::string creator = "Created by " PACKAGE " version " VERSION ".";
 
   // Allocate a packet just large enough for creator name
   CREATORPACKET *packet = (CREATORPACKET *)AllocatePacket(sizeof(*packet) + (~3 & (3+(u32)creator.size())));
@@ -86,3 +86,5 @@ bool CreatorPacket::Load(DiskFile *diskfile, u64 offset, PACKET_HEADER &header)
                         packet->client,
                         (size_t)packet->header.length - sizeof(PACKET_HEADER));
 }
+
+} // namespace Par2

@@ -1,7 +1,7 @@
 //  This file is part of par2cmdline (a PAR 2.0 compatible file verification and
 //  repair tool). See https://parchive.sourceforge.net for details of PAR 2.0.
 //
-//  Copyright (c) 2024-2026 Denis <denis@nzbget.com>
+//  Copyright (c) 2024-2025 Denis <denis@nzbget.com>
 //
 //  par2cmdline is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -17,87 +17,106 @@
 //  along with this program; if not, write to the Free Software
 //  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-
 #include "libpar2internal.h"
 
+#ifdef _WIN32
+
 #include <cstring>
+#include <cwchar>
 #include <iostream>
 #include <memory>
-#include <par2/utf8.h>
+#include <new>
+#include <stdexcept>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include "utf8.h"
 
 namespace Par2::utf8
 {
-  std::string Latin1ToUtf8(std::string_view latin1Str)
+  const int MAX_ARGS = 128;
+  const size_t MAX_DIR_PATH = 248;
+
+  namespace
   {
-    if (latin1Str.empty()) return "";
+    const int STACK_BUFFER_SIZE = 1024;
 
-    std::string utf8Str;
-    utf8Str.reserve(latin1Str.length() * 2);
-
-    for (unsigned char ch : latin1Str)
+    void ApplyLongPathPrefix(std::wstring& wpath)
     {
-      if (ch < 128)
+      if (wpath.size() <= MAX_DIR_PATH ||
+        wpath.find(L"\\\\?\\") != std::wstring::npos)
       {
-        utf8Str.push_back(ch);
+        return;
+      }
+
+      if (std::wcsncmp(wpath.c_str(), L"\\\\", 2) == 0)
+      {
+        wpath = L"\\\\?\\UNC" + wpath.substr(1);
       }
       else
       {
-        utf8Str.push_back(0xc2 + (ch > 0xbf));
-        utf8Str.push_back((ch & 0x3f) + 0x80);
+        wpath = L"\\\\?\\" + wpath;
       }
     }
-    return utf8Str;
   }
 
-#ifdef _WIN32
-  std::optional<std::wstring> Utf8ToWide(std::string_view str)
-	{
-		if (str.empty()) return L"";
- 
-		int requiredSize = MultiByteToWideChar(CP_UTF8, 0, str.data(), -1, nullptr, 0);
-		if (requiredSize <= 0) return std::nullopt;
- 
-		if (requiredSize <= STACK_BUFFER_SIZE)
-		{
-			wchar_t buffer[STACK_BUFFER_SIZE];
-			int result = MultiByteToWideChar(CP_UTF8, 0, str.data(), -1, buffer, STACK_BUFFER_SIZE);
-			if (result <= 0) return std::nullopt;
-			return std::wstring(buffer);
-		}
- 
-		auto buffer = std::make_unique<wchar_t[]>(requiredSize);
-		int result = MultiByteToWideChar(CP_UTF8, 0, str.data(), -1, buffer.get(), requiredSize);
-		if (result <= 0) return std::nullopt;
-		return std::wstring(buffer.get());
-	}
- 
-	std::optional<std::string> WideToUtf8(std::wstring_view wstr)
-	{
-		if (wstr.empty()) return "";
- 
-		int requiredSize = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), -1, nullptr, 0, nullptr, nullptr);
-		if (requiredSize <= 0) return std::nullopt;
- 
-		if (requiredSize <= STACK_BUFFER_SIZE)
-		{
-			char buffer[STACK_BUFFER_SIZE];
-			int result = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), -1, buffer, STACK_BUFFER_SIZE, nullptr, nullptr);
-			if (result <= 0) return std::nullopt;
-			return std::string(buffer);
-		}
- 
-		auto buffer = std::make_unique<char[]>(requiredSize);
-		int result = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), -1, buffer.get(), requiredSize, nullptr, nullptr);
-		if (result <= 0) return std::nullopt;
-		return std::string(buffer.get());
-	}
+  std::optional<std::wstring> Utf8ToWide(const std::string& str)
+  {
+    if (str.empty())
+      return std::wstring();
+
+    const int required =
+      ::MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+    if (required <= 0)
+      return std::nullopt;
+
+    std::wstring wpath;
+    if (required <= STACK_BUFFER_SIZE)
+    {
+      wchar_t buffer[STACK_BUFFER_SIZE];
+      if (::MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, buffer, required) <= 0)
+        return std::nullopt;
+      wpath.assign(buffer);
+    }
+    else
+    {
+      std::unique_ptr<wchar_t[]> buffer(new wchar_t[required]);
+      if (::MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, buffer.get(), required) <= 0)
+        return std::nullopt;
+      wpath.assign(buffer.get());
+    }
+
+    ApplyLongPathPrefix(wpath);
+
+    return wpath;
+  }
+
+  std::optional<std::string> WideToUtf8(const std::wstring& str)
+  {
+    if (str.empty())
+      return std::string();
+
+    const int required =
+      ::WideCharToMultiByte(CP_UTF8, 0, str.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (required <= 0)
+      return std::nullopt;
+
+    if (required <= STACK_BUFFER_SIZE)
+    {
+      char buffer[STACK_BUFFER_SIZE];
+      if (::WideCharToMultiByte(CP_UTF8, 0, str.c_str(), -1, buffer, required, nullptr, nullptr) <= 0)
+        return std::nullopt;
+      return std::string(buffer);
+    }
+
+    std::unique_ptr<char[]> buffer(new char[required]);
+    if (::WideCharToMultiByte(CP_UTF8, 0, str.c_str(), -1, buffer.get(), required, nullptr, nullptr) <= 0)
+      return std::nullopt;
+
+    return std::string(buffer.get());
+  }
 
   WideToUtf8ArgsAdapter::WideToUtf8ArgsAdapter(int argc, wchar_t* wargv[]) noexcept(false)
-    : m_argc(argc)
+    : m_argv(nullptr)
+    , m_argc(argc)
   {
     if (wargv == nullptr)
     {
@@ -108,35 +127,40 @@ namespace Par2::utf8
     {
       std::cerr
         << "Too many arguments (" << argc << "/" << MAX_ARGS << ").\n"
-        << "Only " << MAX_ARGS << " will be processed." << std::endl;
+           "Only " << MAX_ARGS << " will be processed." << std::endl;
 
       m_argc = MAX_ARGS;
     }
 
     m_argv = new char* [m_argc + 1];
+
+    int argcount = 0;
     for (int i = 0; i < m_argc; ++i)
     {
       if (wargv[i] == nullptr)
       {
         std::cerr
           << "Invalid argument: encountered nullptr in wargv.\n"
-          << "Skipping " << i << "argument." << std::endl;
-        --m_argc;
-        --i;
+             "Skipping argument " << i << "." << std::endl;
         continue;
       }
 
-      auto arg = utf8::WideToUtf8(wargv[i]);
-      if (!arg.has_value())
+      const std::optional<std::string> arg = WideToUtf8(wargv[i]);
+      if (!arg)
       {
-        std::wcerr << L"Failed to convert " << wargv[i] << L" to UTF-8 string. Skipping" << std::endl;
+        std::cerr
+          << "Failed to convert wide to UTF-8 string.\n"
+             "Skipping argument " << i << "." << std::endl;
         continue;
       }
 
-      size_t size = arg->size() + 1;
-      m_argv[i] = new char[size];
-      std::memcpy(m_argv[i], arg->c_str(), size);
+      const size_t size = arg->size() + 1;
+      m_argv[argcount] = new char[size];
+      std::memcpy(m_argv[argcount], arg->c_str(), size);
+      ++argcount;
     }
+
+    m_argc = argcount;
     m_argv[m_argc] = nullptr;
   }
 
@@ -149,12 +173,13 @@ namespace Par2::utf8
   {
     if (m_argv)
     {
-      for (size_t i = 0; m_argv[i]; ++i)
+      for (int i = 0; i < m_argc; ++i)
       {
-        delete m_argv[i];
+        delete[] m_argv[i];
       }
       delete[] m_argv;
     }
   }
-#endif
 }
+
+#endif // _WIN32

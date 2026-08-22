@@ -20,11 +20,8 @@
 
 #include "libpar2internal.h"
 
-#include <ostream>
-#include <string>
-
-using namespace Par2;
-using namespace std;
+namespace Par2
+{
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -35,17 +32,19 @@ static char THIS_FILE[]=__FILE__;
 #endif
 
 
-// static variable
-u32 Par2Creator::filethreads = _FILE_THREADS;
 
 
 Par2Creator::Par2Creator(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel)
 : sout(sout)
 , serr(serr)
 , noiselevel(noiselevel)
+#ifdef _OPENMP
+, filethreads(_FILE_THREADS)
+#endif
 , blocksize(0)
 , chunksize(0)
-, transferbuffer(0)
+, inputbuffer(0)
+, outputbuffer(0)
 
 , sourcefilecount(0)
 , sourceblockcount(0)
@@ -65,13 +64,10 @@ Par2Creator::Par2Creator(std::ostream &sout, std::ostream &serr, const NoiseLeve
 , recoverypackets()
 , criticalpackets()
 , criticalpacketentries()
-, progress(0)
-, totaldata(0)
+, rs()
 
 , deferhashcomputation(false)
-, mttotalsize(0)
 {
-  setup_hasher();
 }
 
 Par2Creator::~Par2Creator(void)
@@ -79,9 +75,8 @@ Par2Creator::~Par2Creator(void)
   delete mainpacket;
   delete creatorpacket;
 
-  delete [] (u8*)transferbuffer;
-
-  parpar.deinit();
+  delete [] (u8*)inputbuffer;
+  delete [] (u8*)outputbuffer;
 
   std::vector<Par2CreatorSourceFile*>::iterator sourcefile = sourcefiles.begin();
   while (sourcefile != sourcefiles.end())
@@ -94,8 +89,10 @@ Par2Creator::~Par2Creator(void)
 Result Par2Creator::Process(
 			    const size_t memorylimit,
 			    const std::string &basepath,
+#ifdef _OPENMP
 			    const u32 nthreads,
 			    const u32 _filethreads,
+#endif
 			    const std::string &parfilename,
 			    const std::vector<std::string> &_extrafiles,
 			    const u64 _blocksize,
@@ -104,7 +101,9 @@ Result Par2Creator::Process(
 			    const u32 _recoveryfilecount,
 			    const u32 _recoveryblockcount)
 {
+#ifdef _OPENMP
   filethreads = _filethreads;
+#endif
 
   if (!CheckBasepath(parfilename))
     return eFileIOError;
@@ -117,6 +116,12 @@ Result Par2Creator::Process(
   recoveryfilecount = _recoveryfilecount;
   firstrecoveryblock = _firstblock;
   recoveryfilescheme = _recoveryfilescheme;
+
+#ifdef _OPENMP
+  // Set the number of threads
+  if (nthreads != 0)
+    omp_set_num_threads(nthreads);
+#endif
 
   // Compute block size from block count or vice versa depending on which was
   // specified on the command line
@@ -141,38 +146,15 @@ Result Par2Creator::Process(
   if (recoveryblockcount > 0 && noiselevel >= nlDebug)
     sout << "[DEBUG] Process chunk size: " << chunksize << std::endl;
 
-  // Init ParPar backend
-  if (!parpar.init(chunksize, {{&parparcpu, 0, (size_t)chunksize}}))
-    return eLogicError;
-  if (nthreads != 0)
-    parparcpu.setNumThreads(nthreads);
-
-  // If there aren't many input blocks, restrict the submission batch size
-  u32 inputbatch = 0;
-  if (sourceblockcount < NUM_PARPAR_BUFFERS*2)
-    inputbatch = (sourceblockcount + 1) / 2;
-  if (!parparcpu.init(GF16_AUTO, inputbatch))
-    return eMemoryError;
-
   if (noiselevel > nlQuiet)
   {
     // Display information.
-    sout << "Block size: " << blocksize << std::endl;
-    sout << "Source file count: " << sourcefilecount << std::endl;
-    sout << "Source block count: " << sourceblockcount << std::endl;
-    sout << "Recovery block count: " << recoveryblockcount << std::endl;
-    sout << "Recovery file count: " << recoveryfilecount << std::endl;
-    if (noiselevel >= nlNoisy)
-    {
-      sout << "Data hash method: " << hasherInput_methodName() << std::endl;
-      sout << "Multiply method: " << parparcpu.getMethodName() << std::endl;
-      if (noiselevel >= nlDebug)
-      {
-        sout << "[DEBUG] Compute tile size: " << parparcpu.getChunkLen() << std::endl;
-        sout << "[DEBUG] Compute block grouping: " << parparcpu.getInputBatchSize() << std::endl;
-      }
-    }
-    sout << std::endl;
+    sout << "Block size: " << blocksize << "\n"
+      "Source file count: " << sourcefilecount << "\n"
+      "Source block count: " << sourceblockcount << "\n"
+      "Recovery block count: " << recoveryblockcount << "\n"
+      "Recovery file count: " << recoveryfilecount << "\n"
+      << std::endl;
   }
 
   // Open all of the source files, compute the Hashes and CRC values, and store
@@ -202,16 +184,12 @@ Result Par2Creator::Process(
     if (!AllocateBuffers())
       return eMemoryError;
 
-    // Set output exponents
-    std::vector<u16> recoveryindices(recoveryblockcount);
-    for (u16 i = 0; i < recoveryblockcount; i++)
-      recoveryindices[i] = i + firstrecoveryblock;
-    if (!parpar.setRecoverySlices(recoveryindices))
-      return eMemoryError;
+    // Compute the Reed Solomon matrix
+    if (!ComputeRSMatrix())
+      return eLogicError;
 
     // Set the total amount of data to be processed.
-    progress = 0;
-    totaldata = blocksize * sourceblockcount;
+    ProgressMeter<u64> progress(sout, "Processing: ", blocksize * sourceblockcount * recoveryblockcount, noiselevel);
 
     // Start at an offset of 0 within a block.
     u64 blockoffset = 0;
@@ -219,11 +197,9 @@ Result Par2Creator::Process(
     {
       // Work out how much data to process this time.
       size_t blocklength = (size_t)std::min((u64)chunksize, blocksize-blockoffset);
-      if (!parpar.setCurrentSliceSize(blocklength))
-        return eMemoryError;
 
       // Read source data, process it through the RS matrix and write it to disk.
-      if (!ProcessData(blockoffset, blocklength))
+      if (!ProcessData(blockoffset, blocklength, progress))
         return eFileIOError;
 
       blockoffset += blocklength;
@@ -266,7 +242,7 @@ Result Par2Creator::Process(
 bool Par2Creator::CheckBasepath(const std::string &parfilename)
 {
   std::string checkfilename = parfilename + ".check.par2";
-  std::unique_ptr<DiskFile> diskfile(new DiskFile(sout, serr, output_lock));
+  std::unique_ptr<DiskFile> diskfile(new DiskFile(sout, serr));
   size_t dummysize = 4096;
 
   if (!diskfile->Create(checkfilename, dummysize))
@@ -342,14 +318,11 @@ bool Par2Creator::CalculateProcessBlockSize(size_t memorylimit)
   }
   else
   {
-    // We use intermediary buffers to transfer data with, so include those in the limit calculation
-    u32 blockoverhead = NUM_TRANSFER_BUFFERS + std::min((u32)NUM_PARPAR_BUFFERS*2, sourceblockcount+1);
-
     // Would single pass processing use too much memory
-    if (blocksize * (recoveryblockcount + blockoverhead) > memorylimit)
+    if (blocksize * recoveryblockcount > memorylimit)
     {
       // Pick a size that is small enough
-      chunksize = ~3 & (memorylimit / (recoveryblockcount + blockoverhead));
+      chunksize = ~3 & (memorylimit / recoveryblockcount);
 
       deferhashcomputation = false;
     }
@@ -375,49 +348,73 @@ bool Par2Creator::CalculateProcessBlockSize(size_t memorylimit)
 // the results in the file verification and file description packets.
 bool Par2Creator::OpenSourceFiles(const std::vector<std::string> &extrafiles, std::string basepath)
 {
-  std::atomic<bool> openfailed(false);
-  std::atomic<u64> totalprogress(0);
+#ifdef _OPENMP
+  bool openfailed = false;
 
   //Total size of files for mt-progress line
+  u64 mttotalsize = 0;
   for (size_t i=0; i<extrafiles.size(); ++i)
     mttotalsize += DiskFile::GetFileSize(extrafiles[i]);
 
-  std::mutex packet_lock;
-  foreach_parallel<std::string>(extrafiles, Par2Creator::GetFileThreads(), [&, this](const std::string& extrafile) {
-    if (openfailed.load(std::memory_order_relaxed)) return;
+  ProgressMeter<u64> progress(sout, "", mttotalsize, noiselevel);
+#endif
+
+#ifdef _OPENMP
+  const u32 filethreadcount = filethreads;
+#endif
+  #pragma omp parallel for schedule(dynamic) num_threads(filethreadcount)
+  for (int i=0; i< static_cast<int>(extrafiles.size()); ++i)
+  {
+#ifdef _OPENMP
+    if (openfailed)
+      continue;
+#endif
+
     Par2CreatorSourceFile *sourcefile = new Par2CreatorSourceFile;
 
     std::string name;
-    DiskFile::SplitRelativeFilename(extrafile, basepath, name);
+    DiskFile::SplitRelativeFilename(extrafiles[i], basepath, name);
+
     if (noiselevel > nlSilent)
     {
-      std::lock_guard<std::mutex> lock(output_lock);
+      #pragma omp critical(stdio)
       sout << "Opening: " << name << std::endl;
     }
 
     // Open the source file and compute its Hashes and CRCs.
-    if (!sourcefile->Open(noiselevel, sout, serr, extrafile, blocksize, deferhashcomputation, basepath, mttotalsize, totalprogress, output_lock))
+#ifdef _OPENMP
+    if (!sourcefile->Open(noiselevel, sout, serr, extrafiles[i], blocksize, deferhashcomputation, basepath, progress))
+#else
+    if (!sourcefile->Open(noiselevel, sout, serr, extrafiles[i], blocksize, deferhashcomputation, basepath))
+#endif
     {
       delete sourcefile;
-      openfailed.store(true, std::memory_order_relaxed);
-      return;
+#ifdef _OPENMP
+      openfailed = true;
+      continue;
+#else
+      return false;
+#endif
     }
 
     // Record the file verification and file description packets
     // in the critical packet list.
+    #pragma omp critical
     {
-      std::lock_guard<std::mutex> lock(packet_lock);
-      sourcefile->RecordCriticalPackets(criticalpackets);
-      
-      // Add the source file to the sourcefiles array.
-      sourcefiles.push_back(sourcefile);
+    sourcefile->RecordCriticalPackets(criticalpackets);
+
+    // Add the source file to the sourcefiles array.
+    sourcefiles.push_back(sourcefile);
     }
     // Close the source file until its needed
     sourcefile->Close();
-  });
 
-  if (openfailed.load(std::memory_order_relaxed))
+  }
+
+#ifdef _OPENMP
+  if (openfailed)
     return false;
+#endif
 
   return true;
 }
@@ -649,7 +646,7 @@ bool Par2Creator::InitialiseOutputFiles(const std::string &parfilename)
 
   // Allocate the recovery files
   {
-    recoveryfiles.resize(recoveryfilecount+1, DiskFile(sout, serr, output_lock)); // pass default constructor.
+    recoveryfiles.resize(recoveryfilecount+1, DiskFile(sout, serr)); // pass default constructor.
 
     // Sort critical packets, so we get consistency.
     criticalpackets.sort(CriticalPacket::CompareLess);
@@ -751,9 +748,10 @@ bool Par2Creator::InitialiseOutputFiles(const std::string &parfilename)
 // Allocate memory buffers for reading and writing data to disk.
 bool Par2Creator::AllocateBuffers(void)
 {
-  transferbuffer = new u8[chunksize * NUM_TRANSFER_BUFFERS];
+  inputbuffer = new u8[chunksize];
+  outputbuffer = new u8[chunksize * recoveryblockcount];
 
-  if (transferbuffer == NULL)
+  if (inputbuffer == NULL || outputbuffer == NULL)
   {
     serr << "Could not allocate buffer memory." << std::endl;
     return false;
@@ -762,9 +760,32 @@ bool Par2Creator::AllocateBuffers(void)
   return true;
 }
 
-// Read source data, process it through the RS matrix and write it to disk.
-bool Par2Creator::ProcessData(u64 blockoffset, size_t blocklength)
+// Compute the Reed Solomon matrix
+bool Par2Creator::ComputeRSMatrix(void)
 {
+  // Set the number of input blocks
+  if (!rs.SetInput(sourceblockcount, sout, serr))
+    return false;
+
+  // Set the number of output blocks to be created
+  if (!rs.SetOutput(false,
+                    (u16)firstrecoveryblock,
+                    (u16)firstrecoveryblock + (u16)(recoveryblockcount-1)))
+    return false;
+
+  // Compute the RS matrix
+  if (!rs.Compute(noiselevel, sout, serr))
+    return false;
+
+  return true;
+}
+
+// Read source data, process it through the RS matrix and write it to disk.
+bool Par2Creator::ProcessData(u64 blockoffset, size_t blocklength, ProgressMeter<u64> &progress)
+{
+  // Clear the output buffer
+  memset(outputbuffer, 0, chunksize * recoveryblockcount);
+
   // If we have deferred computation of the file hash and block crc and hashes
   // sourcefile and sourceindex will be used to update them during
   // the main recovery block computation
@@ -775,20 +796,6 @@ bool Par2Creator::ProcessData(u64 blockoffset, size_t blocklength)
   u32 inputblock;
 
   DiskFile *lastopenfile = NULL;
-
-  // For tracking input buffer availability
-  std::future<void> bufferavail[NUM_TRANSFER_BUFFERS];
-  u32 bufferindex = NUM_TRANSFER_BUFFERS - 1;
-  // Set all input buffers to available
-  for (i32 i = 0; i < NUM_TRANSFER_BUFFERS; i++)
-  {
-    std::promise<void> stub;
-    bufferavail[i] = stub.get_future();
-    stub.set_value();
-  }
-
-  // Clear existing output data in backend
-  parpar.discardOutput();
 
   // For each input block
   for ((sourceblock=sourceblocks.begin()),(inputblock=0);
@@ -812,19 +819,9 @@ bool Par2Creator::ProcessData(u64 blockoffset, size_t blocklength)
       }
     }
 
-    // Wait for next input buffer to become available
-    bufferindex = (bufferindex + 1) % NUM_TRANSFER_BUFFERS;
-    void *inputbuffer = (char*)transferbuffer + chunksize * bufferindex;
-    bufferavail[bufferindex].get();
-    
     // Read data from the current input block
     if (!sourceblock->ReadData(blockoffset, blocklength, inputbuffer))
       return false;
-
-    // Wait for ParPar backend to be ready, if busy
-    parpar.waitForAdd();
-    // Send block to backend
-    bufferavail[bufferindex] = parpar.addInput(inputbuffer, blocklength, inputblock);
 
     if (deferhashcomputation)
     {
@@ -834,17 +831,20 @@ bool Par2Creator::ProcessData(u64 blockoffset, size_t blocklength)
       (*sourcefile)->UpdateHashes(sourceindex, inputbuffer, blocklength);
     }
 
-    if (noiselevel > nlQuiet)
+    // For each output block
+    #pragma omp parallel for
+    for (i64 outputblock=0; outputblock<recoveryblockcount; outputblock++)
     {
-      // Update a progress indicator
-      u32 oldfraction = (u32)(1000 * progress / totaldata);
-      progress += blocklength;
-      u32 newfraction = (u32)(1000 * progress / totaldata);
+      u32 internalOutputblock = (u32)outputblock;
 
-      if (oldfraction != newfraction)
-      {
-        sout << "Processing: " << newfraction/10 << '.' << newfraction%10 << "%\r" << std::flush;
-      }
+      // Select the appropriate part of the output buffer
+      void *outbuf = &((u8*)outputbuffer)[chunksize * internalOutputblock];
+
+      // Process the data through the RS matrix
+      rs.Process(blocklength, inputblock, inputbuffer, internalOutputblock, outbuf);
+
+      if (noiselevel > nlQuiet)
+        progress.Add(blocklength);
     }
 
     // Work out which source file the next block belongs to
@@ -855,9 +855,6 @@ bool Par2Creator::ProcessData(u64 blockoffset, size_t blocklength)
     }
   }
 
-  // Flush backend
-  parpar.endInput().get();
-
   // Close the last file
   if (lastopenfile != NULL)
   {
@@ -867,36 +864,15 @@ bool Par2Creator::ProcessData(u64 blockoffset, size_t blocklength)
   if (noiselevel > nlQuiet)
     sout << "Writing recovery packets\r";
 
-  if (recoveryblockcount > 0)
+  // For each output block
+  for (u32 outputblock=0; outputblock<recoveryblockcount;outputblock++)
   {
-    // For output, we only need two transfer buffers
-    std::future<bool> outbufavail[2];
-    // Prepare first output
-    outbufavail[0] = parpar.getOutput(0, transferbuffer);
+    // Select the appropriate part of the output buffer
+    char *outbuf = &((char*)outputbuffer)[chunksize * outputblock];
 
-    // For each output block
-    for (u32 outputblock=0; outputblock<recoveryblockcount;outputblock++)
-    {
-      // Prepare next output
-      u32 nextoutputblock = outputblock + 1;
-      if (nextoutputblock < recoveryblockcount)
-      {
-        void *nextoutputbuffer = (char*)transferbuffer + chunksize * (nextoutputblock & 1);
-        outbufavail[nextoutputblock & 1] = parpar.getOutput(nextoutputblock, nextoutputbuffer);
-      }
-
-      // Wait for current buffer to be available
-      if (!outbufavail[outputblock & 1].get())
-      {
-        serr << "Internal checksum failure in recovery packet " << recoverypackets[outputblock].Exponent() << std::endl;
-        return false;
-      }
-      
-      // Write the data to the recovery packet
-      void *outputbuffer = (char*)transferbuffer + chunksize * (outputblock & 1);
-      if (!recoverypackets[outputblock].WriteData(blockoffset, blocklength, outputbuffer))
-        return false;
-    }
+    // Write the data to the recovery packet
+    if (!recoverypackets[outputblock].WriteData(blockoffset, blocklength, outbuf))
+      return false;
   }
 
   if (noiselevel > nlQuiet)
@@ -998,3 +974,5 @@ bool Par2Creator::CloseFiles(void)
 
   return true;
 }
+
+} // namespace Par2

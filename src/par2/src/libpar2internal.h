@@ -40,7 +40,6 @@
 
 #define snprintf _snprintf_s
 #define unlink   _unlink
-#define stat _stat64
 
 #define __LITTLE_ENDIAN 1234
 #define __BIG_ENDIAN    4321
@@ -73,6 +72,8 @@ typedef unsigned int     size_t;
 #ifdef HAVE_STDIO_H
 #  include <stdio.h>
 #endif
+
+#include <fcntl.h>
 
 #if HAVE_DIRENT_H
 #  include <dirent.h>
@@ -176,8 +177,6 @@ typedef unsigned int     size_t;
 #endif
 #endif
 
-#define NUM_TRANSFER_BUFFERS 2 // must be >= 2
-#define NUM_PARPAR_BUFFERS 12 // maximum number of internal ParPar staging buffers
 #define MAX_CHUNK_SIZE 32*1048576 // too large chunks are likely detrimental to performance; set to 0 to disable
 
 #define LONGMULTIPLY
@@ -190,10 +189,10 @@ typedef unsigned int     size_t;
 #include <sstream>
 #include <algorithm>
 #include <memory>
+#include <limits>
 
 #include <ctype.h>
 #include <iomanip>
-#include <codecvt>
 
 #include <cassert>
 
@@ -203,36 +202,64 @@ typedef unsigned int     size_t;
 #define offsetof(TYPE, MEMBER) ((size_t) ((char*)(&((TYPE *)1)->MEMBER) - (char*)1))
 
 // par2cmdline includes
-#include <par2/commandline.h>
-#include <par2/crc.h>
-#include <par2/creatorpacket.h>
-#include <par2/criticalpacket.h>
-#include <par2/datablock.h>
-#include <par2/descriptionpacket.h>
-#include <par2/diskfile.h>
-#include <par2/filechecksummer.h>
-#include <par2/foreach_parallel.h>
-#include <par2/galois.h>
-#include <par2/hasher.h>
-#include <par2/letype.h>
 #include <par2/libpar2.h>
-#include <par2/mainpacket.h>
-#include <par2/md5.h>
-#include <par2/par1fileformat.h>
-#include <par2/par1repairer.h>
-#include <par2/par1repairersourcefile.h>
-#include <par2/par2creator.h>
-#include <par2/par2creatorsourcefile.h>
-#include <par2/par2fileformat.h>
-#include <par2/par2repairer.h>
-#include <par2/par2repairersourcefile.h>
-#include <par2/recoverypacket.h>
-#include <par2/reedsolomon.h>
-#include <par2/verificationhashtable.h>
-#include <par2/verificationpacket.h>
+
+// Case-insensitive string comparison
+#ifdef _WIN32
+#  define stricmp  _stricmp
+#else
+#  include <string.h>
+#  define stricmp strcasecmp
+#endif
+
+// Path separators
+#ifdef _WIN32
+#  define PATHSEP "\\"
+#  define ALTPATHSEP "/"
+#else
+#  define PATHSEP "/"
+#  define ALTPATHSEP "\\"
+#endif
+
+// Default number of file threads
+#define _FILE_THREADS 2
+
+
+#include "letype.h"
+#include "progressmeter.h"
+
+#include "galois.h"
+#include "crc.h"
+#include "md5.h"
+#include "par2fileformat.h"
+#include "reedsolomon.h"
+
+#include "diskfile.h"
+#include "datablock.h"
+
+#include "criticalpacket.h"
+#include "par2creatorsourcefile.h"
+
+#include "mainpacket.h"
+#include "creatorpacket.h"
+#include "descriptionpacket.h"
+#include "verificationpacket.h"
+#include "recoverypacket.h"
+
+#include "par2repairersourcefile.h"
+
+#include "filechecksummer.h"
+#include "verificationhashtable.h"
+
+#include "par2creator.h"
+#include "par2repairer.h"
+
+#include "par1fileformat.h"
+#include "par1repairersourcefile.h"
+#include "par1repairer.h"
 
 #ifdef _WIN32
-#include <par2/utf8.h>
+#include "utf8.h"
 #endif
 
 // Heap checking
@@ -241,5 +268,11 @@ typedef unsigned int     size_t;
 #include <crtdbg.h>
 #define DEBUG_NEW new(_NORMAL_BLOCK, THIS_FILE, __LINE__)
 #endif
+
+// OpenMP
+#ifdef _OPENMP
+# include <omp.h>
+#endif
+
 
 #endif // __PARCMDLINE_H__

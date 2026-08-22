@@ -19,10 +19,8 @@
 
 #include "libpar2internal.h"
 
-#include <vector>
-
-using namespace Par2;
-using namespace std;
+namespace Par2
+{
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -110,3 +108,5 @@ void VerificationHashTable::Load(Par2RepairerSourceFile *sourcefile, u64 blocksi
     ++verificationentry;
   }
 }
+
+} // namespace Par2
