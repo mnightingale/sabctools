@@ -20,6 +20,12 @@
 
 #include "libpar2internal.h"
 
+#include "crc_arm.h"
+#include "crc_clmul.h"
+
+namespace par2
+{
+
 #ifdef _MSC_VER
 #ifdef _DEBUG
 #undef THIS_FILE
@@ -28,15 +34,46 @@ static char THIS_FILE[]=__FILE__;
 #endif
 #endif
 
-namespace Par2
-{
-
 // The one and only CCITT CRC32 lookup table
 //
 // NOTE: the constant is the reversed polynomial for CRC-32
 // as listed on Wikipedia's page:
 // https://en.wikipedia.org/wiki/Cyclic_redundancy_check
 crc32table ccitttable(0xEDB88320L);
+
+
+static u32 (*crcupdateblock)(u32 crc, size_t length, const void *buffer) = &CRCUpdateBlockScalar;
+
+namespace
+{
+  struct CRCDispatch
+  {
+    CRCDispatch()
+    {
+#ifdef PAR2_CRC_ARM
+      if (ArmHasCRC())
+        crcupdateblock = &CRCUpdateBlockArm;
+#endif
+#ifdef PAR2_CRC_X86
+      if (X86HasPclMul())
+      {
+        crcupdateblock = &CRCUpdateBlockPclMul;
+# ifdef PAR2_CRC_X86_VPCLMUL
+        if (X86HasVPclMul())
+          crcupdateblock = &CRCUpdateBlockVPclMul;
+# endif
+      }
+#endif
+    }
+  };
+
+  CRCDispatch crcdispatch;
+}
+
+u32 CRCUpdateBlock(u32 crc, size_t length, const void *buffer)
+{
+  return crcupdateblock(crc, length, buffer);
+}
 
 
 // GF32 multiplication
@@ -124,4 +161,4 @@ u32 CRCUpdateBlock(u32 crc, u64 length)
   return GF32Multiply(crc, CRCExp8(length), ccitttable.polynom);
 }
 
-}
+} // namespace par2

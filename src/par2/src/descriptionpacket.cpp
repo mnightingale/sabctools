@@ -20,10 +20,8 @@
 
 #include "libpar2internal.h"
 
-#include <string>
-
-using namespace Par2;
-using namespace std;
+namespace par2
+{
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -109,8 +107,6 @@ bool DescriptionPacket::Load(DiskFile *diskfile, u64 offset, PACKET_HEADER &head
                       (size_t)packet->header.length - sizeof(PACKET_HEADER)))
     return false;
 
-  filename = utf8::Latin1ToUtf8((char*)((FILEDESCRIPTIONPACKET*)packetdata)->name);
-
   // Are the file and 16k hashes consistent
   if (packet->length <= 16384 && packet->hash16k != packet->hashfull)
   {
@@ -154,7 +150,18 @@ std::string DescriptionPacket::UrlEncodeChar(char c)
 // If a user is just backing up files on their own system
 // and not sending them to users on another operating
 // system, we don't want to change the filenames.
-std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel, std::string local_filename)
+// Write a warning to serr when print is set, and give it to the errorlog
+static void Warning(std::ostream &serr, const bool print, const char *prefix, const ErrorLog *errorlog,
+                    const WarningCode code, const std::string &message, const std::string &filename)
+{
+  if (print)
+    serr << prefix << message << std::endl;
+
+  if (errorlog)
+    errorlog->Warn(code, message, filename);
+}
+
+std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel, std::string local_filename, const ErrorLog *errorlog)
 {
   std::string par2_encoded_filename;
 
@@ -185,10 +192,10 @@ std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &so
 
     if (!ok)
     {
-      if (noiselevel >= nlNormal)
-      {
-	serr << "WARNING: A filename contains the character \'" << ch << "\' which some systems do not allow in filenames." << std::endl;
-      }
+      std::ostringstream message;
+      message << "A filename contains the character '" << ch << "' which some systems do not allow in filenames.";
+
+      Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), local_filename);
     }
 
 #ifdef _WIN32
@@ -198,10 +205,10 @@ std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &so
     }
 #else
     if (ch == '\\') {
-      if (noiselevel >= nlNormal)
-      {
-	serr << "WARNING: Found Windows-style slash '\\' in filename.  Windows systems may have trouble with it." << std::endl;
-      }
+      std::ostringstream message;
+      message << "Found Windows-style slash '\\' in filename.  Windows systems may have trouble with it.";
+
+      Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), local_filename);
     }
 #endif
 
@@ -215,19 +222,27 @@ std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &so
   // path into a Par file and overwrite system files.
   if (par2_encoded_filename.size() > 1 && par2_encoded_filename.at(1) == ':')
   {
+    std::ostringstream message;
+    message << "The second character in the filename \"" << par2_encoded_filename << "\" is a colon (':').";
+
+    Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename);
+
     if (noiselevel >= nlNormal)
     {
-      serr << "WARNING: The second character in the filename \"" << par2_encoded_filename << "\" is a colon (':')." << std::endl;
       serr << "       This may be interpreted by Windows systems as an absolute path." << std::endl;
       serr << "       This file may be ignored by Par clients because absolute paths" << std::endl;
       serr << "        are a way for an attacker to overwrite system files." << std::endl;
     }
   }
-  if (par2_encoded_filename.at(0) == '/')
+  if (!par2_encoded_filename.empty() && par2_encoded_filename.at(0) == '/')
   {
+    std::ostringstream message;
+    message << "The first character in the filename \"" << par2_encoded_filename << "\" is an HTML-slash ('/').";
+
+    Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename);
+
     if (noiselevel >= nlNormal)
     {
-      serr << "WARNING: The first character in the filename \"" << par2_encoded_filename << "\" is an HTML-slash ('/')." << std::endl;
       serr << "       This may be interpreted by UNIX systems as an absolute path." << std::endl;
       serr << "       This file may be ignored by Par clients because absolute paths" << std::endl;
       serr << "        are a way for an attacker to overwrite system files." << std::endl;
@@ -235,9 +250,13 @@ std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &so
   }
   if (par2_encoded_filename.find("../") != std::string::npos)
   {
+    std::ostringstream message;
+    message << "The filename \"" << par2_encoded_filename << R"(" contains "..".)";
+
+    Warning(serr, noiselevel >= nlQuiet, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename);
+
     if (noiselevel >= nlQuiet)
     {
-      serr << "WARNING: The filename \"" << par2_encoded_filename << "\" contains \"..\"." << std::endl;
       serr << "       This is a parent directory. This file may be ignored" << std::endl;
       serr << "       by Par clients because parent directories are a way" << std::endl;
       serr << "       for an attacker to overwrite system files." << std::endl;
@@ -245,9 +264,13 @@ std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &so
   }
   if (par2_encoded_filename.length() > 255)
   {
+    std::ostringstream message;
+    message << "A filename is over 255 characters.  That may be too long";
+
+    Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename);
+
     if (noiselevel >= nlNormal)
     {
-      serr << "WARNING: A filename is over 255 characters.  That may be too long" << std::endl;
       serr << "         for Windows systems to handle." << std::endl;
     }
   }
@@ -265,7 +288,7 @@ std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &so
 //
 // NOTE: Windows limits path names to 255 characters.  I'm not
 // sure that anything can be done here for that.
-std::string DescriptionPacket::TranslateFilenameFromPar2ToLocal(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel, std::string par2_encoded_filename)
+std::string DescriptionPacket::TranslateFilenameFromPar2ToLocal(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel, std::string par2_encoded_filename, const ErrorLog *errorlog)
 {
   std::string local_filename;
 
@@ -311,12 +334,12 @@ std::string DescriptionPacket::TranslateFilenameFromPar2ToLocal(std::ostream &so
 #else
     if (ch == '\\')
     {
-      if (noiselevel >= nlQuiet)
-      {
-	// This is a legal Par2 character, but assume someone screwed up.
-	serr << "INFO: Found Windows-style slash in filename.  Changing to UNIX-style slash." << std::endl;
-	ch = '/';
-      }
+      // This is a legal Par2 character, but assume someone screwed up.
+      std::ostringstream message;
+      message << "Found Windows-style slash in filename.  Changing to UNIX-style slash.";
+
+      Warning(serr, noiselevel >= nlQuiet, "INFO: ", errorlog, wcFilenameChanged, message.str(), par2_encoded_filename);
+      ch = '/';
     }
 #endif
 
@@ -327,12 +350,12 @@ std::string DescriptionPacket::TranslateFilenameFromPar2ToLocal(std::ostream &so
     }
     else
     {
-      if (noiselevel >= nlQuiet)
-      {
-	serr << "INFO: Found illegal character '" << ch << "' in filename.  Changed it to \"" << UrlEncodeChar(ch) << "\"" << std::endl;
-	// convert problem characters to hex
-	local_filename += UrlEncodeChar(ch);
-      }
+      std::ostringstream message;
+      message << "Found illegal character '" << ch << "' in filename.  Changed it to \"" << UrlEncodeChar(static_cast<char>(ch)) << "\"";
+
+      Warning(serr, noiselevel >= nlQuiet, "INFO: ", errorlog, wcFilenameChanged, message.str(), par2_encoded_filename);
+      // convert problem characters to hex
+      local_filename += UrlEncodeChar(ch);
     }
 
     ++p;
@@ -353,22 +376,22 @@ std::string DescriptionPacket::TranslateFilenameFromPar2ToLocal(std::ostream &so
     if (index == std::string::npos)
       break;
 
-    if (noiselevel >= nlQuiet)
-    {
-      serr << "INFO: Found attempt to write parent directory.  Changing \"..\" to \"" << UrlEncodeChar('.') << UrlEncodeChar('.') << "\"" << std::endl;
-    }
+    std::ostringstream message;
+    message << "Found attempt to write parent directory.  Changing \"..\" to \"" << UrlEncodeChar('.') << UrlEncodeChar('.') << "\"";
+
+    Warning(serr, noiselevel >= nlQuiet, "INFO: ", errorlog, wcFilenameChanged, message.str(), par2_encoded_filename);
 
     local_filename.replace(index, 2, UrlEncodeChar('.')+UrlEncodeChar('.'));
   }
 #else
   // On UNIX systems, we don't want to allow filename to start with a slash,
   // because someone could be sneakily trying to overwrite a system file.
-  if (local_filename.at(0) == '/')
+  if (!local_filename.empty() && local_filename.at(0) == '/')
   {
-    if (noiselevel >= nlQuiet)
-    {
-      serr << "INFO: Found attempt to write absolute path.  Changing '/' at start of filename to \"" << UrlEncodeChar('/') << "\"" << std::endl;
-    }
+    std::ostringstream message;
+    message << "Found attempt to write absolute path.  Changing '/' at start of filename to \"" << UrlEncodeChar('/') << "\"";
+
+    Warning(serr, noiselevel >= nlQuiet, "INFO: ", errorlog, wcFilenameChanged, message.str(), par2_encoded_filename);
 
     local_filename.replace(0, 1, UrlEncodeChar('/'));
   }
@@ -378,13 +401,15 @@ std::string DescriptionPacket::TranslateFilenameFromPar2ToLocal(std::ostream &so
     size_t index = local_filename.find("../");
     if (index == std::string::npos)
       break;
-    if (noiselevel >= nlQuiet)
-    {
-      serr << "INFO: Found attempt to write parent directory.  Changing \"..\" to \"" << UrlEncodeChar('.') << UrlEncodeChar('.') << "\"" << std::endl;
-    }
+    std::ostringstream message;
+    message << R"(Found attempt to write parent directory.  Changing ".." to ")" << UrlEncodeChar('.') << UrlEncodeChar('.') << "\"";
+
+    Warning(serr, noiselevel >= nlQuiet, "INFO: ", errorlog, wcFilenameChanged, message.str(), par2_encoded_filename);
     local_filename.replace(index, 2, UrlEncodeChar('.')+UrlEncodeChar('.'));
   }
 #endif
 
   return local_filename;
 }
+
+} // namespace par2

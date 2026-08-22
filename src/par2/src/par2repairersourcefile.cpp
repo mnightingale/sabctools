@@ -20,12 +20,8 @@
 
 #include "libpar2internal.h"
 
-#include <vector>
-#include <string>
-#include <ostream>
-
-using namespace Par2;
-using namespace std;
+namespace par2
+{
 
 #ifdef _MSC_VER
 #ifdef _DEBUG
@@ -75,10 +71,10 @@ void Par2RepairerSourceFile::SetVerificationPacket(VerificationPacket *_verifica
   verificationpacket = _verificationpacket;
 }
 
-void Par2RepairerSourceFile::ComputeTargetFileName(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel, const std::string &path)
+void Par2RepairerSourceFile::ComputeTargetFileName(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel, const std::string &path, const ErrorLog *errorlog)
 {
   // Get a version of the filename compatible with the OS
-  std::string filename = DescriptionPacket::TranslateFilenameFromPar2ToLocal(sout, serr, noiselevel, descriptionpacket->FileName());
+  std::string filename = DescriptionPacket::TranslateFilenameFromPar2ToLocal(sout, serr, noiselevel, descriptionpacket->FileName(), errorlog);
 
   targetfilename = path + filename;
 }
@@ -149,19 +145,32 @@ void Par2RepairerSourceFile::SetBlocks(u32 _blocknumber,
 }
 
 // Determine the block count from the file size and block size.
-void Par2RepairerSourceFile::SetBlockCount(u64 blocksize)
+bool Par2RepairerSourceFile::SetBlockCount(u64 blocksize)
 {
   if (descriptionpacket)
   {
-    blockcount = (u32)((descriptionpacket->FileSize() + blocksize-1) / blocksize);
+    u64 filesize = descriptionpacket->FileSize();
+    u64 count = filesize / blocksize + (filesize % blocksize != 0);
+
+    if (count > (u64)~(u32)0)
+    {
+      blockcount = 0;
+      return false;
+    }
+
+    blockcount = (u32)count;
   }
   else
   {
     blockcount = 0;
   }
+
+  return true;
 }
 
 void Par2RepairerSourceFile::SetDiskFileSize()
 {
   diskfilesize = DiskFile::GetFileSize(targetfilename);
 }
+
+} // namespace par2
