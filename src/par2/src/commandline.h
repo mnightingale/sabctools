@@ -99,6 +99,7 @@ public:
   bool                                GetPurgeFiles(void) const  {return purgefiles;}
   bool                                GetRenameOnly(void) const  {return renameonly;}
   bool                                GetRecursive(void) const   {return recursive;}
+  bool                                GetFollowLinks(void) const {return followlinks;}
   bool                                GetSkipData(void) const    {return skipdata;}
   u64                                 GetSkipLeaway(void) const  {return skipleaway;}
   u32                                 GetNumThreads(void) {return nthreads;}
@@ -205,6 +206,7 @@ protected:
   bool redundancyset;          // Set if the redundancy has been specified
 
   bool recursive;              // recurse into subdirectories
+  bool followlinks;            // follow symlinks to files when scanning for source files
 
 };
 
