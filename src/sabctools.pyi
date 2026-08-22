@@ -58,6 +58,7 @@ class Par2Result(IntEnum):
     FILE_IO_ERROR = 6
     LOGIC_ERROR = 7
     MEMORY_ERROR = 8
+    CANCELLED = 9
 
 class Par2Error(Exception):
     """Raised when par2 fails in a way it has no return code for."""
@@ -68,19 +69,11 @@ class Par2File(TypedDict):
     name: str
     """Name recorded in the par2 set"""
     target: str
-    """Path the file should occupy"""
-    found: str
-    """Where a complete copy actually is, empty if there is not one"""
-    exists: bool
-    """Whether something occupies the target path.
-
-    Only filled in once verify() has scanned the source files; false for every entry
-    straight after load().
-    """
-    complete: bool
-    """Whether a verified-intact copy was found, under any name"""
+    """Absolute path the file belongs at on this system"""
+    size: int
+    """Size of the file in bytes"""
     blocks: int
-    """Number of par2 blocks this file spans"""
+    """Number of par2 blocks this file spans, 0 if it cannot be recovered"""
 
 class Par2Repairer:
     def __init__(
@@ -93,34 +86,38 @@ class Par2Repairer:
         file_threads: int = 0,
         skip_data: bool = True,
         skip_leaway: int = 0,
-        purge_files: bool = False,
-        rename_only: bool = False,
         skip_repaired_verification: bool = True,
     ) -> None:
         """Verify and repair a par2 set in-process.
 
-        Raises ValueError if par2 rejects the arguments, which includes `parfile`
-        not existing. `memory_limit` of 0 lets par2 derive one from physical memory.
+        Nothing is read here, so a `parfile` that is not there surfaces as a load()
+        result. `memory_limit` of 0 lets par2 derive one from physical memory, and an
+        empty `basepath` is taken from the first par2 file loaded.
 
         `skip_repaired_verification` drops the pass par2 makes over the files it just
         rebuilt, but only for a set where set_known_blocks() actually shortcut the
         source scan - trusting the repair on the way out follows from having trusted
         the caller's checksums on the way in, so a set that got a real scan still gets
         its repair verified. Saves in proportion to how much was repaired, not to the
-        size of the set, and gives up the only check on what reached disk; ParPar still
+        size of the set, and gives up the only check on what reached disk; par2 still
         checksums its own GF16 computation. The reported counts are unaffected.
         """
 
     def load(self) -> Par2Result:
-        """Read the par2 packets and work out the file set."""
+        """Read the par2 packets and work out the file set.
+
+        The volume files beside the named one are read too, and they carry the critical
+        packets, so naming a set whose index file is missing still describes it.
+        FILE_IO_ERROR means the named file is absent *and* nothing new was read.
+        """
 
     def load_more(self, parfiles: Sequence[str]) -> int:
         """Add recovery blocks from further par2 files; returns recovery_block_count.
 
-        Does not re-verify. A following repair() reuses the existing verification and
-        only re-checks whether there are now enough blocks, which is what makes
-        "fetch more blocks and retry" cheap. Requires load() first, and raises
-        Par2Error if a named file does not exist.
+        Does not re-scan the data files. If verify() has run, it only re-evaluates
+        whether there are now enough blocks to repair, which is what makes "fetch more
+        blocks and retry" cheap. Requires load() first, and raises Par2Error if a
+        named file does not exist.
         """
 
     def set_known_blocks(self, mapping: Mapping[str, Sequence[object]]) -> None:
@@ -135,17 +132,22 @@ class Par2Repairer:
         """
 
     def verify(self) -> Par2Result:
-        """Scan the source files. Requires load() first."""
+        """Scan the source files. Requires load() first.
+
+        May be called more than once; each call is a fresh pass.
+        """
 
     def repair(self) -> Par2Result:
-        """Repair the set, reusing an earlier verify() if there was one."""
+        """Rebuild whatever the preceding verify() found missing or damaged.
+
+        Runs the verification pass itself when verify() was not called.
+        """
 
     def cancel(self) -> None:
         """Ask an in-progress verify() or repair() to stop.
 
         Safe from another thread, including from progress_callback. The interrupted
-        call returns FILE_IO_ERROR, so check `cancelled` to tell a cancellation apart
-        from a genuine I/O failure.
+        call returns CANCELLED, having removed any partly written files.
         """
     progress_callback: Optional[Callable[[str, str, int], None]]
     """Called as (stage, filename, percent).
@@ -159,11 +161,12 @@ class Par2Repairer:
     """
 
     file_done_callback: Optional[Callable[[str, int, int], None]]
-    """Called as (filename, blocks_found, blocks_total) once per scanned file.
+    """Called as (filename, blocks_found, blocks_total) once per file.
 
     blocks_found > 0 means that file contributed data to the repair, which is the only
     way to tell that joinable .001/.002 parts were consumed - par2 never reports those
-    as source files. Same threading rules as progress_callback.
+    as source files. Both counts are 0 for a par2 file, which has no blocks of its own.
+    Same threading rules as progress_callback.
     """
 
     missing_block_count: int
@@ -186,6 +189,8 @@ class Par2Repairer:
     """Files found under a different name"""
     block_size: int
     """Block size of the set, in bytes"""
+    data_size: int
+    """Total size of the recoverable files, in bytes"""
     setid: str
     """The par2 set id"""
     repair_possible: bool
@@ -193,14 +198,21 @@ class Par2Repairer:
     cancelled: bool
     """Whether cancel() was called"""
     quick_verified_files: int
-    """How many files verify() took from set_known_blocks() instead of reading"""
+    """How many files verify() will take from set_known_blocks() instead of reading"""
     renames: Dict[str, str]
-    """{path_on_disk: path_it_will_get} for files matched under another name.
+    """{path_on_disk: path_it_belongs_under} for files matched under another name.
 
-    Only meaningful between verify() and repair(); repair() applies the renames.
+    Both paths are absolute. Reads the same before and after repair(), and is emptied
+    by the next verify().
     """
     files: List[Par2File]
     """Per-file state, in the order par2 records them"""
+    backup_files: List[str]
+    """Damaged files repair() renamed out of the way.
+
+    What par2's own purge option deletes; a caller tidying up can delete or keep them.
+    Files passed as `extrafiles` are never listed, even where their blocks were used.
+    """
 
 class NNTPResponse:
     context: Optional[object]
