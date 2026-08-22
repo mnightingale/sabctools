@@ -22,10 +22,7 @@
 #ifdef _WIN32
 
 #include <cstring>
-#include <cwchar>
 #include <iostream>
-#include <memory>
-#include <new>
 #include <stdexcept>
 
 #include "utf8.h"
@@ -39,8 +36,6 @@ namespace utf8
 
   namespace
   {
-    const int STACK_BUFFER_SIZE = 1024;
-
     void ApplyLongPathPrefix(std::wstring& wpath)
     {
       if (wpath.size() <= MAX_DIR_PATH ||
@@ -49,7 +44,7 @@ namespace utf8
         return;
       }
 
-      if (std::wcsncmp(wpath.c_str(), L"\\\\", 2) == 0)
+      if (wpath.compare(0, 2, L"\\\\") == 0)
       {
         wpath = L"\\\\?\\UNC" + wpath.substr(1);
       }
@@ -68,26 +63,16 @@ namespace utf8
       return true;
     }
 
+    const int length = (int)str.size();
     const int required =
-      ::MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+      ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str.c_str(), length, nullptr, 0);
     if (required <= 0)
       return false;
 
-    std::wstring wpath;
-    if (required <= STACK_BUFFER_SIZE)
-    {
-      wchar_t buffer[STACK_BUFFER_SIZE];
-      if (::MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, buffer, required) <= 0)
-        return false;
-      wpath.assign(buffer);
-    }
-    else
-    {
-      std::unique_ptr<wchar_t[]> buffer(new wchar_t[required]);
-      if (::MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, buffer.get(), required) <= 0)
-        return false;
-      wpath.assign(buffer.get());
-    }
+    std::wstring wpath(required, L'\0');
+    if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str.c_str(), length,
+                              &wpath[0], required) <= 0)
+      return false;
 
     ApplyLongPathPrefix(wpath);
 
@@ -103,25 +88,19 @@ namespace utf8
       return true;
     }
 
+    const int length = (int)str.size();
     const int required =
-      ::WideCharToMultiByte(CP_UTF8, 0, str.c_str(), -1, nullptr, 0, nullptr, nullptr);
+      ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, str.c_str(), length,
+                            nullptr, 0, nullptr, nullptr);
     if (required <= 0)
       return false;
 
-    if (required <= STACK_BUFFER_SIZE)
-    {
-      char buffer[STACK_BUFFER_SIZE];
-      if (::WideCharToMultiByte(CP_UTF8, 0, str.c_str(), -1, buffer, required, nullptr, nullptr) <= 0)
-        return false;
-      out.assign(buffer);
-      return true;
-    }
-
-    std::unique_ptr<char[]> buffer(new char[required]);
-    if (::WideCharToMultiByte(CP_UTF8, 0, str.c_str(), -1, buffer.get(), required, nullptr, nullptr) <= 0)
+    std::string utf8(required, '\0');
+    if (::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, str.c_str(), length,
+                              &utf8[0], required, nullptr, nullptr) <= 0)
       return false;
 
-    out.assign(buffer.get());
+    out.swap(utf8);
     return true;
   }
 

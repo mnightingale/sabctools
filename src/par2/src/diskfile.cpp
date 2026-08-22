@@ -409,11 +409,13 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
   {
     path += PATHSEP;
   }
+  std::list<std::string> *matches = new std::list<std::string>;
+
+  // An empty list rather than nullptr: callers splice the result without
+  // checking it, and only two of the six guard against a null.
   std::wstring wwildcard;
   if (!utf8::Utf8ToWide(path + wildcard, wwildcard))
-    return nullptr;
-
-  std::list<std::string> *matches = new std::list<std::string>;
+    return std::unique_ptr< std::list<std::string> >(matches);
 
   WIN32_FIND_DATAW fd;
   HANDLE h = ::FindFirstFileW(wwildcard.c_str(), &fd);
@@ -1048,8 +1050,8 @@ bool DiskFile::Delete(void)
   assert(hFile == INVALID_HANDLE_VALUE);
 
   std::wstring wfilename;
-  const bool converted = utf8::Utf8ToWide(filename, wfilename);
-  if (filename.size() > 0 && converted && ::DeleteFileW(wfilename.c_str()))
+  if (!filename.empty() && utf8::Utf8ToWide(filename, wfilename) &&
+      ::DeleteFileW(wfilename.c_str()))
   {
     exists = false;
     return true;
@@ -1197,10 +1199,9 @@ bool DiskFile::Rename(std::string _filename)
   assert(hFile == INVALID_HANDLE_VALUE);
 
   std::wstring wfilename, _wfilename;
-  const bool converted =
-    utf8::Utf8ToWide(filename, wfilename) && utf8::Utf8ToWide(_filename, _wfilename);
-
-  if (converted && ::MoveFileW(wfilename.c_str(), _wfilename.c_str()))
+  if (utf8::Utf8ToWide(filename, wfilename) &&
+      utf8::Utf8ToWide(_filename, _wfilename) &&
+      ::MoveFileW(wfilename.c_str(), _wfilename.c_str()))
   {
     filename.swap(_filename);
 
