@@ -518,10 +518,10 @@ static PyObject* Par2Repairer_load_more(Par2RepairerObject* self, PyObject* parf
             return NULL;
     }
 
-    Par2::Par2VerifyResult status;
-    if (!self->verifier->GetVerifyResult(&status))
+    Par2::Par2SetInfo info;
+    if (!self->verifier->GetSetInfo(&info))
         return PyLong_FromUnsignedLong(0);
-    return PyLong_FromUnsignedLong(status.recoveryblockcount);
+    return PyLong_FromUnsignedLong(info.recoveryblocks);
 }
 
 /*
@@ -648,9 +648,11 @@ static PyObject* get_source_block_count(Par2RepairerObject* self, void*) {
     return PyLong_FromUnsignedLong(set_info(self, &info) ? info.datablocks : 0);
 }
 
+/* From the set rather than the verify result, which is empty until a scan has run.
+   The two agree once one has. */
 static PyObject* get_recovery_block_count(Par2RepairerObject* self, void*) {
-    Par2::Par2VerifyResult result;
-    return PyLong_FromUnsignedLong(verify_result(self, &result) ? result.recoveryblockcount : 0);
+    Par2::Par2SetInfo info;
+    return PyLong_FromUnsignedLong(set_info(self, &info) ? info.recoveryblocks : 0);
 }
 
 static PyObject* get_recoverable_file_count(Par2RepairerObject* self, void*) {

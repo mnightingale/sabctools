@@ -228,8 +228,8 @@ arrived late and asks what it now has - which on this API reads as zero until a 
 runs, even though the blocks are loaded and counted.
 
 `Par2SetInfo` already describes "what a PAR2 set describes, known once its packets have
-been loaded", so a `recoveryblocks` field on it would say this in the place the header
-already promises it.
+been loaded", so a `recoveryblocks` field on it says this in the place the header
+already promises it. Implemented as `bee494e`.
 
 ---
 
