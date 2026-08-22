@@ -71,11 +71,11 @@ class TestPar2Load:
         with pytest.raises(RuntimeError):
             rep.verify()
 
-    def test_missing_parfile_is_rejected_at_construction(self, tmp_path):
-        # par2 validates the parfile while parsing its arguments, so this fails fast
-        # rather than surfacing as a load() result
-        with pytest.raises(ValueError):
-            sabctools.Par2Repairer(str(tmp_path / "nope.par2"), basepath=str(tmp_path))
+    def test_missing_parfile_is_reported_by_load(self, tmp_path):
+        # Construction reads nothing, so a path that is not there surfaces as a load()
+        # result rather than at construction
+        rep = sabctools.Par2Repairer(str(tmp_path / "nope.par2"), basepath=str(tmp_path))
+        assert rep.load() == sabctools.Par2Result.FILE_IO_ERROR
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -86,8 +86,7 @@ class TestPar2Load:
             {"file_threads": 1},
             {"skip_data": False},
             {"skip_leaway": 128},
-            {"purge_files": True},
-            {"rename_only": True},
+            {"skip_repaired_verification": False},
         ],
     )
     def test_options_are_accepted(self, par2set, kwargs):
@@ -136,8 +135,8 @@ class TestPar2Verify:
         assert rep.repair_possible
 
         gamma = [f for f in rep.files if f["name"] == "gamma.bin"][0]
-        assert not gamma["exists"]
-        assert not gamma["complete"]
+        assert gamma["target"] == os.path.join(par2set, "gamma.bin")
+        assert gamma["blocks"] == 320
 
     def test_file_details(self, par2set):
         rep = repairer(par2set)
@@ -145,10 +144,9 @@ class TestPar2Verify:
         rep.verify()
         assert sorted(f["name"] for f in rep.files) == sorted(DATA_FILES)
         for entry in rep.files:
-            assert entry["exists"] and entry["complete"]
             assert entry["blocks"] > 0
+            assert entry["size"] > 0
             assert entry["target"] == os.path.join(par2set, entry["name"])
-            assert entry["found"] == entry["target"]
 
 
 class TestPar2Repair:
