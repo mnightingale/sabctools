@@ -3,12 +3,12 @@
 #include <sstream>
 int main(int argc, char **argv) {
   std::ostringstream out, err;
-  Par2::Par2Verifier v(out, err, Par2::nlSilent);
   std::string base = argv[2];
+  Par2::Par2Verifier v(out, err, Par2::nlSilent, base);
   std::cerr << "step: AddPar2File" << std::endl;
   std::cerr << "  = " << (int)v.AddPar2File(argv[1]) << std::endl;
   std::cerr << "step: Verify" << std::endl;
-  Par2::Result r = v.Verify(base, {}, true, 0);
+  Par2::Result r = v.Verify({}, true, 0);
   std::cerr << "  = " << (int)r << std::endl;
   Par2::Par2VerifyResult vr;
   if (v.GetVerifyResult(&vr))
@@ -16,7 +16,7 @@ int main(int argc, char **argv) {
               << " damaged=" << vr.damagedfilecount << " missing=" << vr.missingfilecount
               << " missingblocks=" << vr.missingblockcount << std::endl;
   std::cerr << "step: Repair" << std::endl;
-  std::cerr << "  = " << (int)v.Repair(base) << std::endl;
+  std::cerr << "  = " << (int)v.Repair() << std::endl;
   std::cerr << "step: GetBackupFiles" << std::endl;
   std::vector<std::string> b;
   std::cerr << "  = " << v.GetBackupFiles(&b) << " count=" << b.size() << std::endl;

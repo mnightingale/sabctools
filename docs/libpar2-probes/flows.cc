@@ -11,16 +11,16 @@ static void dump(Par2::Par2Verifier &v, const char *l) {
 int main(int argc, char **argv) {
   std::string mode = argv[1], base = argv[4];
   std::ostringstream out, err;
-  Par2::Par2Verifier v(out, err, Par2::nlSilent);
+  Par2::Par2Verifier v(out, err, Par2::nlSilent, base);
 
   if (mode == "reassess") {
     std::cout << "  AddPar2File(index only) = " << (int)v.AddPar2File(argv[2]) << "\n";
-    std::cout << "  Verify = " << (int)v.Verify(base, {}, true, 0) << "\n";
+    std::cout << "  Verify = " << (int)v.Verify({}, true, 0) << "\n";
     dump(v, "after verify");
     std::cout << "  AddPar2File(volume) = " << (int)v.AddPar2File(argv[3]) << "\n";
     std::cout << "  Reassess = " << (int)v.Reassess() << "\n";
     dump(v, "after reassess");
-    std::cout << "  Repair = " << (int)v.Repair(base) << "\n";
+    std::cout << "  Repair = " << (int)v.Repair() << "\n";
     return 0;
   }
   if (mode == "knownblocks") {
@@ -33,12 +33,27 @@ int main(int argc, char **argv) {
       v.SetKnownBlocks(f.filename, all);
       std::cout << "  vouched " << f.filename << " x" << f.blockcount << "\n";
     }
-    std::cout << "  Verify = " << (int)v.Verify(base, {}, true, 0) << "\n";
+    std::cout << "  Verify = " << (int)v.Verify({}, true, 0) << "\n";
     dump(v, "with known blocks");
     std::cout << "  -- now forget one file (empty vector) and re-verify --\n";
     v.SetKnownBlocks(files[0].filename, {});
-    std::cout << "  Verify = " << (int)v.Verify(base, {}, true, 0) << "\n";
+    std::cout << "  Verify = " << (int)v.Verify({}, true, 0) << "\n";
     dump(v, "after forgetting");
+    return 0;
+  }
+  if (mode == "blocks") {
+    Par2::Par2SetInfo si;
+    std::cout << "  AddPar2File(index) = " << (int)v.AddPar2File(argv[2]) << "\n";
+    v.GetSetInfo(&si);
+    std::cout << "  after index:  recoveryblocks=" << si.recoveryblocks << "\n";
+    std::cout << "  AddPar2File(volume) = " << (int)v.AddPar2File(argv[3]) << "\n";
+    v.GetSetInfo(&si);
+    std::cout << "  after volume: recoveryblocks=" << si.recoveryblocks << "\n";
+    Par2::Par2VerifyResult r;
+    std::cout << "  GetVerifyResult before Verify = " << v.GetVerifyResult(&r) << "\n";
+    std::cout << "  Verify = " << (int)v.Verify({}, true, 0) << "\n";
+    v.GetVerifyResult(&r);
+    std::cout << "  after verify: recoveryblockcount=" << r.recoveryblockcount << "\n";
     return 0;
   }
   return 1;
