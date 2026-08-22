@@ -35,10 +35,10 @@ import vendor_common
 
 REPO = "https://github.com/mnightingale/par2cmdline.git"
 
-# Tip of the libpar2/* stack, which is where the library API lives. Pinned to the
-# commit rather than the branch: these are topic branches being prepared for
-# upstream, so they are rebased, and a branch name would not name the same tree
-# twice running.
+# Tip of the libpar2/* stack, which is where the library API lives, currently the
+# branch libpar2/verifier-fixes. Pinned to the commit rather than the branch: these
+# are topic branches being prepared for upstream, so they are rebased, and a branch
+# name would not name the same tree twice running.
 REF = "bee494e83c9a268a9ef60a98dd57eb25aad7cde7"
 
 DEST = os.path.join(vendor_common.ROOT, "src", "par2")

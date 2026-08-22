@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Upstream | https://github.com/mnightingale/par2cmdline.git |
-| Ref | `bee494e` |
+| Ref | `bee494e83c9a268a9ef60a98dd57eb25aad7cde7` |
 | Commit | `bee494e83c9a268a9ef60a98dd57eb25aad7cde7` |
 | Vendored | 2026-08-22 |
 
