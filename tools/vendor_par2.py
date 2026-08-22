@@ -39,7 +39,7 @@ REPO = "https://github.com/mnightingale/par2cmdline.git"
 # branch libpar2/verifier-fixes. Pinned to the commit rather than the branch: these
 # are topic branches being prepared for upstream, so they are rebased, and a branch
 # name would not name the same tree twice running.
-REF = "a8790096a30126e075212a2ca0c0f49aa6703d94"
+REF = "f046f491bad8895ceb4ccf2a93f68365a5e9908e"
 
 DEST = os.path.join(vendor_common.ROOT, "src", "par2")
 

@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | Upstream | https://github.com/mnightingale/par2cmdline.git |
-| Ref | `a8790096a30126e075212a2ca0c0f49aa6703d94` |
-| Commit | `a8790096a30126e075212a2ca0c0f49aa6703d94` |
+| Ref | `f046f491bad8895ceb4ccf2a93f68365a5e9908e` |
+| Commit | `f046f491bad8895ceb4ccf2a93f68365a5e9908e` |
 | Vendored | 2026-08-22 |
 
 This is a fork of [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) carrying
