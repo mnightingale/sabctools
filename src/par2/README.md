@@ -48,8 +48,6 @@ You should have received par2cmdline in the form of source code which you can co
 
 If you have only downloaded a precompiled executable, then the source code should be available from the same location where you downloaded the executable from.
 
-par2cmdline is written in C++17, so a compiler with C++17 support is required. GCC 7, Clang 5 and Visual Studio 2017 are the minimum versions.
-
 If you have MS Visual Studio .NET, then just open the *par2cmdline.sln* file and compile. You should then copy *par2cmdline.exe* to an appropriate location that is on your path.
 
 To compile on Linux and other Unix variants use the following commands:

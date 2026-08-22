@@ -30,7 +30,9 @@
 
 #include "utf8.h"
 
-namespace Par2::utf8
+namespace Par2
+{
+namespace utf8
 {
   const int MAX_ARGS = 128;
   const size_t MAX_DIR_PATH = 248;
@@ -58,60 +60,69 @@ namespace Par2::utf8
     }
   }
 
-  std::optional<std::wstring> Utf8ToWide(const std::string& str)
+  bool Utf8ToWide(const std::string& str, std::wstring& out)
   {
     if (str.empty())
-      return std::wstring();
+    {
+      out.clear();
+      return true;
+    }
 
     const int required =
       ::MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
     if (required <= 0)
-      return std::nullopt;
+      return false;
 
     std::wstring wpath;
     if (required <= STACK_BUFFER_SIZE)
     {
       wchar_t buffer[STACK_BUFFER_SIZE];
       if (::MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, buffer, required) <= 0)
-        return std::nullopt;
+        return false;
       wpath.assign(buffer);
     }
     else
     {
       std::unique_ptr<wchar_t[]> buffer(new wchar_t[required]);
       if (::MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, buffer.get(), required) <= 0)
-        return std::nullopt;
+        return false;
       wpath.assign(buffer.get());
     }
 
     ApplyLongPathPrefix(wpath);
 
-    return wpath;
+    out.swap(wpath);
+    return true;
   }
 
-  std::optional<std::string> WideToUtf8(const std::wstring& str)
+  bool WideToUtf8(const std::wstring& str, std::string& out)
   {
     if (str.empty())
-      return std::string();
+    {
+      out.clear();
+      return true;
+    }
 
     const int required =
       ::WideCharToMultiByte(CP_UTF8, 0, str.c_str(), -1, nullptr, 0, nullptr, nullptr);
     if (required <= 0)
-      return std::nullopt;
+      return false;
 
     if (required <= STACK_BUFFER_SIZE)
     {
       char buffer[STACK_BUFFER_SIZE];
       if (::WideCharToMultiByte(CP_UTF8, 0, str.c_str(), -1, buffer, required, nullptr, nullptr) <= 0)
-        return std::nullopt;
-      return std::string(buffer);
+        return false;
+      out.assign(buffer);
+      return true;
     }
 
     std::unique_ptr<char[]> buffer(new char[required]);
     if (::WideCharToMultiByte(CP_UTF8, 0, str.c_str(), -1, buffer.get(), required, nullptr, nullptr) <= 0)
-      return std::nullopt;
+      return false;
 
-    return std::string(buffer.get());
+    out.assign(buffer.get());
+    return true;
   }
 
   WideToUtf8ArgsAdapter::WideToUtf8ArgsAdapter(int argc, wchar_t* wargv[]) noexcept(false)
@@ -145,8 +156,8 @@ namespace Par2::utf8
         continue;
       }
 
-      const std::optional<std::string> arg = WideToUtf8(wargv[i]);
-      if (!arg)
+      std::string arg;
+      if (!WideToUtf8(wargv[i], arg))
       {
         std::cerr
           << "Failed to convert wide to UTF-8 string.\n"
@@ -154,9 +165,9 @@ namespace Par2::utf8
         continue;
       }
 
-      const size_t size = arg->size() + 1;
+      const size_t size = arg.size() + 1;
       m_argv[argcount] = new char[size];
-      std::memcpy(m_argv[argcount], arg->c_str(), size);
+      std::memcpy(m_argv[argcount], arg.c_str(), size);
       ++argcount;
     }
 
@@ -180,6 +191,7 @@ namespace Par2::utf8
       delete[] m_argv;
     }
   }
+}
 }
 
 #endif // _WIN32

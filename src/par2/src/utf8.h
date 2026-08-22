@@ -22,18 +22,19 @@
 
 #ifdef _WIN32
 
-#include <optional>
 #include <string>
 
-namespace Par2::utf8
+namespace Par2
+{
+namespace utf8
 {
   extern const int MAX_ARGS;
   extern const size_t MAX_DIR_PATH;
 
-  // Returns no value if the string cannot be converted.
+  // False if the string cannot be converted, leaving out unchanged.
   // Paths longer than MAX_DIR_PATH gain a \\?\ or \\?\UNC prefix.
-  std::optional<std::wstring> Utf8ToWide(const std::string& str);
-  std::optional<std::string> WideToUtf8(const std::wstring& str);
+  bool Utf8ToWide(const std::string& str, std::wstring& out);
+  bool WideToUtf8(const std::wstring& str, std::string& out);
 
   class WideToUtf8ArgsAdapter final
   {
@@ -54,6 +55,7 @@ namespace Par2::utf8
     char** m_argv;
     int m_argc;
   };
+}
 }
 
 #endif // _WIN32
