@@ -107,11 +107,12 @@ configure_file(
 # --- the library --------------------------------------------------------------
 add_library(par2 STATIC ${PAR2_SOURCES})
 
-# C++17 is upstream's own requirement, from its Makefile.am. It is also what the
-# glue must be built at, for the same reason: under C++20 libc++ instantiates
-# constexpr destructors eagerly and par2's incomplete types do not survive it.
+# C++14, which is what upstream's own Makefile.am asks for. Building it at the
+# standard upstream targets is what lets a re-vendor catch a regression here rather
+# than at the next release. Not C++20: libc++ instantiates constexpr destructors
+# eagerly there and par2's incomplete types do not survive it.
 set_target_properties(par2 PROPERTIES
-    CXX_STANDARD 17
+    CXX_STANDARD 14
     CXX_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON
 )
