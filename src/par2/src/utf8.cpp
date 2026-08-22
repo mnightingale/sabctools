@@ -34,24 +34,21 @@ namespace utf8
   const int MAX_ARGS = 128;
   const size_t MAX_DIR_PATH = 248;
 
-  namespace
+  static void ApplyLongPathPrefix(std::wstring& wpath)
   {
-    void ApplyLongPathPrefix(std::wstring& wpath)
+    if (wpath.size() <= MAX_DIR_PATH ||
+      wpath.find(L"\\\\?\\") != std::wstring::npos)
     {
-      if (wpath.size() <= MAX_DIR_PATH ||
-        wpath.find(L"\\\\?\\") != std::wstring::npos)
-      {
-        return;
-      }
+      return;
+    }
 
-      if (wpath.compare(0, 2, L"\\\\") == 0)
-      {
-        wpath = L"\\\\?\\UNC" + wpath.substr(1);
-      }
-      else
-      {
-        wpath = L"\\\\?\\" + wpath;
-      }
+    if (wpath.compare(0, 2, L"\\\\") == 0)
+    {
+      wpath = L"\\\\?\\UNC" + wpath.substr(1);
+    }
+    else
+    {
+      wpath = L"\\\\?\\" + wpath;
     }
   }
 
