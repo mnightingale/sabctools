@@ -37,7 +37,7 @@ static void dump(Par2::Par2Verifier &v, const char *label) {
 int main(int argc, char **argv) {
   std::string scenario = argv[1], par2 = argv[2], base = argv[3];
   std::ostringstream out, err;
-  Par2::Par2Verifier v(out, err, Par2::nlSilent);
+  Par2::Par2Verifier v(out, err, Par2::nlSilent, base);
   Trace t;
   v.SetObserver(&t);
 
@@ -53,11 +53,11 @@ int main(int argc, char **argv) {
   if (scenario == "progress") {
     v.AddPar2File(par2);
     std::cout << "     --- permille during Verify ---\n     ";
-    v.Verify(base, {}, true, 0);
+    v.Verify({}, true, 0);
     for (auto p : t.permilles) std::cout << p << " ";
     std::cout << "\n     --- permille during Repair ---\n     ";
     t.permilles.clear();
-    v.Repair(base);
+    v.Repair();
     for (auto p : t.permilles) std::cout << p << " ";
     std::cout << "\n";
     return 0;
@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
   std::cout << "     OnSetInfo calls = " << t.onsetinfo << "\n";
 
   if (scenario == "verify" || scenario == "verify-twice" || scenario == "repair" || scenario == "rename") {
-    Par2::Result r = v.Verify(base, {}, true, 0);
+    Par2::Result r = v.Verify({}, true, 0);
     std::cout << "     Verify = " << (int)r << "\n";
     dump(v, "after verify");
     std::cout << "     observer: OnFile=" << t.onfile << " OnFileDone=" << t.onfiledone
@@ -81,12 +81,12 @@ int main(int argc, char **argv) {
   if (scenario == "verify-twice") {
     std::cout << "     --- second Verify on the same object ---\n";
     t.onfile = t.onfiledone = 0;
-    Par2::Result r = v.Verify(base, {}, true, 0);
+    Par2::Result r = v.Verify({}, true, 0);
     std::cout << "     Verify = " << (int)r << "\n";
     std::cout << "     observer: OnFile=" << t.onfile << " OnFileDone=" << t.onfiledone << "\n";
   }
   if (scenario == "repair" || scenario == "rename") {
-    std::cout << "     Repair = " << (int)v.Repair(base) << "\n";
+    std::cout << "     Repair = " << (int)v.Repair() << "\n";
     dump(v, "after repair");
     std::vector<std::string> b;
     std::cout << "     GetBackupFiles = " << v.GetBackupFiles(&b) << " (" << b.size() << ")\n";
