@@ -347,6 +347,7 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
                                             basepath ? basepath : "");
     self->verifier->SetMemoryLimit((size_t)memory_limit);
     self->verifier->SetThreadCounts(threads, file_threads);
+    self->verifier->SetDataSkipping(self->skip_data, (Par2::u64)self->skip_leaway);
 
     self->observer = new SabObserver();
     self->observer->SetOwner(self);
@@ -401,9 +402,7 @@ static bool do_verify(Par2RepairerObject* self, Par2::Result* result) {
 
     Par2::Par2Verifier* verifier = self->verifier;
     const std::vector<std::string>& extras = *self->extrafiles;
-    const bool skipdata = self->skip_data;
-    const Par2::u64 skipleaway = self->skip_leaway;
-    if (!run_step([&] { return verifier->Verify(extras, skipdata, skipleaway); }, result))
+    if (!run_step([&] { return verifier->Verify(extras); }, result))
         return false;
 
     if (*result == Par2::eCancelled)
@@ -420,6 +419,39 @@ static PyObject* Par2Repairer_verify(Par2RepairerObject* self, PyObject* Py_UNUS
     Par2::Result result;
     if (!do_verify(self, &result))
         return NULL;
+    return PyLong_FromLong((long)result);
+}
+
+/*
+ * Scan one file as it becomes available, rather than waiting for the whole set.
+ *
+ * Nothing else is read, so files which are on disk at their final size but still
+ * downloading are not scanned until the caller says they are finished. Calling it
+ * again for the same file discards what the earlier scan of it found, which is what
+ * makes that possible.
+ */
+static PyObject* Par2Repairer_verify_file(Par2RepairerObject* self, PyObject* arg) {
+    if (!ready(self))
+        return NULL;
+
+    const char* filename = PyUnicode_AsUTF8(arg);
+    if (filename == NULL)
+        return NULL;
+
+    self->stage = STAGE_VERIFYING;
+    self->last_progress = -1;
+
+    Par2::Result result;
+    Par2::Par2Verifier* verifier = self->verifier;
+    const std::string path = filename;
+    if (!run_step([&] { return verifier->VerifyFile(path); }, &result))
+        return NULL;
+
+    if (result == Par2::eCancelled)
+        self->cancelled = true;
+    else if (result != Par2::eInsufficientCriticalData)
+        self->verified = true;
+
     return PyLong_FromLong((long)result);
 }
 
@@ -611,6 +643,12 @@ static PyMethodDef Par2Repairer_methods[] = {
     {"set_known_blocks", (PyCFunction)Par2Repairer_set_known_blocks, METH_O,
      "set_known_blocks(mapping)\n\nTake {filename: per-block truth values} as already\n"
      "verified. Those files are not read or hashed during verify(). Call after load()."},
+    {"verify_file", (PyCFunction)Par2Repairer_verify_file, METH_O,
+     "verify_file(filename) -> Par2Result\n\nScan one file as it becomes available,\n"
+     "reading nothing else. Call it again for the same file once it has finished\n"
+     "downloading; what an earlier scan found for it is discarded first. May be called\n"
+     "before load(), which returns INSUFFICIENT_CRITICAL_DATA and scans the file once\n"
+     "the par2 packets arrive."},
     {"verify", (PyCFunction)Par2Repairer_verify, METH_NOARGS,
      "verify() -> Par2Result\n\nScan the source files. Requires load() first. May be called\n"
      "more than once; each call is a fresh pass."},

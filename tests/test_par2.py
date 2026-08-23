@@ -198,6 +198,65 @@ class TestPar2Repair:
         assert rep.repair() == sabctools.Par2Result.REPAIR_NOT_POSSIBLE
 
 
+class TestPar2VerifyFile:
+    """Feeding files in one at a time, which is how a download arrives."""
+
+    def test_scans_only_the_named_file(self, par2set):
+        os.remove(os.path.join(par2set, "gamma.bin"))
+
+        rep = repairer(par2set)
+        rep.load()
+
+        seen = []
+        rep.file_done_callback = lambda name, found, total: seen.append(name)
+
+        rep.verify_file(os.path.join(par2set, "alpha.bin"))
+        assert seen == ["alpha.bin"]
+        assert rep.complete_file_count == 1
+
+    def test_rescan_replaces_what_the_first_scan_found(self, par2set, digests):
+        # right size, wrong contents: what a file still downloading looks like
+        target = os.path.join(par2set, "gamma.bin")
+        good = open(target, "rb").read()
+        with open(target, "r+b") as f:
+            f.seek(1000)
+            f.write(b"\0" * 4000)
+
+        rep = repairer(par2set)
+        rep.load()
+        rep.verify_file(target)
+        assert rep.damaged_file_count == 1
+        partial = rep.available_block_count
+
+        # it finishes, and is scanned again
+        with open(target, "wb") as f:
+            f.write(good)
+        rep.verify_file(target)
+        assert rep.damaged_file_count == 0
+        assert rep.complete_file_count == 1
+        assert rep.available_block_count > partial
+
+    def test_file_scanned_before_load_is_replayed(self, par2set):
+        rep = repairer(par2set)
+        # nothing describes it yet
+        assert rep.verify_file(os.path.join(par2set, "alpha.bin")) == (sabctools.Par2Result.INSUFFICIENT_CRITICAL_DATA)
+        # loading the packets scans it
+        rep.load()
+        assert rep.complete_file_count == 1
+
+    def test_repair_works_from_incremental_scans(self, par2set, digests):
+        os.remove(os.path.join(par2set, "gamma.bin"))
+
+        rep = repairer(par2set)
+        rep.load()
+        for name in ("alpha.bin", "beta.bin"):
+            rep.verify_file(os.path.join(par2set, name))
+
+        assert rep.repair_possible
+        assert rep.repair() == sabctools.Par2Result.SUCCESS
+        assert md5(os.path.join(par2set, "gamma.bin")) == digests["gamma.bin"]
+
+
 class TestPar2LoadMore:
     """Adding recovery blocks to a live repairer, the 'fetch more blocks' path.
 
