@@ -436,8 +436,7 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
         else
         {
           #pragma omp critical(stdio)
-          std::cerr << "Skipping a file in " << path
-                    << " whose name is not valid UTF-16." << std::endl;
+          std::cerr << "Skipping a file in \"" << path << "\" whose name is not valid UTF-16." << std::endl;
         }
       }
       else if (recursive == true)
@@ -450,8 +449,7 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
         if (!utf8::WideToUtf8(fd.cFileName, name))
         {
           #pragma omp critical(stdio)
-          std::cerr << "Skipping a directory in " << path
-                    << " whose name is not valid UTF-16." << std::endl;
+          std::cerr << "Skipping a directory in \"" << path << "\" whose name is not valid UTF-16." << std::endl;
           continue;
         }
 
