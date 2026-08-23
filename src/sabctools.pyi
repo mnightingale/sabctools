@@ -131,6 +131,18 @@ class Par2Repairer:
         Call after load(), which is when block_size becomes known, and before verify().
         """
 
+    def verify_file(self, filename: str) -> Par2Result:
+        """Scan one file as it becomes available, reading nothing else.
+
+        Call it again for the same file once it has finished downloading: what an
+        earlier scan found for it is discarded first, so a file sitting on disk at its
+        final size with data still missing can be scanned again rather than trusted.
+
+        May be called before load(), which returns INSUFFICIENT_CRITICAL_DATA and scans
+        the file once the par2 packets arrive. Returns what verify() would return for
+        the set as it stands, so files not yet scanned still count as missing.
+        """
+
     def verify(self) -> Par2Result:
         """Scan the source files. Requires load() first.
 
