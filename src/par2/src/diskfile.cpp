@@ -1048,8 +1048,7 @@ bool DiskFile::Delete(void)
   assert(hFile == INVALID_HANDLE_VALUE);
 
   std::wstring wfilename;
-  if (!filename.empty() && utf8::Utf8ToWide(filename, wfilename) &&
-      ::DeleteFileW(wfilename.c_str()))
+  if (!filename.empty() && utf8::Utf8ToWide(filename, wfilename) && ::DeleteFileW(wfilename.c_str()))
   {
     exists = false;
     return true;
@@ -1197,9 +1196,7 @@ bool DiskFile::Rename(std::string _filename)
   assert(hFile == INVALID_HANDLE_VALUE);
 
   std::wstring wfilename, _wfilename;
-  if (utf8::Utf8ToWide(filename, wfilename) &&
-      utf8::Utf8ToWide(_filename, _wfilename) &&
-      ::MoveFileW(wfilename.c_str(), _wfilename.c_str()))
+  if (utf8::Utf8ToWide(filename, wfilename) && utf8::Utf8ToWide(_filename, _wfilename) && ::MoveFileW(wfilename.c_str(), _wfilename.c_str()))
   {
     filename.swap(_filename);
 

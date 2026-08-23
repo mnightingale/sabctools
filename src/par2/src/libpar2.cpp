@@ -63,8 +63,7 @@ public:
     const Result result = PreparePackets();
 
     if (setchanged)
-      *setchanged = (sourceblockcount != blocksbefore)
-                 || (sourcefiles.size() != filesbefore);
+      *setchanged = (sourceblockcount != blocksbefore) || (sourcefiles.size() != filesbefore);
 
     return result;
   }
