@@ -54,6 +54,8 @@ test
 dist
 *.whl
 *.so
+*.o
+*.o.tmp
 *.pyd
 *.dylib
 

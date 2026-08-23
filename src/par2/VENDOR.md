@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | Upstream | https://github.com/mnightingale/par2cmdline.git |
-| Ref | `92bd06aaf395e60edc31302f17968170fa88a281` |
-| Commit | `92bd06aaf395e60edc31302f17968170fa88a281` |
-| Vendored | 2026-08-22 |
+| Ref | `6e6f4ad33c915dc7c2b7e270bda408169c890a16` |
+| Commit | `6e6f4ad33c915dc7c2b7e270bda408169c890a16` |
+| Vendored | 2026-08-23 |
 
 This is a fork of [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) carrying
 a stack of `libpar2/*` topic branches that make par2 usable as a library, being prepared

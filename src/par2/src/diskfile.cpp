@@ -41,6 +41,7 @@ static char THIS_FILE[]=__FILE__;
 #ifdef _WIN32
 #include "utf8.h"
 #include <cwctype>
+#include <iostream>
 #endif
 
 namespace Par2
@@ -411,11 +412,13 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
   }
   std::list<std::string> *matches = new std::list<std::string>;
 
-  // An empty list rather than nullptr: callers splice the result without
-  // checking it, and only two of the six guard against a null.
   std::wstring wwildcard;
   if (!utf8::Utf8ToWide(path + wildcard, wwildcard))
+  {
+    #pragma omp critical(stdio)
+    std::cerr << "Could not convert \"" << path + wildcard << "\" to a wide string." << std::endl;
     return std::unique_ptr< std::list<std::string> >(matches);
+  }
 
   WIN32_FIND_DATAW fd;
   HANDLE h = ::FindFirstFileW(wwildcard.c_str(), &fd);
@@ -427,7 +430,15 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
       {
         std::string name;
         if (utf8::WideToUtf8(fd.cFileName, name))
+        {
           matches->push_back(path + name);
+        }
+        else
+        {
+          #pragma omp critical(stdio)
+          std::cerr << "Skipping a file in " << path
+                    << " whose name is not valid UTF-16." << std::endl;
+        }
       }
       else if (recursive == true)
       {
@@ -437,12 +448,17 @@ std::unique_ptr< std::list<std::string> > DiskFile::FindFiles(std::string path, 
 
         std::string name;
         if (!utf8::WideToUtf8(fd.cFileName, name))
+        {
+          #pragma omp critical(stdio)
+          std::cerr << "Skipping a directory in " << path
+                    << " whose name is not valid UTF-16." << std::endl;
           continue;
+        }
 
         std::string nwwildcard="*";
         std::unique_ptr< std::list<std::string> > dirmatches(
           DiskFile::FindFiles(path + name, nwwildcard, true, followlinks)
-          );
+        );
 
         // append without requiring ordering
         if (dirmatches)

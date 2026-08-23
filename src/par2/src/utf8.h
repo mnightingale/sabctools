@@ -31,8 +31,9 @@ namespace utf8
   extern const int MAX_ARGS;
   extern const size_t MAX_DIR_PATH;
 
-  // False if the string is not valid UTF-8, or not valid UTF-16, leaving out
-  // unchanged. Paths longer than MAX_DIR_PATH gain a \\?\ or \\?\UNC prefix.
+  // False if the string is not well formed, leaving out untouched. Otherwise out
+  // holds the conversion, and a path longer than MAX_DIR_PATH has gained a \\?\
+  // or \\?\UNC prefix so that the Win32 calls accept it.
   bool Utf8ToWide(const std::string& str, std::wstring& out);
   bool WideToUtf8(const std::wstring& str, std::string& out);
 

@@ -61,14 +61,26 @@ namespace utf8
     }
 
     const int length = (int)str.size();
-    const int required =
-      ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str.c_str(), length, nullptr, 0);
+    const int required = ::MultiByteToWideChar(
+      CP_UTF8,
+      MB_ERR_INVALID_CHARS,
+      str.c_str(),
+      length,
+      nullptr,
+      0
+    );
     if (required <= 0)
       return false;
 
     std::wstring wpath(required, L'\0');
-    if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str.c_str(), length,
-                              &wpath[0], required) <= 0)
+    if (::MultiByteToWideChar(
+      CP_UTF8,
+      MB_ERR_INVALID_CHARS,
+      str.c_str(),
+      length,
+      &wpath[0],
+      required
+    ) <= 0)
       return false;
 
     ApplyLongPathPrefix(wpath);
@@ -86,15 +98,30 @@ namespace utf8
     }
 
     const int length = (int)str.size();
-    const int required =
-      ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, str.c_str(), length,
-                            nullptr, 0, nullptr, nullptr);
+    const int required = ::WideCharToMultiByte(
+      CP_UTF8,
+      WC_ERR_INVALID_CHARS,
+      str.c_str(),
+      length,
+      nullptr,
+      0,
+      nullptr,
+      nullptr
+    );
     if (required <= 0)
       return false;
 
     std::string utf8(required, '\0');
-    if (::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, str.c_str(), length,
-                              &utf8[0], required, nullptr, nullptr) <= 0)
+    if (::WideCharToMultiByte(
+      CP_UTF8,
+      WC_ERR_INVALID_CHARS,
+      str.c_str(),
+      length,
+      &utf8[0],
+      required,
+      nullptr,
+      nullptr
+    ) <= 0)
       return false;
 
     out.swap(utf8);
