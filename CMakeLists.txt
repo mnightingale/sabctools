@@ -327,6 +327,28 @@ if(WIN32)
     target_link_libraries(sabctools PRIVATE ws2_32)
 endif()
 
+# May need to link libatomic
+include(CheckCXXSourceCompiles)
+set(atomic_probe "
+#include <atomic>
+#include <cstdint>
+int main() {
+    std::atomic<uint64_t> counter{0};
+    counter.fetch_add(1, std::memory_order_relaxed);
+    return (int)counter.load(std::memory_order_relaxed);
+}
+")
+check_cxx_source_compiles("${atomic_probe}" ATOMIC64_WITHOUT_LIBATOMIC)
+if(NOT ATOMIC64_WITHOUT_LIBATOMIC)
+    set(CMAKE_REQUIRED_LIBRARIES atomic)
+    check_cxx_source_compiles("${atomic_probe}" ATOMIC64_WITH_LIBATOMIC)
+    unset(CMAKE_REQUIRED_LIBRARIES)
+    if(NOT ATOMIC64_WITH_LIBATOMIC)
+        message(FATAL_ERROR "64-bit atomics are unavailable with and without libatomic")
+    endif()
+    target_link_libraries(sabctools PRIVATE atomic)
+endif()
+
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
