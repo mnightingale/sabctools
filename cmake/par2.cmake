@@ -23,9 +23,10 @@ set(PAR2_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/par2")
 # rather than a glob, and checked against the tree below, so that re-vendoring a
 # reshaped upstream fails at configure time instead of at link time.
 #
-# commandline.cpp is not in that list and is not built: it is the tool's option
-# parser, and the library proper never includes commandline.h. That separation is
-# what lets the glue depend on the public header alone.
+# commandline.cpp and wargs.cpp are not in that list and are not built: the option
+# parser and the wide argv adapter belong to the tool, and the library proper never
+# includes their headers. That separation is what lets the glue depend on the public
+# header alone.
 set(PAR2_SOURCES
     crc.cpp
     creatorpacket.cpp
@@ -54,7 +55,7 @@ set(PAR2_SOURCES
 )
 
 file(GLOB _par2_present RELATIVE "${PAR2_DIR}/src" CONFIGURE_DEPENDS "${PAR2_DIR}/src/*.cpp")
-list(REMOVE_ITEM _par2_present commandline.cpp)
+list(REMOVE_ITEM _par2_present commandline.cpp wargs.cpp)
 set(_par2_expected ${PAR2_SOURCES})
 list(SORT _par2_present)
 list(SORT _par2_expected)
