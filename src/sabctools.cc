@@ -84,6 +84,12 @@ static PyMethodDef sabctools_methods[] = {
         "write_stats(reset=False)"
     },
     {
+        "monotonic",
+        monotonic,
+        METH_NOARGS,
+        "monotonic()"
+    },
+    {
         "bytearray_malloc",
         bytearray_malloc,
         METH_O,

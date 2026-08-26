@@ -39,6 +39,11 @@ def write_stats(reset: bool = False) -> WriteStats:
     writes into intervals with none lost or counted twice.
     """
 
+def monotonic() -> float:
+    """Seconds on the clock the NNTPResponse timestamps use.
+
+    Shares no epoch with time.monotonic(), so it is only comparable to itself."""
+
 def bytearray_malloc(size: int) -> bytearray: ...
 def rarfile_rar3_s2k(pwd, salt) -> tuple[bytes, bytes]: ...
 

@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from tests.testsupport import *
@@ -37,3 +39,22 @@ def test_rarfile_rar3_s2k_known_key_iv(password, salt, expected_key, expected_iv
     key_le, iv = sabctools.rarfile_rar3_s2k(password, bytes.fromhex(salt))
     assert key_le.hex() == expected_key
     assert iv.hex() == expected_iv
+
+
+def test_monotonic_advances():
+    before = sabctools.monotonic()
+    time.sleep(0.01)
+
+    assert sabctools.monotonic() > before
+
+
+def test_monotonic_shares_the_epoch_with_response_timestamps():
+    start = sabctools.monotonic()
+    decoder = sabctools.Decoder(4096)
+    decoder.expect("a")
+    memoryview(decoder)[:7] = b"430 a\r\n"
+    decoder.process(7)
+
+    (response,) = list(decoder)
+
+    assert start <= response.sent_at <= sabctools.monotonic()

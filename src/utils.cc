@@ -26,6 +26,10 @@ double monotonic_seconds() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - epoch).count();
 }
 
+PyObject* monotonic(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    return PyFloat_FromDouble(monotonic_seconds());
+}
+
 PyObject* bytearray_malloc(PyObject* self, PyObject* Py_input_size) {
     if(!PyLong_Check(Py_input_size)) {
         PyErr_SetString(PyExc_TypeError, "Expected type 'int'.");

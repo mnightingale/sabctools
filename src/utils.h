@@ -24,6 +24,8 @@
 /* Seconds on a monotonic clock, from an epoch private to this module. */
 double monotonic_seconds();
 
+PyObject* monotonic(PyObject *, PyObject *);
+
 PyObject* bytearray_malloc(PyObject *, PyObject*);
 
 PyObject* rarfile_rar3_loop(PyObject*, PyObject*);
