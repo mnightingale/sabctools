@@ -20,6 +20,9 @@ def crc32_zero_unpad(crc1: int, length: int) -> int: ...
 def sparse(file: Union[IO, int], length: int) -> None:
     """Deprecated in favour of FileWriter.preallocate, kept for existing callers."""
 
+class SparseUnsupported(OSError):
+    """The filesystem cannot store the file with holes in it."""
+
 class WriteStats(TypedDict):
     count: int
     bytes: int
@@ -150,7 +153,12 @@ class FileWriter:
         """
 
     def preallocate(self, length: int) -> None:
-        """Set the file length, marking it sparse first where the filesystem requires it."""
+        """Set the file length, marking it sparse first where the filesystem requires it.
+
+        Raises SparseUnsupported if the filesystem cannot. Windows knows before it acts
+        and changes nothing; elsewhere it is only visible afterwards, so the length is
+        left set and allocated in full.
+        """
 
     def close(self) -> None:
         """Close the file. Idempotent, and waits for any writes still in flight."""

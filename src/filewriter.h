@@ -75,6 +75,8 @@ typedef struct {
 
 bool filewriter_init(PyObject *);
 
+extern PyObject *SparseUnsupported;
+
 extern PyTypeObject FileWriterType;
 
 /*

@@ -297,6 +297,7 @@ static PyObject *FileWriter_preallocate(FileWriter *self, PyObject *arg) {
     }
 
     bool was_closed = false;
+    bool not_sparse = false;
 #if defined(_WIN32) || defined(__CYGWIN__)
     DWORD error_code = 0;
 #else
@@ -312,10 +313,12 @@ static PyObject *FileWriter_preallocate(FileWriter *self, PyObject *arg) {
         } else {
 #if defined(_WIN32) || defined(__CYGWIN__)
             DWORD bytes_returned;
-            if (DeviceIoControl(self->handle, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &bytes_returned, NULL)) {
-                LARGE_INTEGER size;
-                size.QuadPart = length;
-                if (!SetFilePointerEx(self->handle, size, NULL, FILE_BEGIN) || !SetEndOfFile(self->handle)) {
+            if (!DeviceIoControl(self->handle, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &bytes_returned, NULL)) {
+                not_sparse = true;
+            } else {
+                FILE_END_OF_FILE_INFO info;
+                info.EndOfFile.QuadPart = length;
+                if (!SetFileInformationByHandle(self->handle, FileEndOfFileInfo, &info, sizeof(info))) {
                     error_code = GetLastError();
                 }
             }
@@ -331,15 +334,10 @@ static PyObject *FileWriter_preallocate(FileWriter *self, PyObject *arg) {
                 if (result < 0) {
                     error_code = errno;
                 } else if (length > before.st_size) {
-                    // A filesystem without sparse files answers ftruncate by allocating
-                    // the whole span, so put the length back the way Windows does when
-                    // FSCTL_SET_SPARSE fails
                     struct stat after{};
                     if (fstat(self->handle, &after) == 0 &&
                         (after.st_blocks - before.st_blocks) * 512 >= length - before.st_size) {
-                        do {
-                            result = ftruncate(self->handle, before.st_size);
-                        } while (result < 0 && errno == EINTR);
+                        not_sparse = true;
                     }
                 }
             }
@@ -350,6 +348,10 @@ static PyObject *FileWriter_preallocate(FileWriter *self, PyObject *arg) {
 
     if (was_closed) {
         PyErr_SetString(PyExc_ValueError, "preallocate on closed FileWriter");
+        return NULL;
+    }
+    if (not_sparse) {
+        PyErr_SetObject(SparseUnsupported, PyUnicode_FromFormat("%S cannot be stored with holes in it", self->path));
         return NULL;
     }
     if (error_code) {
@@ -553,8 +555,16 @@ PyTypeObject FileWriterType = {
     FileWriter_new,                         // tp_new
 };
 
+PyObject *SparseUnsupported = NULL;
+
 bool filewriter_init(PyObject *m) {
     if (PyType_Ready(&FileWriterType) < 0) return false;
     if (PyModule_AddType(m, &FileWriterType) < 0) return false;
+
+    SparseUnsupported = PyErr_NewExceptionWithDoc("sabctools.SparseUnsupported",
+                                                  "The filesystem cannot store the file with holes in it.",
+                                                  PyExc_OSError, NULL);
+    if (!SparseUnsupported) return false;
+    if (PyModule_AddObjectRef(m, "SparseUnsupported", SparseUnsupported) < 0) return false;
     return true;
 }
