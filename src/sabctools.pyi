@@ -2,11 +2,14 @@ from enum import IntEnum
 from os import PathLike
 from types import TracebackType
 from typing import Tuple, Optional, IO, List, Iterator, TypedDict, Union, Type
+from socket import socket
 from ssl import SSLSocket
 from _typeshed import ReadableBuffer, WriteableBuffer
 
 __version__: str
 openssl_linked: bool
+tcp_info_available: bool
+"""Whether this build can read TCP statistics on the platform it was built for"""
 simd: str
 crc_simd: str
 
@@ -46,6 +49,39 @@ def monotonic() -> float:
 
 def bytearray_malloc(size: int) -> bytearray: ...
 def rarfile_rar3_s2k(pwd, salt) -> tuple[bytes, bytes]: ...
+
+class TcpInfo(TypedDict):
+    """What the kernel will say about a connection, None per field it does not track.
+
+    Durations are microseconds and sizes are bytes. Linux and Windows measure at that
+    resolution; macOS only keeps milliseconds, which are scaled up rather than refined."""
+
+    source: str
+    """Which platform answered: "linux", "macos" or "windows\""""
+    state: Optional[int]
+    mss: Optional[int]
+    rtt: Optional[int]
+    rtt_var: Optional[int]
+    min_rtt: Optional[int]
+    rcv_rtt: Optional[int]
+    """Round trip as estimated from the receive side alone"""
+    rcv_space: Optional[int]
+    rcv_wnd: Optional[int]
+    rcv_buf: Optional[int]
+    bytes_received: Optional[int]
+    bytes_reordered: Optional[int]
+    packets_reordered: Optional[int]
+    bytes_retrans_out: Optional[int]
+    """What this end retransmitted, which for a connection that only reads stays near zero"""
+
+def tcp_info(sock: Union[int, socket, SSLSocket]) -> Optional[TcpInfo]:
+    """Read TCP statistics for a socket, or None.
+
+    None rather than an exception whenever the answer is simply unavailable: an
+    unsupported platform, a socket already closed, or one that is not TCP. Only an
+    argument that is no kind of socket raises.
+
+    Behind a SOCKS proxy this describes the connection to the proxy, not the one beyond it."""
 
 class EncodingFormat(IntEnum):
     YENC = 1

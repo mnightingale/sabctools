@@ -299,6 +299,7 @@ python_add_library(sabctools MODULE WITH_SOABI
     src/sparse.cc
     src/filewriter.cc
     src/utils.cc
+    src/tcpinfo.cc
     src/unlocked_ssl.cc
 )
 

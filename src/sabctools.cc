@@ -23,6 +23,7 @@
 #include "sparse.h"
 #include "filewriter.h"
 #include "utils.h"
+#include "tcpinfo.h"
 
 /* Function and exception declarations */
 PyMODINIT_FUNC PyInit_sabctools(void);
@@ -82,6 +83,12 @@ static PyMethodDef sabctools_methods[] = {
         (PyCFunction)(void (*)(void))filewriter_write_stats,
         METH_VARARGS | METH_KEYWORDS,
         "write_stats(reset=False)"
+    },
+    {
+        "tcp_info",
+        tcp_info,
+        METH_O,
+        "tcp_info(sock)"
     },
     {
         "monotonic",
@@ -167,6 +174,10 @@ PyMODINIT_FUNC PyInit_sabctools(void) {
     PyModule_AddStringConstant(m, "version", SABCTOOLS_VERSION);
     PyModule_AddStringConstant(m, "simd", kernel_name(rapidyenc_decode_kernel()));
     PyModule_AddStringConstant(m, "crc_simd", kernel_name(rapidyenc_crc_kernel()));
+
+    PyObject *tcp_info_available_object = tcp_info_supported() ? Py_True : Py_False;
+    Py_INCREF(tcp_info_available_object);
+    PyModule_AddObject(m, "tcp_info_available", tcp_info_available_object);
 
     // Add status of linking OpenSSL function
     PyObject *openssl_linked_object = openssl_linked() ? Py_True : Py_False;
