@@ -55,6 +55,21 @@ class NNTPResponse:
     """The first line of the response"""
     bytes_read: int
     """Bytes consumed, including status line and yEnc headers"""
+    first_byte_at: float
+    """When the first byte of this response was decoded, on the monotonic() clock"""
+    complete_at: float
+    """When the last byte of this response was decoded"""
+    transfer_time: float
+    """Seconds from the first byte to the last, excluding the wait before it"""
+    sent_at: Optional[float]
+    """When expect() recorded the request this answers, None if it never did"""
+    wait_time: Optional[float]
+    """Seconds from the request being recorded to its first byte arriving, or None.
+
+    At depth_at_send 0 that is a round trip; deeper, it also covers the responses
+    queued ahead of it."""
+    depth_at_send: Optional[int]
+    """Responses the server still owed when this request went out, or None"""
     bytes_decoded: int
     """Bytes produced"""
     file_name: Optional[str]

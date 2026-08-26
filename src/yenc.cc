@@ -19,6 +19,7 @@
 #include "yenc.h"
 #include "filewriter.h"
 #include "unlocked_ssl.h"
+#include "utils.h"
 
 #include "rapidyenc/rapidyenc.h"
 
@@ -1260,6 +1261,10 @@ static PyObject* NNTPResponse_new(PyTypeObject* type, PyObject* args, PyObject* 
     instance->total = 0;
     instance->crc = 0;
     instance->status_code = 0;
+    instance->sent_at = -1.0;
+    instance->first_byte_at = -1.0;
+    instance->complete_at = -1.0;
+    instance->depth_at_send = -1;
     instance->crc_expected = std::nullopt;
     instance->state = RYDEC_STATE_CRLF;
     instance->eof = false;
@@ -1289,6 +1294,35 @@ static PyObject* NNTPResponse_repr(NNTPResponse* self)
         self->bytes_decoded);
 }
 
+static PyObject* NNTPResponse_get_sent_at(NNTPResponse* self, void *closure)
+{
+    if (self->sent_at < 0.0) {
+        Py_RETURN_NONE;
+    }
+    return PyFloat_FromDouble(self->sent_at);
+}
+
+static PyObject* NNTPResponse_get_wait_time(NNTPResponse* self, void *closure)
+{
+    if (self->sent_at < 0.0) {
+        Py_RETURN_NONE;
+    }
+    return PyFloat_FromDouble(self->first_byte_at - self->sent_at);
+}
+
+static PyObject* NNTPResponse_get_depth_at_send(NNTPResponse* self, void *closure)
+{
+    if (self->depth_at_send < 0) {
+        Py_RETURN_NONE;
+    }
+    return PyLong_FromLong(self->depth_at_send);
+}
+
+static PyObject* NNTPResponse_get_transfer_time(NNTPResponse* self, void *closure)
+{
+    return PyFloat_FromDouble(self->complete_at - self->first_byte_at);
+}
+
 static PyMemberDef NNTPResponse_members[] = {
     {"status_code", T_INT, offsetof(NNTPResponse, status_code), READONLY, ""},
     {"message", T_OBJECT_EX, offsetof(NNTPResponse, message), READONLY, ""},
@@ -1304,6 +1338,10 @@ static PyMemberDef NNTPResponse_members[] = {
      PyDoc_STR("A write to the sink failed, so the decoded body was discarded")},
     {"sink_error", T_OBJECT, offsetof(NNTPResponse, sink_error), READONLY,
      PyDoc_STR("The exception the failed sink write produced, or None")},
+    {"first_byte_at", T_DOUBLE, offsetof(NNTPResponse, first_byte_at), READONLY,
+     PyDoc_STR("When the first byte of this response was decoded")},
+    {"complete_at", T_DOUBLE, offsetof(NNTPResponse, complete_at), READONLY,
+     PyDoc_STR("When the last byte of this response was decoded")},
     {nullptr, 0, 0, 0, nullptr}
 };
 
@@ -1315,6 +1353,10 @@ static PyGetSetDef NNTPResponse_gets_sets[] = {
     {"crc", (getter)NNTPResponse_get_crc, NULL, NULL, NULL},
     {"crc_expected", (getter)NNTPResponse_get_crc_expected, NULL, NULL, NULL},
     {"format", (getter)NNTPResponse_get_format, NULL, NULL, NULL},
+    {"sent_at", (getter)NNTPResponse_get_sent_at, NULL, NULL, NULL},
+    {"wait_time", (getter)NNTPResponse_get_wait_time, NULL, NULL, NULL},
+    {"depth_at_send", (getter)NNTPResponse_get_depth_at_send, NULL, NULL, NULL},
+    {"transfer_time", (getter)NNTPResponse_get_transfer_time, NULL, NULL, NULL},
     {nullptr, nullptr, nullptr, nullptr, nullptr}
 };
 
@@ -1556,6 +1598,7 @@ Py_ssize_t Decoder_decode(Decoder *self, const char* data, const Py_ssize_t size
         instance = reinterpret_cast<NNTPResponse *>(PyObject_CallObject(reinterpret_cast<PyObject *>(&NNTPResponseType), NULL));
         if (!instance) return -1;
         self->response = instance;
+        instance->first_byte_at = monotonic_seconds();
 
         // Responses come back in the order the requests went out, so the front of the
         // queue belongs to this one. Absent when the caller never used expect(), which
@@ -1566,6 +1609,8 @@ Py_ssize_t Decoder_decode(Decoder *self, const char* data, const Py_ssize_t size
             // References are transferred from the queue
             instance->context = request.context;
             instance->sink = request.sink;
+            instance->sent_at = request.sent_at;
+            instance->depth_at_send = static_cast<int32_t>(request.depth_at_send);
         }
         // Defensive, and deliberately so. A response that ran to the end of its body
         // has already flushed, so this is normally a no-op - but tp_clear drops a
@@ -1639,6 +1684,7 @@ static PyObject* Decoder_process(Decoder *self, PyObject *arg)
             }
 
             // Push completed decoder
+            self->response->complete_at = monotonic_seconds();
             self->deque.push_back(self->response);
             self->response = nullptr;
 
@@ -1707,6 +1753,8 @@ static PyObject* Decoder_expect(Decoder *self, PyObject *args)
     PendingRequest request;
     request.context = context;
     request.sink = sink;
+    request.sent_at = monotonic_seconds();
+    request.depth_at_send = static_cast<uint32_t>(self->pending.size() + (self->response ? 1 : 0));
     Py_XINCREF(request.context);
     Py_XINCREF(request.sink);
     self->pending.push_back(request);

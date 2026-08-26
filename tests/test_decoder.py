@@ -1,6 +1,7 @@
 import io
 import os
 import sys
+import time
 
 import pytest
 import glob
@@ -545,3 +546,101 @@ class TestRingRewind:
         reference = self.feed(self.SIZE)[1]
         for read_size in (1024, 4096, 48 * 1024, 100_000):
             assert self.feed(read_size)[1] == reference, "read_size=%d decoded differently" % read_size
+
+
+def feed(decoder: sabctools.Decoder, payload: bytes) -> list:
+    """Push payload through a decoder and collect whatever responses completed"""
+    memoryview(decoder)[: len(payload)] = payload
+    decoder.process(len(payload))
+    return list(decoder)
+
+
+class TestResponseTiming:
+    """Each response records when its request went out and when its bytes arrived"""
+
+    BUFFER_SIZE = 65536
+
+    def test_stamps_are_ordered(self):
+        decoder = sabctools.Decoder(self.BUFFER_SIZE)
+        decoder.expect("a")
+        (response,) = feed(decoder, b"430 no such article\r\n")
+
+        assert response.sent_at <= response.first_byte_at <= response.complete_at
+
+    def test_transfer_time_spans_the_two_stamps(self):
+        decoder = sabctools.Decoder(self.BUFFER_SIZE)
+        decoder.expect("a")
+        (response,) = feed(decoder, b"430 no such article\r\n")
+
+        assert response.transfer_time == pytest.approx(response.complete_at - response.first_byte_at)
+
+    def test_wait_time_measures_the_delay_before_the_first_byte(self):
+        decoder = sabctools.Decoder(self.BUFFER_SIZE)
+        decoder.expect("a")
+        time.sleep(0.05)
+        (response,) = feed(decoder, b"430 no such article\r\n")
+
+        assert response.wait_time == pytest.approx(response.first_byte_at - response.sent_at)
+        assert response.wait_time >= 0.05
+
+    def test_depth_counts_the_responses_still_owed(self):
+        decoder = sabctools.Decoder(self.BUFFER_SIZE)
+        decoder.expect("a")
+        decoder.expect("b")
+        decoder.expect("c")
+
+        responses = feed(decoder, b"430 a\r\n430 b\r\n430 c\r\n")
+
+        assert [response.depth_at_send for response in responses] == [0, 1, 2]
+
+    def test_depth_counts_a_response_still_being_decoded(self):
+        """A mid-flight request has already left the pending queue"""
+        decoder = sabctools.Decoder(self.BUFFER_SIZE)
+        decoder.expect("a")
+        feed(decoder, b"220 0 <a>\r\nsome body text\r\n")
+        decoder.expect("b")
+
+        responses = feed(decoder, b".\r\n430 b\r\n")
+
+        assert [response.depth_at_send for response in responses] == [0, 1]
+
+    def test_back_to_back_responses_leave_no_gap(self):
+        decoder = sabctools.Decoder(self.BUFFER_SIZE)
+        decoder.expect("a")
+        decoder.expect("b")
+
+        first, second = feed(decoder, b"430 a\r\n430 b\r\n")
+
+        assert second.first_byte_at >= first.complete_at
+        assert second.first_byte_at - first.complete_at < 0.01
+
+    def test_a_split_response_records_the_gap(self):
+        """The stamps bracket the response, not the read that finished it"""
+        decoder = sabctools.Decoder(self.BUFFER_SIZE)
+        decoder.expect("a")
+        assert feed(decoder, b"220 0 <a>\r\nfirst part\r\n") == []
+        time.sleep(0.05)
+
+        (response,) = feed(decoder, b"second part\r\n.\r\n")
+
+        assert response.transfer_time >= 0.05
+
+    def test_unpaired_response_has_no_request_timing(self):
+        decoder = sabctools.Decoder(self.BUFFER_SIZE)
+
+        (response,) = feed(decoder, b"430 no such article\r\n")
+
+        assert response.sent_at is None
+        assert response.wait_time is None
+        assert response.depth_at_send is None
+        assert response.first_byte_at <= response.complete_at
+
+    def test_clear_expected_drops_the_pairing(self):
+        decoder = sabctools.Decoder(self.BUFFER_SIZE)
+        decoder.expect("a")
+        decoder.clear_expected()
+
+        (response,) = feed(decoder, b"430 no such article\r\n")
+
+        assert response.sent_at is None
+        assert response.depth_at_send is None

@@ -115,6 +115,9 @@ PyObject* yenc_encode(PyObject *, PyObject*);
 typedef struct {
 	PyObject* context; // opaque to us, handed back as NNTPResponse.context
 	PyObject* sink;    // FileWriter to stream into, or NULL to build a bytearray
+	double sent_at;
+	// Responses still owed by the server when this request went out
+	uint32_t depth_at_send;
 } PendingRequest;
 
 typedef struct {
@@ -140,10 +143,15 @@ typedef struct {
 	Py_ssize_t part_size;
 	Py_ssize_t end_size;
 	Py_ssize_t total;
+	double sent_at; // from the paired request, -1.0 when there was none
+
+	double first_byte_at;
+	double complete_at;
 	std::optional<uint32_t> crc_expected;
 	PyObject* message;
 	RapidYencDecoderState state;
 	int status_code;
+	int32_t depth_at_send; // -1 when there was no paired request
 	uint32_t crc;
 
 	bool eof;

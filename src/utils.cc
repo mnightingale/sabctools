@@ -18,6 +18,14 @@
 
 #include "utils.h"
 
+#include <chrono>
+
+double monotonic_seconds() {
+    // From first use, so a double keeps nanosecond resolution at any uptime
+    static const auto epoch = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - epoch).count();
+}
+
 PyObject* bytearray_malloc(PyObject* self, PyObject* Py_input_size) {
     if(!PyLong_Check(Py_input_size)) {
         PyErr_SetString(PyExc_TypeError, "Expected type 'int'.");
