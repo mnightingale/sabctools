@@ -78,6 +78,12 @@ static PyMethodDef sabctools_methods[] = {
         "sparse(handle, length)"
     },
     {
+        "write_stats",
+        (PyCFunction)(void (*)(void))filewriter_write_stats,
+        METH_VARARGS | METH_KEYWORDS,
+        "write_stats(reset=False)"
+    },
+    {
         "bytearray_malloc",
         bytearray_malloc,
         METH_O,

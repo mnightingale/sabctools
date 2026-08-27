@@ -21,6 +21,7 @@
 #include <errno.h>
 // memset, for zeroing the OVERLAPPED on Windows
 #include <string.h>
+#include <chrono>
 
 #if !defined(_WIN32) && !defined(__CYGWIN__)
 #include <fcntl.h>
@@ -35,6 +36,14 @@
  * allowed to return at any time.
  */
 #define FILEWRITER_MAX_CHUNK ((Py_ssize_t)0x3FFFF000)
+
+/* Totals for every write through every FileWriter */
+static struct {
+    std::atomic<uint64_t> count;
+    std::atomic<uint64_t> bytes;
+    std::atomic<uint64_t> nanos;
+    std::atomic<uint64_t> max_nanos;
+} filewriter_stats;
 
 static PyObject *FileWriter_new(PyTypeObject *type, PyObject *Py_UNUSED(args), PyObject *Py_UNUSED(kwargs)) {
     FileWriter *self = (FileWriter *)type->tp_alloc(type, 0);
@@ -167,6 +176,8 @@ Py_ssize_t filewriter_write_raw(FileWriter *writer, const char *buffer, Py_ssize
         return 0;
     }
 
+    std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+
     while (written_total < length) {
         Py_ssize_t remaining = length - written_total;
         if (remaining > FILEWRITER_MAX_CHUNK) remaining = FILEWRITER_MAX_CHUNK;
@@ -208,6 +219,17 @@ Py_ssize_t filewriter_write_raw(FileWriter *writer, const char *buffer, Py_ssize
         }
         written_total += (Py_ssize_t)written;
 #endif
+    }
+
+    uint64_t elapsed =
+        (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
+            .count();
+    filewriter_stats.count.fetch_add(1, std::memory_order_relaxed);
+    filewriter_stats.bytes.fetch_add((uint64_t)written_total, std::memory_order_relaxed);
+    filewriter_stats.nanos.fetch_add(elapsed, std::memory_order_relaxed);
+    uint64_t worst = filewriter_stats.max_nanos.load(std::memory_order_relaxed);
+    while (elapsed > worst &&
+           !filewriter_stats.max_nanos.compare_exchange_weak(worst, elapsed, std::memory_order_relaxed)) {
     }
 
     return written_total;
@@ -275,6 +297,7 @@ static PyObject *FileWriter_preallocate(FileWriter *self, PyObject *arg) {
     }
 
     bool was_closed = false;
+    bool not_sparse = false;
 #if defined(_WIN32) || defined(__CYGWIN__)
     DWORD error_code = 0;
 #else
@@ -290,19 +313,34 @@ static PyObject *FileWriter_preallocate(FileWriter *self, PyObject *arg) {
         } else {
 #if defined(_WIN32) || defined(__CYGWIN__)
             DWORD bytes_returned;
-            if (DeviceIoControl(self->handle, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &bytes_returned, NULL)) {
-                LARGE_INTEGER size;
-                size.QuadPart = length;
-                if (!SetFilePointerEx(self->handle, size, NULL, FILE_BEGIN) || !SetEndOfFile(self->handle)) {
+            if (!DeviceIoControl(self->handle, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &bytes_returned, NULL)) {
+                not_sparse = true;
+            } else {
+                FILE_END_OF_FILE_INFO info;
+                info.EndOfFile.QuadPart = length;
+                if (!SetFileInformationByHandle(self->handle, FileEndOfFileInfo, &info, sizeof(info))) {
                     error_code = GetLastError();
                 }
             }
 #else
+            struct stat before{};
             int result;
-            do {
-                result = ftruncate(self->handle, (off_t)length);
-            } while (result < 0 && errno == EINTR);
-            if (result < 0) error_code = errno;
+            if (fstat(self->handle, &before) < 0) {
+                error_code = errno;
+            } else {
+                do {
+                    result = ftruncate(self->handle, length);
+                } while (result < 0 && errno == EINTR);
+                if (result < 0) {
+                    error_code = errno;
+                } else if (length > before.st_size) {
+                    struct stat after{};
+                    if (fstat(self->handle, &after) == 0 &&
+                        (after.st_blocks - before.st_blocks) * 512 >= length - before.st_size) {
+                        not_sparse = true;
+                    }
+                }
+            }
 #endif
         }
     }
@@ -310,6 +348,10 @@ static PyObject *FileWriter_preallocate(FileWriter *self, PyObject *arg) {
 
     if (was_closed) {
         PyErr_SetString(PyExc_ValueError, "preallocate on closed FileWriter");
+        return NULL;
+    }
+    if (not_sparse) {
+        PyErr_SetObject(SparseUnsupported, PyUnicode_FromFormat("%S cannot be stored with holes in it", self->path));
         return NULL;
     }
     if (error_code) {
@@ -392,7 +434,7 @@ static PyObject *FileWriter_get_size(FileWriter *self, void *Py_UNUSED(closure))
                 error_code = (unsigned long)GetLastError();
             }
 #else
-            struct stat info;
+            struct stat info{};
             if (fstat(self->handle, &info) == 0) {
                 size = (long long)info.st_size;
             } else {
@@ -431,6 +473,26 @@ static PyObject *FileWriter_get_path(FileWriter *self, void *Py_UNUSED(closure))
     if (!self->path) Py_RETURN_NONE;
     Py_INCREF(self->path);
     return self->path;
+}
+
+PyObject *filewriter_write_stats(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs) {
+    static const char *keywords[] = {"reset", NULL};
+    int reset = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|p:write_stats", const_cast<char **>(keywords), &reset)) return NULL;
+
+    unsigned long long count, bytes, nanos, max_nanos;
+    if (reset) {
+        count = filewriter_stats.count.exchange(0, std::memory_order_relaxed);
+        bytes = filewriter_stats.bytes.exchange(0, std::memory_order_relaxed);
+        nanos = filewriter_stats.nanos.exchange(0, std::memory_order_relaxed);
+        max_nanos = filewriter_stats.max_nanos.exchange(0, std::memory_order_relaxed);
+    } else {
+        count = filewriter_stats.count.load(std::memory_order_relaxed);
+        bytes = filewriter_stats.bytes.load(std::memory_order_relaxed);
+        nanos = filewriter_stats.nanos.load(std::memory_order_relaxed);
+        max_nanos = filewriter_stats.max_nanos.load(std::memory_order_relaxed);
+    }
+    return Py_BuildValue("{s:K,s:K,s:K,s:K}", "count", count, "bytes", bytes, "nanos", nanos, "max_nanos", max_nanos);
 }
 
 static PyObject *FileWriter_repr(FileWriter *self) {
@@ -505,8 +567,16 @@ PyTypeObject FileWriterType = {
     FileWriter_new,                         // tp_new
 };
 
+PyObject *SparseUnsupported = NULL;
+
 bool filewriter_init(PyObject *m) {
     if (PyType_Ready(&FileWriterType) < 0) return false;
     if (PyModule_AddType(m, &FileWriterType) < 0) return false;
+
+    SparseUnsupported = PyErr_NewExceptionWithDoc("sabctools.SparseUnsupported",
+                                                  "The filesystem cannot store the file with holes in it.",
+                                                  PyExc_OSError, NULL);
+    if (!SparseUnsupported) return false;
+    if (PyModule_AddObjectRef(m, "SparseUnsupported", SparseUnsupported) < 0) return false;
     return true;
 }

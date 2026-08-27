@@ -203,6 +203,17 @@ function(_vendored_build name source_dir subdir libraries cmake_args arch out_ar
             -DCMAKE_SYSTEM_NAME=Darwin
             -DCMAKE_SYSTEM_PROCESSOR=${arch}
         )
+        # CFLAGS and friends reach a sub-build through the environment, so a
+        # universal2 CFLAGS - which is how a universal2 wheel is usually asked for -
+        # has the compiler emit both architectures while this slice asks for one, and
+        # CMake rejects the mismatch before it compiles anything. Pass the flags on
+        # without their -arch, which also stops the environment being consulted at all.
+        foreach(language C CXX)
+            string(REGEX REPLACE "-arch[ \t]+[^ \t]+" "" sliced "${CMAKE_${language}_FLAGS}")
+            list(APPEND extra_args "-DCMAKE_${language}_FLAGS=${sliced}")
+        endforeach()
+        string(REGEX REPLACE "-arch[ \t]+[^ \t]+" "" sliced "${CMAKE_EXE_LINKER_FLAGS}")
+        list(APPEND extra_args "-DCMAKE_EXE_LINKER_FLAGS=${sliced}")
     endif()
 
     set(binary_dir "${CMAKE_BINARY_DIR}/${target}")
@@ -314,6 +325,28 @@ endif()
 
 if(WIN32)
     target_link_libraries(sabctools PRIVATE ws2_32)
+endif()
+
+# May need to link libatomic
+include(CheckCXXSourceCompiles)
+set(atomic_probe "
+#include <atomic>
+#include <cstdint>
+int main() {
+    std::atomic<uint64_t> counter{0};
+    counter.fetch_add(1, std::memory_order_relaxed);
+    return (int)counter.load(std::memory_order_relaxed);
+}
+")
+check_cxx_source_compiles("${atomic_probe}" ATOMIC64_WITHOUT_LIBATOMIC)
+if(NOT ATOMIC64_WITHOUT_LIBATOMIC)
+    set(CMAKE_REQUIRED_LIBRARIES atomic)
+    check_cxx_source_compiles("${atomic_probe}" ATOMIC64_WITH_LIBATOMIC)
+    unset(CMAKE_REQUIRED_LIBRARIES)
+    if(NOT ATOMIC64_WITH_LIBATOMIC)
+        message(FATAL_ERROR "64-bit atomics are unavailable with and without libatomic")
+    endif()
+    target_link_libraries(sabctools PRIVATE atomic)
 endif()
 
 # ---------------------------------------------------------------------------

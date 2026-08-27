@@ -1,7 +1,7 @@
 from enum import IntEnum
 from os import PathLike
 from types import TracebackType
-from typing import Tuple, Optional, IO, List, Iterator, Union, Type
+from typing import Tuple, Optional, IO, List, Iterator, TypedDict, Union, Type
 from ssl import SSLSocket
 from _typeshed import ReadableBuffer, WriteableBuffer
 
@@ -19,6 +19,25 @@ def crc32_xpown(n: int) -> int: ...
 def crc32_zero_unpad(crc1: int, length: int) -> int: ...
 def sparse(file: Union[IO, int], length: int) -> None:
     """Deprecated in favour of FileWriter.preallocate, kept for existing callers."""
+
+class SparseUnsupported(OSError):
+    """The filesystem cannot store the file with holes in it."""
+
+class WriteStats(TypedDict):
+    count: int
+    bytes: int
+    nanos: int
+    """Nanoseconds spent inside the write itself"""
+    max_nanos: int
+    """Nanoseconds the slowest single write took"""
+
+def write_stats(reset: bool = False) -> WriteStats:
+    """Totals for every write through every FileWriter.
+
+    Only write() is counted, and closing a file does not subtract what it wrote. With
+    reset, each total is taken and zeroed in one step, so consecutive calls carve the
+    writes into intervals with none lost or counted twice.
+    """
 
 def bytearray_malloc(size: int) -> bytearray: ...
 def rarfile_rar3_s2k(pwd, salt) -> tuple[bytes, bytes]: ...
@@ -136,7 +155,12 @@ class FileWriter:
         """
 
     def preallocate(self, length: int) -> None:
-        """Set the file length, marking it sparse first where the filesystem requires it."""
+        """Set the file length, marking it sparse first where the filesystem requires it.
+
+        Raises SparseUnsupported if the filesystem cannot. Windows knows before it acts
+        and changes nothing; elsewhere it is only visible afterwards, so the length is
+        left set and allocated in full.
+        """
 
     def close(self) -> None:
         """Close the file. Idempotent, and waits for any writes still in flight."""
