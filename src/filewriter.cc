@@ -475,12 +475,24 @@ static PyObject *FileWriter_get_path(FileWriter *self, void *Py_UNUSED(closure))
     return self->path;
 }
 
-PyObject *filewriter_write_stats(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(ignored)) {
-    return Py_BuildValue("{s:K,s:K,s:K,s:K}", "count",
-                         (unsigned long long)filewriter_stats.count.load(std::memory_order_relaxed), "bytes",
-                         (unsigned long long)filewriter_stats.bytes.load(std::memory_order_relaxed), "nanos",
-                         (unsigned long long)filewriter_stats.nanos.load(std::memory_order_relaxed), "max_nanos",
-                         (unsigned long long)filewriter_stats.max_nanos.load(std::memory_order_relaxed));
+PyObject *filewriter_write_stats(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs) {
+    static const char *keywords[] = {"reset", NULL};
+    int reset = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|p:write_stats", const_cast<char **>(keywords), &reset)) return NULL;
+
+    unsigned long long count, bytes, nanos, max_nanos;
+    if (reset) {
+        count = filewriter_stats.count.exchange(0, std::memory_order_relaxed);
+        bytes = filewriter_stats.bytes.exchange(0, std::memory_order_relaxed);
+        nanos = filewriter_stats.nanos.exchange(0, std::memory_order_relaxed);
+        max_nanos = filewriter_stats.max_nanos.exchange(0, std::memory_order_relaxed);
+    } else {
+        count = filewriter_stats.count.load(std::memory_order_relaxed);
+        bytes = filewriter_stats.bytes.load(std::memory_order_relaxed);
+        nanos = filewriter_stats.nanos.load(std::memory_order_relaxed);
+        max_nanos = filewriter_stats.max_nanos.load(std::memory_order_relaxed);
+    }
+    return Py_BuildValue("{s:K,s:K,s:K,s:K}", "count", count, "bytes", bytes, "nanos", nanos, "max_nanos", max_nanos);
 }
 
 static PyObject *FileWriter_repr(FileWriter *self) {

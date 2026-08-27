@@ -79,9 +79,9 @@ static PyMethodDef sabctools_methods[] = {
     },
     {
         "write_stats",
-        filewriter_write_stats,
-        METH_NOARGS,
-        "write_stats()"
+        (PyCFunction)(void (*)(void))filewriter_write_stats,
+        METH_VARARGS | METH_KEYWORDS,
+        "write_stats(reset=False)"
     },
     {
         "bytearray_malloc",

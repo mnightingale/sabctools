@@ -31,10 +31,12 @@ class WriteStats(TypedDict):
     max_nanos: int
     """Nanoseconds the slowest single write took"""
 
-def write_stats() -> WriteStats:
-    """Totals for every write through every FileWriter since sabctools was imported.
+def write_stats(reset: bool = False) -> WriteStats:
+    """Totals for every write through every FileWriter.
 
-    Only write() is counted, and closing a file does not subtract what it wrote.
+    Only write() is counted, and closing a file does not subtract what it wrote. With
+    reset, each total is taken and zeroed in one step, so consecutive calls carve the
+    writes into intervals with none lost or counted twice.
     """
 
 def bytearray_malloc(size: int) -> bytearray: ...

@@ -95,6 +95,6 @@ Py_ssize_t filewriter_write_raw(FileWriter *writer, const char *buffer, Py_ssize
 void filewriter_raise(FileWriter *writer, bool was_closed, unsigned long error_code);
 
 /* Totals for every write through every FileWriter. Requires the GIL. */
-PyObject *filewriter_write_stats(PyObject *, PyObject *);
+PyObject *filewriter_write_stats(PyObject *, PyObject *, PyObject *);
 
 #endif // SABCTOOLS_FILEWRITER_H

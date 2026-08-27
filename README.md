@@ -35,7 +35,7 @@ writer.close()              # idempotent, and waits for writes still in flight
 ```
 It owns its own descriptor, so nothing outside can close it while a write is in progress. On Windows the writes use `WriteFile` with an `OVERLAPPED` offset, because `os.pwrite` is not available there.
 
-`sabctools.write_stats()` returns totals for every write through every `FileWriter` since import — `count`, `bytes`, `nanos` spent inside the write itself, and `max_nanos` for the slowest one. Only `write()` is timed, and closing a file does not subtract what it wrote.
+`sabctools.write_stats(reset=True)` returns totals for every write through every `FileWriter` and zeroes them, so consecutive calls carve the writes into intervals. Without `reset` it is a plain read of the totals since import — `count`, `bytes`, `nanos` spent inside the write itself, and `max_nanos` for the slowest one. Only `write()` is timed, and closing a file does not subtract what it wrote.
 
 The decoder can write into one directly: pass a `FileWriter` as the `sink` argument of `Decoder.expect(context, sink)`, and each decoded body is written at the offset given by its yEnc headers rather than returned as a `bytearray`.
 
