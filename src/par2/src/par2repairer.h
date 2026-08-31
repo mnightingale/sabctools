@@ -174,9 +174,10 @@ protected:
   bool VerifyDataFile(DiskFile *diskfile, Par2RepairerSourceFile *sourcefile, const std::string &basepath, ProgressMeter<u64> &progress, const bool renameonly = false);
 
   // Check the blocks of a source file at the offsets where they are expected
-  // to be found, using several threads. This is much faster than the sliding
-  // window scan below, and what it does not find narrows that scan down to
-  // the parts of the file which are not where they should be.
+  // to be found. One thread reads the file in order while the others check the
+  // blocks it has read. This is much faster than the sliding window scan below,
+  // and what it does not find narrows that scan down to the parts of the file
+  // which are not where they should be.
   bool ScanDataFileAligned(DiskFile               *diskfile,    // [in]     The file being scanned
                            ProgressMeter<u64>     &progress,    // [in]
                            Par2RepairerSourceFile *sourcefile,  // [in]     The file it should match
@@ -232,6 +233,11 @@ protected:
   bool RemoveBackupFiles(void);
   bool RemoveParFiles(void);
 
+#ifdef _OPENMP
+  u32                                 FileThreads(size_t filecount) const
+    {return (u32)std::max<size_t>(1, std::min<size_t>(filethreads, filecount));}
+#endif
+
 protected:
   std::ostream &sout; // stream for output (for commandline, this is cout)
   std::ostream &serr; // stream for errors (for commandline, this is cerr)
@@ -254,8 +260,6 @@ protected:
 #ifdef _OPENMP
   u32 filethreads;             // Number of threads for file processing
 #endif
-  // How many files are being scanned block by block at this moment
-  std::atomic<u32> activeblockscans;
 
   bool                      skipdata;                // Should we skip data whilst scanning
   u64                       skipleaway;              // The leaway +/- we should allow whilst scanning
