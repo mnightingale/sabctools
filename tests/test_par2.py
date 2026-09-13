@@ -65,7 +65,9 @@ class TestPar2Load:
         assert rep.source_block_count > 0
         assert rep.recovery_block_count > 0
         assert rep.block_size > 0
-        assert len(rep.setid) == 32
+        # The recovery set id sits at offset 32 of every packet header
+        with open(os.path.join(par2set, "rec.par2"), "rb") as f:
+            assert rep.setid == f.read(48)[32:48]
 
     def test_verify_before_load_is_rejected(self, par2set):
         rep = repairer(par2set)
