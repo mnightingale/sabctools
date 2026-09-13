@@ -20,7 +20,7 @@
 
 #include "libpar2internal.h"
 
-namespace Par2
+namespace par2
 {
 
 #ifdef _MSC_VER
@@ -359,4 +359,4 @@ template<> bool ReedSolomon<Galois16>::InternalProcess(const Galois16 &factor, s
   return eSuccess;
 }
 
-} // namespace Par2
+} // namespace par2

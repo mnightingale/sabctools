@@ -24,15 +24,15 @@
 
 #include <string>
 
-namespace Par2
+namespace par2
 {
 namespace utf8
 {
   extern const size_t MAX_DIR_PATH;
 
   // False if the string is not well formed, leaving out untouched. Otherwise out
-  // holds the conversion, and a path longer than MAX_DIR_PATH has gained a \\?\
-  // or \\?\UNC prefix so that the Win32 calls accept it.
+  // holds the conversion, and a path longer than MAX_DIR_PATH has gained a
+  // \\?\ or \\?\UNC prefix so that the Win32 calls accept it.
   bool Utf8ToWide(const std::string& str, std::wstring& out);
   bool WideToUtf8(const std::wstring& str, std::string& out);
 }

@@ -20,7 +20,7 @@
 
 #include "libpar2internal.h"
 
-namespace Par2
+namespace par2
 {
 
 #ifdef _MSC_VER
@@ -42,6 +42,7 @@ FileCheckSummer::FileCheckSummer(DiskFile   *_diskfile,
 , windowtable(_windowtable)
 , filesize(_diskfile->FileSize())
 , computefilehashes(_computefilehashes)
+, hashesvalid(false)
 , currentoffset(0)
 , buffer(0)
 , outpointer(0)
@@ -49,8 +50,7 @@ FileCheckSummer::FileCheckSummer(DiskFile   *_diskfile,
 , tailpointer(0)
 , readoffset(0)
 , checksum(0)
-, contextfull()
-, context16k()
+, filehasher(_computefilehashes)
 {
   buffer = new char[(size_t)blocksize*2];
 }
@@ -63,12 +63,15 @@ FileCheckSummer::~FileCheckSummer(void)
 // Start reading the file at the beginning, or at the given offset
 bool FileCheckSummer::Start(u64 startoffset)
 {
-  assert(startoffset == 0 || !computefilehashes);
+  // The file hashes can only be computed from the start of the file
+  hashesvalid = (startoffset == 0);
 
   currentoffset = readoffset = startoffset;
 
   tailpointer = outpointer = buffer;
   inpointer = &buffer[blocksize];
+
+  BlankPastEndOfFile();
 
   // Fill the buffer with new data
   if (!Fill())
@@ -129,6 +132,8 @@ bool FileCheckSummer::Jump(u64 distance)
   outpointer = buffer;
   inpointer = &buffer[blocksize];
 
+  BlankPastEndOfFile();
+
   if (!Fill())
     return false;
 
@@ -136,6 +141,14 @@ bool FileCheckSummer::Jump(u64 distance)
   checksum = ~0 ^ CRCUpdateBlock(~0, (size_t)blocksize, buffer);
 
   return true;
+}
+
+// The scan window slides beyond the end of the file, where the data reads as
+// zeros. Once the whole file has been read, blank the rest of the buffer.
+void FileCheckSummer::BlankPastEndOfFile() const
+{
+  if (readoffset >= filesize)
+    memset(tailpointer, 0, static_cast<size_t>(&buffer[2 * blocksize] - tailpointer));
 }
 
 // Fill the buffer from disk
@@ -161,30 +174,33 @@ bool FileCheckSummer::Fill(bool longfill)
     if (!diskfile->Read(readoffset, tailpointer, want))
       return false;
 
-    if (computefilehashes)
-      UpdateHashes(readoffset, tailpointer, want);
+    if (hashesvalid)
+      filehasher.Update(readoffset, tailpointer, want);
     readoffset += want;
     tailpointer += want;
   }
 
-  // Did we fill the buffer
-  want = target - tailpointer;
-  if (want > 0)
-  {
-    // Blank the rest of the buffer
-    memset(tailpointer, 0, want);
-  }
+  // Blank whatever part of the buffer was not filled
+  BlankPastEndOfFile();
 
   return true;
 }
 
-// Update the full file hash and the 16k hash using the new data
-void FileCheckSummer::UpdateHashes(u64 offset, const void *buffer, size_t length)
+FileHasher::FileHasher(bool _wholefile)
+: wholefile(_wholefile)
+, contextfull()
+, context16k()
+{
+}
+
+// Add the next part of the file
+void FileHasher::Update(u64 offset, const void *buffer, size_t length)
 {
   // Are we already beyond the first 16k
   if (offset >= 16384)
   {
-    contextfull.Update(buffer, length);
+    if (wholefile)
+      contextfull.Update(buffer, length);
   }
   // Would we reach the 16k mark
   else if (offset+length >= 16384)
@@ -193,13 +209,16 @@ void FileCheckSummer::UpdateHashes(u64 offset, const void *buffer, size_t length
     size_t first = (size_t)(16384-offset);
     context16k.Update(buffer, first);
 
-    // Continue with the full hash
-    contextfull = context16k;
-
-    // Do we go beyond the 16k mark
-    if (offset+length > 16384)
+    if (wholefile)
     {
-      contextfull.Update(&((const char*)buffer)[first], length-first);
+      // Continue with the full hash
+      contextfull = context16k;
+
+      // Do we go beyond the 16k mark
+      if (offset+length > 16384)
+      {
+        contextfull.Update(&((const char*)buffer)[first], length-first);
+      }
     }
   }
   else
@@ -211,8 +230,14 @@ void FileCheckSummer::UpdateHashes(u64 offset, const void *buffer, size_t length
 // Return the full file hash and the 16k file hash
 void FileCheckSummer::GetFileHashes(MD5Hash &hashfull, MD5Hash &hash16k) const
 {
-  assert(computefilehashes);
+  assert(hashesvalid);
 
+  filehasher.GetHashes(filesize, hashfull, hash16k);
+}
+
+// Return the full file hash and the 16k file hash
+void FileHasher::GetHashes(u64 filesize, MD5Hash &hashfull, MD5Hash &hash16k) const
+{
   // Compute the hash of the first 16k
   MD5Context context = context16k;
   context.Final(hash16k);
@@ -223,7 +248,7 @@ void FileCheckSummer::GetFileHashes(MD5Hash &hashfull, MD5Hash &hash16k) const
     // The hashes are the same
     hashfull = hash16k;
   }
-  else
+  else if (wholefile)
   {
     // Compute the hash of the full file
     context = contextfull;
@@ -274,4 +299,4 @@ MD5Hash FileCheckSummer::ShortHash(u64 blocklength)
   return hash;
 }
 
-} // namespace Par2
+} // namespace par2

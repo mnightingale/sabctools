@@ -21,7 +21,7 @@
 #ifndef __VERIFICATIONHASHTABLE_H__
 #define __VERIFICATIONHASHTABLE_H__
 
-namespace Par2
+namespace par2
 {
 
 class Par2RepairerSourceFile;
@@ -472,6 +472,6 @@ inline const VerificationHashEntry* VerificationHashTable::FindMatch(const Verif
   return nextentry;
 }
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __VERIFICATIONHASHTABLE_H__

@@ -22,7 +22,7 @@
 
 #ifdef _WIN32
 
-namespace Par2
+namespace par2
 {
 namespace utf8
 {
@@ -34,6 +34,10 @@ namespace utf8
     WideToUtf8ArgsAdapter(int argc, wchar_t* argv_[]) noexcept(false);
 
     const char* const* GetUtf8Args() const noexcept;
+
+    // The number of arguments in GetUtf8Args(), which is less than the argc
+    // passed in when an argument could not be used.
+    int GetArgc() const noexcept;
 
     WideToUtf8ArgsAdapter() = delete;
     WideToUtf8ArgsAdapter(const WideToUtf8ArgsAdapter&) = delete;

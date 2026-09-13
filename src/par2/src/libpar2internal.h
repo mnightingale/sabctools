@@ -177,6 +177,10 @@ typedef unsigned int     size_t;
 #endif
 #endif
 
+// Input blocks held in flight, so that a backend still working on one block
+// does not stop the next being read.
+#define NUM_TRANSFER_BUFFERS 2
+
 #define MAX_CHUNK_SIZE 32*1048576 // too large chunks are likely detrimental to performance; set to 0 to disable
 
 #define LONGMULTIPLY
@@ -193,8 +197,47 @@ typedef unsigned int     size_t;
 
 #include <ctype.h>
 #include <iomanip>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 #include <cassert>
+
+// Holds a lock for the duration of one output statement, so that lines written
+// from several threads do not interleave.
+class LockedStream
+{
+public:
+  explicit LockedStream(std::ostream &stream)
+    : stream(stream)
+    , lock(Mutex())
+  {
+  }
+
+  template<typename T>
+  LockedStream& operator<<(const T &value)
+  {
+    stream << value;
+    return *this;
+  }
+
+  LockedStream& operator<<(std::ostream& (*manipulator)(std::ostream&))
+  {
+    stream << manipulator;
+    return *this;
+  }
+
+private:
+  static std::mutex& Mutex(void)
+  {
+    static std::mutex mutex;
+    return mutex;
+  }
+
+  std::ostream &stream;
+  std::lock_guard<std::mutex> lock;
+};
 
 #ifdef offsetof
 #undef offsetof
@@ -226,6 +269,9 @@ typedef unsigned int     size_t;
 
 
 #include "letype.h"
+#include "foreach_parallel.h"
+#include "bufferpool.h"
+#include "taskpool.h"
 #include "progressmeter.h"
 
 #include "galois.h"
@@ -233,6 +279,7 @@ typedef unsigned int     size_t;
 #include "md5.h"
 #include "par2fileformat.h"
 #include "reedsolomon.h"
+#include "reference_processor.h"
 
 #include "diskfile.h"
 #include "datablock.h"
@@ -249,6 +296,7 @@ typedef unsigned int     size_t;
 #include "par2repairersourcefile.h"
 
 #include "filechecksummer.h"
+#include "reference_hasher.h"
 #include "verificationhashtable.h"
 
 #include "par2creator.h"
@@ -268,11 +316,5 @@ typedef unsigned int     size_t;
 #include <crtdbg.h>
 #define DEBUG_NEW new(_NORMAL_BLOCK, THIS_FILE, __LINE__)
 #endif
-
-// OpenMP
-#ifdef _OPENMP
-# include <omp.h>
-#endif
-
 
 #endif // __PARCMDLINE_H__

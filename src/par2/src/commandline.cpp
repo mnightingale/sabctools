@@ -18,12 +18,13 @@
 //  along with this program; if not, write to the Free Software
 //  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-// iostream is included here, so that cout and cerr are not used elsewhere.
 #include "libpar2internal.h"
 
+// iostream is included here, so that cout and cerr are not used elsewhere.
 #include<iostream>
 #include<algorithm>
 #include "commandline.h"
+#include "foreach_parallel.h"
 #include <fstream>  //ADDED for @FILELIST FUNCTIONALY
 
 #ifdef _MSC_VER
@@ -36,12 +37,8 @@ static char THIS_FILE[]=__FILE__;
 #include <unistd.h>
 #endif
 
-// OpenMP
-#ifdef _OPENMP
-# include <omp.h>
-#endif
 
-namespace Par2
+namespace par2
 {
 
 CommandLine::CommandLine(void)
@@ -60,6 +57,7 @@ CommandLine::CommandLine(void)
 , renameonly(false)
 , skipdata(false)
 , skipleaway(0)
+, fullhash(false)
 , blockcount(0)
 , blocksize(0)
 , firstblock(0)
@@ -119,12 +117,10 @@ void CommandLine::usage(void)
     "  -v [-v]  : Be more verbose\n"
     "  -q [-q]  : Be more quiet (-q -q gives silence)\n"
     "  -m<n>    : Memory (in MB) to use (default is half of total physical memory)\n";
-#ifdef _OPENMP
   std::cout <<
-    "  -t<n>    : Number of threads used for main processing (" << omp_get_max_threads() << " detected)\n"
+    "  -t<n>    : Number of threads used for main processing (" << default_threads() << " detected)\n"
     "  -T<n>    : Number of files hashed in parallel\n"
     "             (" << _FILE_THREADS << " are the default)\n";
-#endif
   std::cout <<
     "  --       : Treat all following arguments as filenames\n"
     "Options: (verify or repair)\n"
@@ -134,6 +130,7 @@ void CommandLine::usage(void)
     "             useful for quickly fixing renamed files)\n"
     "  -N       : Data skipping (find badly mispositioned data blocks)\n"
     "  -S<n>    : Skip leaway (distance +/- from expected block position, default 64)\n"
+    "  --full-hash : Also check the hash of the whole of each file\n"
     "Options: (create)\n"
     "  -b<n>    : Set the Block-Count (default 2000)\n"
     "  -s<n>    : Set the Block-Size (don't use both -b and -s)\n"
@@ -406,7 +403,6 @@ bool CommandLine::ReadArgs(int argc, const char * const *argv)
           }
           break;
 
-#ifdef _OPENMP
         case 't':  // Set amount of threads
           {
             nthreads = 0;
@@ -423,6 +419,9 @@ bool CommandLine::ReadArgs(int argc, const char * const *argv)
               std::cerr << "Invalid thread option: " << argv[0] << std::endl;
               return false;
             }
+
+            if (nthreads > MAX_THREAD_COUNT)
+              nthreads = MAX_THREAD_COUNT;
           }
           break;
 
@@ -444,7 +443,6 @@ bool CommandLine::ReadArgs(int argc, const char * const *argv)
             }
           }
           break;
-#endif
 
         case 'r':  // Set the amount of redundancy required
           {
@@ -865,6 +863,16 @@ bool CommandLine::ReadArgs(int argc, const char * const *argv)
 
         case '-':
           {
+            if (argv[0] == std::string("--full-hash")) {
+              if (operation == opCreate)
+              {
+                std::cerr << "Cannot specify a full hash check unless repairing or verifying." << std::endl;
+                return false;
+              }
+              fullhash = true;
+              break;
+            }
+
 	    if (argv[0] != std::string("--")) {
               std::cerr << "Unknown option: " << argv[0] << std::endl;
 	      std::cerr << "  (Options must appear after create, repair or verify.)" << std::endl;
@@ -1548,4 +1556,4 @@ bool CommandLine::SetParFilename(std::string filename)
   return result;
 }
 
-} // namespace Par2
+} // namespace par2

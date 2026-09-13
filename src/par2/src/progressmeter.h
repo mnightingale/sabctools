@@ -24,7 +24,7 @@
 
 #include <par2/libpar2.h>
 
-namespace Par2
+namespace par2
 {
 
 template<typename TValue>
@@ -36,8 +36,8 @@ class ProgressMeter
   std::ostream &sout;        // stream for output (for commandline, this is cout)
   const std::string message; // message to display alongside percentage
   const float scale;         // pre-computed multiplier to convert progress value into a percentage*10
-  TValue current;            // last known progress value
-  steady_clock::duration::rep printed; // last time progress was outputted
+  std::atomic<TValue> current; // last known progress value
+  std::atomic<steady_clock::duration::rep> printed; // last time progress was outputted
   const bool print;          // whether the percentage is written to sout
   Par2Observer *observer;    // notified of progress whatever the noise level
 
@@ -53,11 +53,7 @@ class ProgressMeter
       return false;
 
     // check if enough time has passed
-    steady_clock::duration::rep lastprinted;
-#if defined(_OPENMP) && _OPENMP >= 201107
-    #pragma omp atomic read
-#endif
-    lastprinted = printed;
+    steady_clock::duration::rep lastprinted = printed.load(std::memory_order_relaxed);
     
     steady_clock::time_point now = steady_clock::now();
     steady_clock::time_point lastpoint = steady_clock::time_point(steady_clock::duration(lastprinted));
@@ -66,17 +62,12 @@ class ProgressMeter
     if (now - lastpoint >= PRINT_INTERVAL || newfraction == 1000)
     {
       if (print)
-      {
-        #pragma omp critical(stdio)
-        sout << message << newfraction/10 << '.' << newfraction%10 << "%\r" << std::flush;
-      }
+        LockedStream(sout) << message << newfraction/10 << '.' << newfraction%10 << "%\r" << std::flush;
 
       if (observer)
         observer->OnProgress(newfraction);
-#if defined(_OPENMP) && _OPENMP >= 201107
-      #pragma omp atomic write
-#endif
-      printed = now.time_since_epoch().count();
+
+      printed.store(now.time_since_epoch().count(), std::memory_order_relaxed);
       return true;
     }
     return false;
@@ -95,50 +86,28 @@ public:
   // NOTE: Update() doesn't always update current value, so don't mix it with Add()
   void Update(TValue newval)
   {
-    TValue oldval;
-#if defined(_OPENMP) && _OPENMP >= 201107
-    #pragma omp atomic read
-#endif
-    oldval = current;
+    TValue oldval = current.load(std::memory_order_relaxed);
     if (PrintFraction(oldval, newval))
-    {
-#if defined(_OPENMP) && _OPENMP >= 201107
-      #pragma omp atomic write
-#endif
-      current = newval;
-    }
+      current.store(newval, std::memory_order_relaxed);
   }
   void Add(TValue amount)
   {
-    TValue newval;
-#if defined(_OPENMP) && _OPENMP >= 201107
-    #pragma omp atomic capture
-    newval = current += amount;
-#else
-    newval = current + amount;
-    #pragma omp atomic
-    current += amount;
-#endif
+    TValue newval = current.fetch_add(amount, std::memory_order_relaxed) + amount;
     PrintFraction(newval - amount, newval);
   }
 
   // print a line whilst progress is still running
   void PrintLine(const std::string &line)
   {
-    TValue val;
-#if defined(_OPENMP) && _OPENMP >= 201107
-    #pragma omp atomic read
-#endif
-    val = current;
+    TValue val = current.load(std::memory_order_relaxed);
     u32 fraction = CalcThousandths(val);
-    #pragma omp critical(stdio)
-    sout << std::setw(message.size()+7) << std::setfill(' ') << "\r"
+    LockedStream(sout) << std::setw(message.size()+7) << std::setfill(' ') << "\r"
       << line << '\n'
       << message << fraction/10 << '.' << fraction%10 << "%\r" << std::flush;
   }
 };
 
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __PROGRESSMETER_H__

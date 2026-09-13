@@ -21,7 +21,7 @@
 #ifndef __PAR1REPAIRER_H__
 #define __PAR1REPAIRER_H__
 
-namespace Par2
+namespace par2
 {
 
 class Par1Repairer
@@ -32,10 +32,8 @@ public:
 
   Result Process(const size_t memorylimit,
 		 // basepath is not used by Par1
-#ifdef _OPENMP
 		 const u32 nthreads,
 		 // filethreads is not used by Par1
-#endif
 		 std::string parfilename,
 		 const std::vector<std::string> &extrafiles,
 		 const bool dorepair,   // derived from operation
@@ -141,6 +139,6 @@ protected:
   bool                      ignore16kfilehash;       // The 16k file hash values may be invalid
 };
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __PAR1REPAIRER_H__

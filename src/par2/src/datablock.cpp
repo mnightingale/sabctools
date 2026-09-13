@@ -19,7 +19,7 @@
 
 #include "libpar2internal.h"
 
-namespace Par2
+namespace par2
 {
 
 #ifdef _MSC_VER
@@ -112,4 +112,4 @@ bool DataBlock::WriteData(u64         position, // Position within the block
   return true;
 }
 
-} // namespace Par2
+} // namespace par2

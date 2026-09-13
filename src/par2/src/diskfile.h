@@ -39,7 +39,7 @@
 #include <vector>
 #include <memory>
 
-namespace Par2
+namespace par2
 {
 
 // A disk file can be any type of file that par2cmdline needs
@@ -172,6 +172,6 @@ protected:
   std::map<std::string, u64> cache;
 };
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __DISKFILE_H__

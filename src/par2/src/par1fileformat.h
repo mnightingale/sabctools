@@ -21,7 +21,7 @@
 #ifndef __PAR1FILEFORMAT_H__
 #define __PAR1FILEFORMAT_H__
 
-namespace Par2
+namespace par2
 {
 
 #ifdef _WIN32
@@ -91,6 +91,6 @@ inline bool operator != (const PAR1MAGIC &left, const PAR1MAGIC &right)
 
 extern PAR1MAGIC par1_magic;
 
-} // namespace Par2
+} // namespace par2
 
 #endif //__PAR1FILEFORMAT_H__

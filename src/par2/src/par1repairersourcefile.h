@@ -21,7 +21,7 @@
 #ifndef __PAR1REPAIRERSOURCEFILE_H__
 #define __PAR1REPAIRERSOURCEFILE_H__
 
-namespace Par2
+namespace par2
 {
 
 // The Par1RepairerSourceFile object is used during verification and repair
@@ -79,6 +79,6 @@ protected:
 };
 
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __PAR1REPAIRERSOURCEFILE_H__

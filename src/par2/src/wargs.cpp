@@ -28,7 +28,7 @@
 #include "utf8.h"
 #include "wargs.h"
 
-namespace Par2
+namespace par2
 {
 namespace utf8
 {
@@ -87,6 +87,11 @@ namespace utf8
   const char* const* WideToUtf8ArgsAdapter::GetUtf8Args() const noexcept
   {
     return m_argv;
+  }
+
+  int WideToUtf8ArgsAdapter::GetArgc() const noexcept
+  {
+    return m_argc;
   }
 
   WideToUtf8ArgsAdapter::~WideToUtf8ArgsAdapter()

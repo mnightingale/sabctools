@@ -20,7 +20,7 @@
 #ifndef __CREATORPACKET_H__
 #define __CREATORPACKET_H__
 
-namespace Par2
+namespace par2
 {
 
 // The creator packet records details as to which PAR2 client
@@ -44,6 +44,6 @@ public:
   bool Load(DiskFile *diskfile, u64 offset, PACKET_HEADER &header);
 };
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __CREATORPACKET_H__

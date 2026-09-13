@@ -27,7 +27,7 @@
 
 #include "utf8.h"
 
-namespace Par2
+namespace par2
 {
 namespace utf8
 {

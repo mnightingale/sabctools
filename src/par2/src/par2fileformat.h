@@ -21,7 +21,7 @@
 #ifndef __PAR2FILEFORMAT_H__
 #define __PAR2FILEFORMAT_H__
 
-namespace Par2
+namespace par2
 {
 
 // This file defines the format of a PAR2 file.
@@ -200,6 +200,6 @@ extern PACKETTYPE recoveryblockpacket_type;
 extern PACKETTYPE creatorpacket_type;
 
 
-} // namespace Par2
+} // namespace par2
 
 #endif //__PAR2FILEFORMAT_H__

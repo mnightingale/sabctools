@@ -132,14 +132,11 @@ else()
     target_compile_options(par2 PRIVATE -O3 -w)
 endif()
 
-# par2repairer, par2creator and diskfile parallelise with OpenMP, and
-# SetThreadCounts is what sizes it. Without OpenMP the pragmas are ignored and
-# the library still works, single-threaded - which AppleClang, shipping no
-# libomp, is the usual reason for.
-find_package(OpenMP COMPONENTS CXX)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(par2 PRIVATE OpenMP::OpenMP_CXX)
-    message(STATUS "par2: OpenMP enabled")
-else()
-    message(STATUS "par2: no OpenMP, par2 will not use multiple threads")
-endif()
+# par2repairer, par2creator and diskfile parallelise with std::thread, and
+# SetThreadCounts is what sizes it. Upstream replaced OpenMP with the standard
+# library, so this is a hard requirement rather than the optional accelerator
+# OpenMP was - and it is threaded on AppleClang, which ships no libomp and so
+# used to build par2 single-threaded.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+target_link_libraries(par2 PUBLIC Threads::Threads)

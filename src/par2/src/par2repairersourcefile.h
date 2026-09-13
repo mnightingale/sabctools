@@ -21,7 +21,7 @@
 #ifndef __PAR2REPAIRERSOURCEFILE_H__
 #define __PAR2REPAIRERSOURCEFILE_H__
 
-namespace Par2
+namespace par2
 {
 
 enum MatchType
@@ -90,7 +90,7 @@ public:
   // Get the first target DataBlock for the file
   std::vector<DataBlock>::iterator TargetBlocks(void) const {return targetblocks;}
 
-  // Set/Get the filesize on disk
+  // Set/Get "filesize on disk" needed for mt progress line
   void SetDiskFileSize();
   u64 DiskFileSize(void) const {return diskfilesize;}
 
@@ -112,6 +112,6 @@ protected:
   u64                          diskfilesize;        // The filesize of sourcefile on disk
 };
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __PAR2REPAIRERSOURCEFILE_H__

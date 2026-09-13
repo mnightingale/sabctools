@@ -17,8 +17,8 @@
 //  along with this program; if not, write to the Free Software
 //  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-#ifndef LIBPAR2_H
-#define LIBPAR2_H
+#ifndef __LIBPAR2_H__
+#define __LIBPAR2_H__
 
 #include <cstdint>
 #include <map>
@@ -28,17 +28,32 @@
 #include <utility>
 #include <vector>
 
-namespace Par2
+namespace par2
 {
 
-typedef uint8_t  u8;
-typedef int8_t   i8;
-typedef uint16_t u16;
-typedef int16_t  i16;
-typedef uint32_t u32;
-typedef int32_t  i32;
-typedef uint64_t u64;
-typedef int64_t  i64;
+typedef std::uint8_t  u8;
+typedef std::int8_t   i8;
+typedef std::uint16_t u16;
+typedef std::int16_t  i16;
+typedef std::uint32_t u32;
+typedef std::int32_t  i32;
+typedef std::uint64_t u64;
+typedef std::int64_t  i64;
+
+static_assert(sizeof(u8) == 1 && sizeof(i8) == 1
+		&& sizeof(u16) == 2 && sizeof(i16) == 2
+		&& sizeof(u32) == 4 && sizeof(i32) == 4
+		&& sizeof(u64) == 8 && sizeof(i64) == 8,
+		"the integer types are the widths their names give");
+
+} // namespace par2
+
+#include <par2/processor.h>
+#include <par2/hasher.h>
+#include <par2/backends.h>
+
+namespace par2
+{
 
 
 typedef enum
@@ -233,10 +248,18 @@ public:
   bool GetSetInfo(Par2SetInfo *info) const;
   bool GetFileInfo(std::vector<Par2FileInfo> *files) const;
 
+  // The CRC32 the set records for each block of the named file, one entry per
+  // block starting at block 0. The name is the one GetFileInfo reports.
+  //
+  // False when the set does not describe that file, or describes it without a
+  // verification packet, which is a file it cannot recover.
+  bool GetBlockChecksums(const std::string &filename,
+                         std::vector<u32> *crcs) const;
+
   // Accept the caller's word that these blocks of the named file are intact,
   // so that they are not read and hashed again. The name is the one reported
-  // by GetFileInfo and blocks must have one entry per block of that file, a
-  // non-zero value meaning the block is present at its expected offset.
+  // by GetFileInfo and blocks must have one entry per block of that file, set
+  // where the block is present at its expected offset.
   //
   // An entry set for every block means the file is intact and it is never
   // read. None set means it holds nothing usable, and it is not read either.
@@ -245,7 +268,7 @@ public:
   // The blocks are trusted without being verified. Supplying a block which is
   // not intact will silently produce incorrect output. Vouching for only some
   // of a file's blocks leaves it reported as needing repair.
-  void SetKnownBlocks(const std::string &filename, const std::vector<char> &blocks);
+  void SetKnownBlocks(const std::string &filename, const std::vector<bool> &blocks);
 
   // Memory in bytes that Repair may use for its buffers, the -m option, which
   // the command line takes in megabytes. Zero selects the default.
@@ -360,7 +383,7 @@ private:
   u64 skipleaway;
   std::vector<std::string> par2files;
   std::vector<std::string> scannedfiles;
-  std::map<std::string, std::vector<char> > knownblocks;
+  std::map<std::string, std::vector<bool> > knownblocks;
   bool verified;
   std::string basepath;
   std::unique_ptr<Impl> impl;
@@ -380,7 +403,8 @@ Result par2create(std::ostream &sout,
 			  const u32 firstblock,
 			  const Scheme recoveryfilescheme,
 			  const u32 recoveryfilecount,
-			  const u32 recoveryblockcount
+			  const u32 recoveryblockcount,
+			  const Backends &backends = Backends()
 			  );
 
 
@@ -397,7 +421,9 @@ Result par2repair(std::ostream &sout,
 		  const bool purgefiles,
 		  const bool renameonly,
 		  const bool skipdata,
-		  const u64 skipleaway
+		  const u64 skipleaway,
+		  const bool fullhash = false,
+		  const Backends &backends = Backends()
 		  );
 
 
@@ -425,6 +451,6 @@ bool ComputeRecoveryFileCount(std::ostream &sout,
 			      u64 largestfilesize,
 			      u64 blocksize);
 
-} // namespace Par2
+} // namespace par2
 
-#endif // LIBPAR2_H
+#endif // __LIBPAR2_H__

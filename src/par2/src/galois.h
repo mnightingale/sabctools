@@ -20,7 +20,7 @@
 #ifndef __GALOIS_H__
 #define __GALOIS_H__
 
-namespace Par2
+namespace par2
 {
 
 template <const unsigned int bits, const unsigned int generator, typename valuetype> class GaloisTable;
@@ -338,6 +338,6 @@ inline GaloisLongMultiplyTable<g>::GaloisLongMultiplyTable(void)
 typedef Galois<8,0x11D,u8> Galois8;
 typedef Galois<16,0x1100B,u16> Galois16;
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __GALOIS_H__

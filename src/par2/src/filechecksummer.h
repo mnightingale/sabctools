@@ -21,7 +21,7 @@
 #ifndef __FILECHECKSUMMER_H__
 #define __FILECHECKSUMMER_H__
 
-namespace Par2
+namespace par2
 {
 
 // This source file defines the FileCheckSummer object which is used
@@ -36,6 +36,27 @@ namespace Par2
 // block of data is expected to start. Whilst the file is being scanned
 // the object also computes the MD5 Hash of the whole file and of
 // the first 16k of the file for later tests.
+
+// Computes the hash of the whole of a file and of its first 16k from the data
+// of the file supplied in order
+class FileHasher
+{
+public:
+  // The first 16k is always hashed, the whole file only when asked for
+  explicit FileHasher(bool _wholefile = true);
+
+  // Add the next part of the file
+  void Update(u64 offset, const void *buffer, size_t length);
+
+  // Return the full file hash and the 16k file hash. The full hash is only
+  // set for a whole file hasher, or a file no larger than 16k.
+  void GetHashes(u64 filesize, MD5Hash &hashfull, MD5Hash &hash16k) const;
+
+protected:
+  bool        wholefile;
+  MD5Context  contextfull;
+  MD5Context  context16k;
+};
 
 class FileCheckSummer
 {
@@ -73,8 +94,9 @@ public:
   // Return the current file offset
   u64 Offset(void) const;
 
-  // Return the full file hash and the 16k file hash.
-  // Only valid if the checksummer was constructed with computefilehashes set.
+  // Return the full file hash and the 16k file hash. The 16k hash needs the
+  // file to have been read from its start, the full hash computefilehashes
+  // as well.
   void GetFileHashes(MD5Hash &hashfull, MD5Hash &hash16k) const;
 
   // Which disk file is this
@@ -87,8 +109,11 @@ protected:
 
   u64         filesize;
 
-  // Whether to compute the MD5 hash of the whole file and of the first 16k
+  // Whether to compute the MD5 hash of the whole file as well as the first 16k
   bool        computefilehashes;
+
+  // Whether the file is being read from its start
+  bool        hashesvalid;
 
   u64         currentoffset; // file offset for current window position
   char       *buffer;        // buffer for reading from the file
@@ -103,16 +128,15 @@ protected:
   u32         checksum;
 
   // MD5 hash of whole file and of first 16k
-  MD5Context  contextfull;
-  MD5Context  context16k;
+  FileHasher  filehasher;
 
 protected:
-  //void ComputeCurrentCRC(void);
-  void UpdateHashes(u64 offset, const void *buffer, size_t length);
-
-  //// Fill the buffers with more data from disk
+  // Fill the buffers with more data from disk
   // Set longfill = true to force fill the whole buffer
   bool Fill(bool longfill = false);
+
+  // Blank the part of the buffer which is beyond the end of the file
+  void BlankPastEndOfFile() const;
 
 private:
   // private copy constructor to prevent any misuse.
@@ -189,10 +213,12 @@ inline bool FileCheckSummer::Step(void)
   outpointer = buffer;
   tailpointer -= blocksize;
 
+  BlankPastEndOfFile();
+
   return true;
 }
 
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __FILECHECKSUMMER_H__

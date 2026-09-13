@@ -20,7 +20,9 @@
 
 #include "libpar2internal.h"
 
-namespace Par2
+#include <functional>
+
+namespace par2
 {
 
 #ifdef _MSC_VER
@@ -30,10 +32,6 @@ static char THIS_FILE[]=__FILE__;
 #define new DEBUG_NEW
 #endif
 #endif
-
-#define MT_PROGRESS , progress
-
-
 
 // Test whether filename has a .par2 / .PAR2 / .Par2 extension.
 bool Par2Repairer::IsPar2Filename(const std::string &filename)
@@ -52,18 +50,20 @@ bool Par2Repairer::IsPar2Filename(const std::string &filename)
     && ext[4] == '2');
 }
 
-Par2Repairer::Par2Repairer(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel)
+Par2Repairer::Par2Repairer(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel, const Backends &backends)
 : sout(sout)
 , serr(serr)
 , noiselevel(noiselevel)
+, backends(backends)
 , observer(0)
 , cancelled(false)
 , packetsloaded(0)
 , searchpath()
 , basepath()
-#ifdef _OPENMP
+, totalthreads(default_threads())
 , filethreads(_FILE_THREADS)
-#endif
+, blockpool()
+, activereaders(0)
 , setid()
 , totaldatasize(0)
 , recoverypacketmap()
@@ -98,6 +98,8 @@ Par2Repairer::Par2Repairer(std::ostream &sout, std::ostream &serr, const NoiseLe
   availableblockcount = 0;
   missingblockcount = 0;
 
+  ownfactors = false;
+
   memset(windowtable, 0, sizeof(windowtable));
 
   blocksallocated = false;
@@ -107,13 +109,13 @@ Par2Repairer::Par2Repairer(std::ostream &sout, std::ostream &serr, const NoiseLe
   damagedfilecount = 0;
   missingfilecount = 0;
 
-  inputbuffer = 0;
+  transferbuffer = 0;
   outputbuffer = 0;
 }
 
 Par2Repairer::~Par2Repairer(void)
 {
-  delete [] (u8*)inputbuffer;
+  delete [] (u8*)transferbuffer;
   delete [] (u8*)outputbuffer;
 
   std::map<u32,RecoveryPacket*>::iterator rp = recoverypacketmap.begin();
@@ -140,17 +142,16 @@ Par2Repairer::~Par2Repairer(void)
 Result Par2Repairer::Process(
 			     const size_t memorylimit,
 			     const std::string &_basepath,
-#ifdef _OPENMP
 			     const u32 nthreads,
 			     const u32 _filethreads,
-#endif
 			     std::string parfilename,
 			     const std::vector<std::string> &_extrafiles,
 			     const bool dorepair,   // derived from operation
 			     const bool purgefiles,
 			     const bool renameonly,
 			     const bool _skipdata,
-			     const u64 _skipleaway
+			     const u64 _skipleaway,
+			     const bool _fullhash
 			     )
 {
   // Should we skip data whilst scanning files
@@ -159,26 +160,19 @@ Result Par2Repairer::Process(
   // How much leaway should we allow when scanning files
   skipleaway = _skipleaway;
 
+  // Should the whole of each file be hashed as well as its blocks
+  fullhash = _fullhash;
+
   // Get filenames from the command line
   basepath = _basepath;
   std::vector<std::string> extrafiles = _extrafiles;
 
-#ifdef _OPENMP
   // Set the number of threads
-  if (nthreads != 0)
-    omp_set_num_threads(nthreads);
+  totalthreads = resolve_threads(nthreads);
 
-  // No more files are read at once than there are threads to hash them with
-  filethreads = std::min(_filethreads, (u32)omp_get_max_threads());
-
-  // Files are scanned in parallel, and so are the blocks within one file,
-  // so both levels need to be able to run threads.
-#if _OPENMP >= 200805
-  omp_set_max_active_levels(2);
-#else
-  omp_set_nested(1);
-#endif
-#endif
+  // No more files are read at once than there are threads to hash them with,
+  // and never none whatever the caller asked for
+  filethreads = std::max(1u, std::min(_filethreads, totalthreads));
 
   if (!LoadPackets(parfilename, extrafiles))
     return IsCancelled() ? eCancelled : eLogicError;
@@ -342,9 +336,15 @@ Result Par2Repairer::ScanFile(const std::string &filename, const std::string &ba
 
   ProgressMeter<u64> progress(sout, "Scanning: ", diskfile->FileSize(), noiselevel, observer);
 
-  VerifyDataFile(diskfile, sourcefile, basepath MT_PROGRESS);
+  ResetScanBuffers(1);
+
+  VerifyDataFile(diskfile, sourcefile, basepath, progress);
 
   diskfile->Close();
+
+  // Nothing is scanned again until the next file arrives, so the buffers are
+  // given up rather than held against the memory a repair needs
+  scanbuffers.Reset(0, 0);
 
   if (IsCancelled())
     return eCancelled;
@@ -369,6 +369,8 @@ Result Par2Repairer::VerifyFiles(const std::string &basepath,
   if (!PrepareForScanning())
     return eLogicError;
 
+  ResetScanBuffers(std::max(sourcefiles.size(), extrafiles.size()));
+
   // Attempt to verify all of the source files
   if (!VerifySourceFiles(basepath, extrafiles))
     return IsCancelled() ? eCancelled : eFileIOError;
@@ -385,6 +387,10 @@ Result Par2Repairer::VerifyFiles(const std::string &basepath,
 
   // Find out how much data we have found
   UpdateVerificationResults();
+
+  // Nothing is scanned again until the repaired files are verified, so the
+  // buffers are given up rather than held against the memory a repair needs
+  scanbuffers.Reset(0, 0);
 
   if (noiselevel > nlSilent)
     sout << '\n';
@@ -418,6 +424,15 @@ Result Par2Repairer::RepairFiles(const size_t memorylimit, const std::string &ba
     if (!CreateTargetFiles())
       return eFileIOError;
 
+    // Allocate memory buffers for reading and writing data to disk, and
+    // build the processor, which is offered the erasures below.
+    if (!AllocateBuffers(memorylimit))
+    {
+      // Delete all of the partly reconstructed files
+      DeleteIncompleteTargetFiles();
+      return eMemoryError;
+    }
+
     // Work out which data blocks are available, which need to be copied
     // directly to the output, and which need to be recreated, and compute
     // the appropriate Reed Solomon matrix.
@@ -431,19 +446,11 @@ Result Par2Repairer::RepairFiles(const size_t memorylimit, const std::string &ba
     if (noiselevel > nlSilent)
       sout << '\n';
 
-    // Allocate memory buffers for reading and writing data to disk.
-    if (!AllocateBuffers(memorylimit))
-    {
-      // Delete all of the partly reconstructed files
-      DeleteIncompleteTargetFiles();
-      return eMemoryError;
-    }
-
     if (observer)
       observer->OnRepairStart();
 
     // Set the total amount of data to be processed.
-    ProgressMeter<u64> progress(sout, missingblockcount > 0 ? "Repairing: " : "Processing: ", blocksize * sourceblockcount * (missingblockcount > 0 ? missingblockcount : 1), noiselevel, observer);
+    ProgressMeter<u64> progress(sout, missingblockcount > 0 ? "Repairing: " : "Processing: ", blocksize * sourceblockcount, noiselevel, observer);
 
     // Start at an offset of 0 within a block.
     u64 blockoffset = 0;
@@ -471,12 +478,21 @@ Result Par2Repairer::RepairFiles(const size_t memorylimit, const std::string &ba
       blockoffset += blocklength;
     }
 
+    // The repaired files are scanned into buffers of their own, so the ones
+    // the repair read and wrote through are given up first
+    delete [] (u8*)transferbuffer;
+    transferbuffer = 0;
+    delete [] (u8*)outputbuffer;
+    outputbuffer = 0;
+
     if (verifyafter)
     {
       if (noiselevel > nlSilent)
         sout << "\nVerifying repaired files:\n" << std::endl;
 
       // Verify that all of the reconstructed target files are now correct
+      ResetScanBuffers(verifylist.size());
+
       if (!VerifyTargetFiles(basepath))
       {
         // Delete all of the partly reconstructed files
@@ -533,6 +549,41 @@ std::string Par2Repairer::LocalFileName(const Par2RepairerSourceFile *sourcefile
 }
 
 // List the files the loaded packets describe
+bool Par2Repairer::GetBlockChecksums(const std::string &filename,
+                                    std::vector<u32> *crcs) const
+{
+  if (0 == crcs)
+    return false;
+
+  crcs->clear();
+
+  for (std::vector<Par2RepairerSourceFile*>::const_iterator sf = sourcefiles.begin();
+       sf != sourcefiles.end();
+       ++sf)
+  {
+    const Par2RepairerSourceFile *sourcefile = *sf;
+    if (0 == sourcefile || 0 == sourcefile->GetDescriptionPacket())
+      continue;
+
+    if (LocalFileName(sourcefile) != filename)
+      continue;
+
+    const VerificationPacket *verificationpacket = sourcefile->GetVerificationPacket();
+    if (0 == verificationpacket)
+      return false;
+
+    const u32 blockcount = verificationpacket->BlockCount();
+    crcs->reserve(blockcount);
+
+    for (u32 blocknumber=0; blocknumber<blockcount; ++blocknumber)
+      crcs->push_back(verificationpacket->VerificationEntry(blocknumber)->crc);
+
+    return true;
+  }
+
+  return false;
+}
+
 bool Par2Repairer::GetFileInfo(std::vector<Par2FileInfo> *files) const
 {
   if (0 == files)
@@ -626,7 +677,7 @@ bool Par2Repairer::GetVerifyResult(Par2VerifyResult *result) const
 
 // Accept the caller's word that these blocks are intact
 void Par2Repairer::SetKnownBlocks(const std::string &filename,
-                                  const std::vector<char> &blocks)
+                                  const std::vector<bool> &blocks)
 {
   if (blocks.empty())
     knownblocks.erase(filename);
@@ -660,7 +711,7 @@ bool Par2Repairer::TakeKnownBlocks(DiskFile               *diskfile,
   if (diskfile->FileSize() != descriptionpacket->FileSize())
     return false;
 
-  std::map<std::string, std::vector<char> >::const_iterator kb =
+  std::map<std::string, std::vector<bool> >::const_iterator kb =
     knownblocks.find(LocalFileName(sourcefile));
   if (kb == knownblocks.end())
     return false;
@@ -669,12 +720,15 @@ bool Par2Repairer::TakeKnownBlocks(DiskFile               *diskfile,
   if (0 == blockcount || kb->second.size() != blockcount)
     return false;
 
-  matched = kb->second;
+  matched.assign(blockcount, 0);
 
   for (u32 blocknumber=0; blocknumber<blockcount; ++blocknumber)
   {
-    if (matched[blocknumber])
+    if (kb->second[blocknumber])
+    {
+      matched[blocknumber] = 1;
       ++matchcount;
+    }
   }
 
   return true;
@@ -1447,6 +1501,7 @@ bool Par2Repairer::CreateSourceFileList(void)
     {
       sourcefile->ComputeTargetFileName(sout, serr, noiselevel, basepath);
 
+      // Need actual filesize on disk for mt-progress line
       sourcefile->SetDiskFileSize();
     }
 
@@ -1624,7 +1679,7 @@ bool Par2Repairer::VerifySourceFiles(const std::string& basepath, std::vector<st
   if (noiselevel > nlQuiet)
     sout << "\nVerifying source files:\n" << std::endl;
 
-  bool finalresult = true;
+  std::atomic<bool> finalresult(true);
 
   // Created a sorted list of the source files and verify them in that
   // order rather than the order they are in the main packet.
@@ -1642,6 +1697,7 @@ bool Par2Repairer::VerifySourceFiles(const std::string& basepath, std::vector<st
     if (sourcefile)
     {
       sortedfiles.push_back(sourcefile);
+      // Total filesizes for mt-progress line
       mttotalsize += sourcefile->DiskFileSize();
      }
     else
@@ -1665,24 +1721,13 @@ bool Par2Repairer::VerifySourceFiles(const std::string& basepath, std::vector<st
   }
 
   std::sort(sortedfiles.begin(), sortedfiles.end(), SortSourceFilesByFileName);
-#ifdef _OPENMP
   ProgressMeter<u64> progress(sout, "Scanning: ", mttotalsize, noiselevel, observer);
-#else
-  ProgressMeter<u64> progress(sout, "", mttotalsize, nlQuiet, observer);
-#endif
 
   // Start verifying the files
-#ifdef _OPENMP
-  const u32 filethreadcount = FileThreads(sortedfiles.size());
-#endif
-  #pragma omp parallel for schedule(dynamic) num_threads(filethreadcount)
-  for (int i=0; i< static_cast<int>(sortedfiles.size()); ++i)
+  foreach_parallel(sortedfiles, FileThreads(sortedfiles.size()), [&](Par2RepairerSourceFile *sourcefile)
   {
     if (IsCancelled())
-      continue;
-
-    // Do we have a source file
-    Par2RepairerSourceFile *sourcefile = sortedfiles[i];
+      return;
 
     // What filename does the file use
     const std::string& file = sourcefile->TargetFileName();
@@ -1691,8 +1736,7 @@ bool Par2Repairer::VerifySourceFiles(const std::string& basepath, std::vector<st
 
     if (noiselevel >= nlDebug)
     {
-      #pragma omp critical(stdio)
-      sout << "[DEBUG] VerifySourceFiles ----\n"
+      LockedStream(sout) << "[DEBUG] VerifySourceFiles ----\n"
         "[DEBUG] file: " << file << "\n"
         "[DEBUG] name: " << name << "\n"
         "[DEBUG] targ: " << target_pathname << std::endl;
@@ -1700,8 +1744,8 @@ bool Par2Repairer::VerifySourceFiles(const std::string& basepath, std::vector<st
 
     // if the target file is in the list of extra files, we remove it
     // from the extra files.
-    #pragma omp critical(extrafiles)
     {
+      std::lock_guard<std::mutex> lock(extraFilesMutex);
       std::vector<std::string>::iterator it = extrafiles.begin();
       for (; it != extrafiles.end(); ++it)
       {
@@ -1717,13 +1761,14 @@ bool Par2Repairer::VerifySourceFiles(const std::string& basepath, std::vector<st
 
     // Check to see if we have already used this file
     bool b;
-    #pragma omp critical(diskFileMap)
-    b = diskFileMap.Find(file) != 0;
+    {
+      std::lock_guard<std::mutex> lock(diskFileMapMutex);
+      b = diskFileMap.Find(file) != 0;
+    }
     if (b)
     {
       // The file has already been used!
-      #pragma omp critical(stdio)
-      serr << "Source file " << name << " is a duplicate." << std::endl;
+      LockedStream(serr) << "Source file " << name << " is a duplicate." << std::endl;
 
       finalresult = false;
     }
@@ -1742,11 +1787,13 @@ bool Par2Repairer::VerifySourceFiles(const std::string& basepath, std::vector<st
 
         // Remember that we have processed this file
         bool success;
-        #pragma omp critical(diskFileMap)
-        success = diskFileMap.Insert(diskfile);
+        {
+          std::lock_guard<std::mutex> lock(diskFileMapMutex);
+          success = diskFileMap.Insert(diskfile);
+        }
         assert(success);
         // Do the actual verification
-        if (!VerifyDataFile(diskfile, sourcefile, basepath MT_PROGRESS))
+        if (!VerifyDataFile(diskfile, sourcefile, basepath, progress))
           finalresult = false;
 
         // We have finished with the file for now
@@ -1759,15 +1806,14 @@ bool Par2Repairer::VerifySourceFiles(const std::string& basepath, std::vector<st
 
         if (noiselevel > nlSilent)
         {
-          #pragma omp critical(stdio)
-          sout << "Target: \"" << name << "\" - missing." << std::endl;
+          LockedStream(sout) << "Target: \"" << name << "\" - missing." << std::endl;
         }
 
         if (observer)
           observer->OnFileDone(name, 0, BlocksNeeded(sourcefile));
       }
     }
-  }
+  });
 
   // Find out how much data we have found
   UpdateVerificationResults();
@@ -1783,26 +1829,19 @@ bool Par2Repairer::VerifyExtraFiles(const std::vector<std::string> &extrafiles, 
 
   if (completefilecount < mainpacket->RecoverableFileCount())
   {
+    // Total size of extra files for mt-progress line
     u64 mttotalextrasize = 0;
     for (size_t i=0; i<extrafiles.size(); ++i)
       mttotalextrasize += DiskFile::GetFileSize(extrafiles[i]);
 
-#ifdef _OPENMP
     ProgressMeter<u64> progress(sout, "Scanning: ", mttotalextrasize, noiselevel, observer);
-#else
-    ProgressMeter<u64> progress(sout, "", mttotalextrasize, nlQuiet, observer);
-#endif
 
-#ifdef _OPENMP
-    const u32 filethreadcount = FileThreads(extrafiles.size());
-#endif
-    #pragma omp parallel for schedule(dynamic) num_threads(filethreadcount)
-    for (int i=0; i< static_cast<int>(extrafiles.size()); ++i)
+    foreach_parallel(extrafiles, FileThreads(extrafiles.size()), [&](const std::string &extrafile)
     {
       if (IsCancelled())
-        continue;
+        return;
 
-      std::string filename = extrafiles[i];
+      std::string filename = extrafile;
 
       // If the filename does not have a .par2 / .PAR2 / .Par2 extension we are interested in it.
       if (!IsPar2Filename(filename))
@@ -1811,8 +1850,10 @@ bool Par2Repairer::VerifyExtraFiles(const std::vector<std::string> &extrafiles, 
 
         // Has this file already been dealt with
         bool b;
-        #pragma omp critical(diskFileMap)
-        b = diskFileMap.Find(filename) == 0;
+        {
+          std::lock_guard<std::mutex> lock(diskFileMapMutex);
+          b = diskFileMap.Find(filename) == 0;
+        }
         if (b)
         {
           DiskFile *diskfile = new DiskFile(sout, serr);
@@ -1821,24 +1862,26 @@ bool Par2Repairer::VerifyExtraFiles(const std::vector<std::string> &extrafiles, 
           if (!diskfile->Open(filename))
           {
             delete diskfile;
-            continue;
+            return;
           }
 
           // Remember that we have processed this file
           bool success;
-          #pragma omp critical(diskFileMap)
-          success = diskFileMap.Insert(diskfile);
+          {
+            std::lock_guard<std::mutex> lock(diskFileMapMutex);
+            success = diskFileMap.Insert(diskfile);
+          }
           assert(success);
 
           // Do the actual verification
-          VerifyDataFile(diskfile, 0, basepath MT_PROGRESS, renameonly);
+          VerifyDataFile(diskfile, 0, basepath, progress, renameonly);
           // Ignore errors
 
           // We have finished with the file for now
           diskfile->Close();
         }
       }
-    }
+    });
   }
   // Find out how much data we have found
   UpdateVerificationResults();
@@ -1861,8 +1904,8 @@ bool Par2Repairer::VerifyDataFile(DiskFile *diskfile, Par2RepairerSourceFile *so
     // Scan the file at the block level.
 
     if (!ScanDataFile(diskfile,   // [in]      The file to scan
-                      basepath
-                      MT_PROGRESS,
+                      basepath,
+                      progress,
                       renameonly, // [in]      Only look for perfect matches
                       sourcefile, // [in/out]  Modified in the match is for another source file
                       matchtype,  // [out]
@@ -1980,8 +2023,7 @@ bool Par2Repairer::VerifyDataFile(DiskFile *diskfile, Par2RepairerSourceFile *so
       {
         if (noiselevel > nlSilent)
         {
-          #pragma omp critical(stdio)
-          sout << diskfile->FileName() << " is a perfect match for " << sourcefile->GetDescriptionPacket()->FileName() << std::endl;
+          LockedStream(sout) << diskfile->FileName() << " is a perfect match for " << sourcefile->GetDescriptionPacket()->FileName() << std::endl;
         }
         // Record that we have a perfect match for this source file
         sourcefile->SetCompleteFile(diskfile);
@@ -2023,7 +2065,9 @@ bool Par2Repairer::ScanDataFileAligned(DiskFile               *diskfile,   // [i
                                        ProgressMeter<u64>     &progress,   // [in]
                                        Par2RepairerSourceFile *sourcefile, // [in]
                                        std::vector<char>      &matched,    // [out]
-                                       u32                    &matchcount) // [out]
+                                       u32                    &matchcount, // [out]
+                                       MD5Hash                &hashfull,   // [out]
+                                       MD5Hash                &hash16k)    // [out]
 {
   matchcount = 0;
 
@@ -2048,106 +2092,262 @@ bool Par2Repairer::ScanDataFileAligned(DiskFile               *diskfile,   // [i
   if (0 == blockcount)
     return false;
 
-#ifdef _OPENMP
-  const u32 workers = std::max(1u, (u32)omp_get_max_threads() / (u32)std::max(1, omp_get_num_threads()));
-#else
-  const u32 workers = 1;
-#endif
-
   // A single thread gains nothing from checking the blocks up front, and a
   // damaged file would then be read a second time by the scan below
-  if (workers < 2)
+  if (!blockpool || blockpool->ThreadCount() < 2
+      || scanbuffers.Count() < 2 || scanbuffers.Size() < blocksize)
     return false;
 
   matched.assign(blockcount, 0);
 
-  // One block for each thread is read at a time, into one of two buffers, so
-  // that the next batch can be read while the current one is being checked
-  const u32 batchblocks = workers;
+  // The files being scanned at once share the pool's threads and the buffers
+  // they read into, so a file left scanning on its own reads as far ahead as
+  // the whole pool can keep up with
+  struct ActiveReader
+  {
+    explicit ActiveReader(std::atomic<u32> &count) : count(count) {++count;}
+    ~ActiveReader(void) {--count;}
+    std::atomic<u32> &count;
+  } active(activereaders);
 
-  std::vector<char> buffer[2];
-  buffer[0].resize((size_t)batchblocks * blocksize);
-  buffer[1].resize((size_t)batchblocks * blocksize);
+  FileHasher filehasher(fullhash);
 
-  bool readfailed = false;
-  bool stopped = false;
+  const size_t slots = scanbuffers.Count();
+  const u32    batchblocks = (u32)(scanbuffers.Size() / blocksize);
+
+  std::unique_ptr<TaskPool::Batch[]> batches(new TaskPool::Batch[slots]);
 
   // The blocks of a batch are next to each other, so they are read in one go.
   // Only the last block of a file can be short, and its entry covers it padded
   // out to the full block size with zeroes
-  auto readbatch = [&](u32 firstblock, std::vector<char> &into)
+  auto readbatch = [&](char *into, const u32 first, const u32 blocks)
   {
-    // Read here rather than in the loop below: a thread reaching it while the
-    // others are still hashing would leave them waiting at the barrier
-    if (IsCancelled())
-    {
-      stopped = true;
-      return;
-    }
+    const u64 offset = static_cast<u64>(first) * blocksize;
+    const size_t span = static_cast<size_t>(blocks) * blocksize;
+    const size_t length = (size_t)std::min(static_cast<u64>(span), filesize - offset);
 
-    const u32 blocks = std::min(firstblock + batchblocks, blockcount) - firstblock;
-    const u64 offset = (u64)firstblock * blocksize;
-    const size_t span = (size_t)blocks * blocksize;
-    const size_t length = (size_t)std::min((u64)span, filesize - offset);
+    if (!diskfile->Read(offset, into, length))
+      return false;
 
-    if (!diskfile->Read(offset, &into[0], length))
-    {
-      readfailed = true;
-      return;
-    }
+    filehasher.Update(offset, into, length);
 
     if (length < span)
       memset(&into[length], 0, span - length);
+
+    return true;
   };
 
-  readbatch(0, buffer[0]);
+  // A verification entry is the 20 bytes a block is expected to hash to, so the
+  // packet is handed to the hasher as it stands
+  static_assert(sizeof(FILEVERIFICATIONENTRY) == 20, "a verification entry is a block hash");
 
-  #pragma omp parallel num_threads(workers)
+  // A hasher belongs to one thread at a time, and the blocks of a batch go to
+  // whichever of the pool's threads and the threads waiting on it take them, so
+  // a block is checked with one taken for it and given back afterwards. There is
+  // one for every thread which could be checking this file at once
+  std::vector<std::unique_ptr<Hasher> > hashers;
+  std::vector<Hasher*>                  idle;
+  std::mutex                            idlemutex;
+
+  for (u32 i = 0; i < blockpool->ThreadCount() + filethreads; ++i)
   {
-    for (u32 firstblock=0; firstblock<blockcount && !readfailed && !stopped; firstblock+=batchblocks)
+    HasherConfig config;
+
+    std::unique_ptr<Hasher> hasher = backends.hasher
+      ? backends.hasher(config)
+      : std::unique_ptr<Hasher>(new ReferenceHasher());
+
+    if (!hasher || !hasher->Init(filesize, (size_t)blocksize, false))
+      return false;
+
+    idle.push_back(hasher.get());
+    hashers.push_back(std::move(hasher));
+  }
+
+  struct Borrowed
+  {
+    Borrowed(std::vector<Hasher*> &idle, std::mutex &mutex)
+    : idle(idle)
+    , mutex(mutex)
     {
-      const u32 lastblock = std::min(firstblock + batchblocks, blockcount);
-      const u32 batch = firstblock / batchblocks;
+      std::lock_guard<std::mutex> lock(mutex);
 
-      std::vector<char> &checking = buffer[batch % 2];
-      std::vector<char> &reading = buffer[(batch + 1) % 2];
+      hasher = idle.back();
+      idle.pop_back();
+    }
 
-      // Reads the next block while this one is being hashed
-      #pragma omp single nowait
+    ~Borrowed(void)
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+
+      idle.push_back(hasher);
+    }
+
+    std::vector<Hasher*> &idle;
+    std::mutex           &mutex;
+    Hasher               *hasher;
+  };
+
+  // One block goes in a submission, because that is how the pool hands them
+  // out. Filling the lanes of a hasher which takes several at once means having
+  // it hand out a range of them instead
+  auto checkblock = [&](const char *from, const u32 first, const u32 block)
+  {
+    const u64 length = std::min(blocksize, filesize - static_cast<u64>(block) * blocksize);
+    const char *data = &from[static_cast<size_t>(block - first) * blocksize];
+
+    char result = 0;
+
+    {
+      Borrowed borrowed(idle, idlemutex);
+
+      borrowed.hasher->CheckBlocks(data, 1, 0, verificationpacket->VerificationEntry(block), &result);
+    }
+
+    if (!result)
+      return;
+
+    matched[block] = 1;
+
+    progress.Add(length);
+  };
+
+  // What each batch which has been given to the pool is checking. The pool
+  // takes its blocks one at a time, alongside the blocks of every other file
+  // being scanned.
+  struct Slot
+  {
+    decltype(&checkblock) check;
+    BufferPool           *buffers;
+    size_t                held;   // the buffer it read into
+    u32                   first;
+
+    void operator()(const size_t block) const
+      {(*check)(buffers->At(held), first, (u32)block);}
+  };
+
+  std::vector<Slot> slot(slots);
+  for (size_t s = 0; s < slots; ++s)
+  {
+    slot[s].check = &checkblock;
+    slot[s].buffers = &scanbuffers;
+  }
+
+  bool readfailed = false;
+  u32  nextblock = 0;
+
+  size_t next = 0;         // the slot the next batch is given
+  size_t oldest = 0;       // the slot of the batch which has been out longest
+  size_t outstanding = 0;
+
+  // Waits for the batch which has been with the pool longest, helping to check
+  // it, and gives back the buffer it was reading from
+  const std::function<void(void)> retire = [&]()
+  {
+    blockpool->Wait(batches[oldest]);
+    scanbuffers.Give(slot[oldest].held);
+
+    oldest = (oldest + 1) % slots;
+    --outstanding;
+  };
+
+  // The pool has to be finished with every batch before the buffers and the
+  // state the batches point at go away, whichever way the scan is left. This
+  // is declared last so that it runs before any of them.
+  struct Drain
+  {
+    const std::function<void(void)> *retire;
+    const size_t                    *outstanding;
+
+    ~Drain(void)
+    {
+      while (*outstanding > 0)
       {
-        if (lastblock < blockcount)
-          readbatch(lastblock, reading);
-      }
-
-      #pragma omp for schedule(dynamic)
-      for (int b=(int)firstblock; b<(int)lastblock; ++b)
-      {
-        const u64 length = std::min(blocksize, filesize - (u64)b * blocksize);
-        const char *at = &checking[(size_t)(b - (int)firstblock) * blocksize];
-        const FILEVERIFICATIONENTRY *entry = verificationpacket->VerificationEntry(b);
-
-        const u32 checksum = ~0 ^ CRCUpdateBlock(~0, (size_t)blocksize, at);
-        if (checksum != entry->crc)
-          continue;
-
-        MD5Context context;
-        context.Update(at, (size_t)blocksize);
-
-        MD5Hash hash;
-        context.Final(hash);
-
-        if (!(hash == entry->hash))
-          continue;
-
-        matched[b] = 1;
-
-          progress.Add(length);
+        try
+        {
+          (*retire)();
+        }
+        catch (...)
+        {
+          // A batch which failed still has to be waited for, and the buffer
+          // it was reading into still has to be given back
+        }
       }
     }
+  } drain{&retire, &outstanding};
+
+  while (nextblock < blockcount)
+  {
+    if (IsCancelled())
+      return false;
+
+    // A file keeps to its share of the buffers while others are being read,
+    // and takes back the oldest of its own rather than waiting on them
+    const size_t share = std::max<size_t>(2, slots / std::max(1u, activereaders.load()));
+
+    size_t buffer = 0;
+
+    for (;;)
+    {
+      // Over its share, this file takes back one of its own before it may
+      // read any further ahead
+      if (outstanding >= share)
+      {
+        retire();
+        continue;
+      }
+
+      if (scanbuffers.TryTake(buffer))
+        break;
+
+      // Every buffer is with another file. Waiting for this file's own oldest
+      // batch keeps it from waiting on the files it is sharing them with,
+      // which it has to do only when it has no batch of its own to take back
+      if (0 == outstanding)
+      {
+        buffer = scanbuffers.Take();
+        break;
+      }
+
+      retire();
+    }
+
+    const u32 blocks = std::min(batchblocks, blockcount - nextblock);
+
+    slot[next].held = buffer;
+    slot[next].first = nextblock;
+
+    // The buffer is the pool's to give back only once the batch reading into
+    // it has been submitted
+    try
+    {
+      if (!readbatch(scanbuffers.At(buffer), nextblock, blocks))
+      {
+        scanbuffers.Give(buffer);
+        readfailed = true;
+        break;
+      }
+
+      blockpool->Submit(batches[next], nextblock, nextblock + blocks, slot[next]);
+    }
+    catch (...)
+    {
+      scanbuffers.Give(buffer);
+      throw;
+    }
+
+    next = (next + 1) % slots;
+    ++outstanding;
+    nextblock += blocks;
   }
+
+  while (outstanding > 0)
+    retire();
 
   if (readfailed)
     return false;
+
+  filehasher.GetHashes(filesize, hashfull, hash16k);
 
   for (u32 b=0; b<blockcount; ++b)
     if (matched[b])
@@ -2199,13 +2399,11 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
     {
       if (originalsourcefile != 0)
       {
-        #pragma omp critical(stdio)
-        sout << "Target: \"" << name << "\" - empty." << std::endl;
+        LockedStream(sout) << "Target: \"" << name << "\" - empty." << std::endl;
       }
       else
       {
-        #pragma omp critical(stdio)
-        sout << "File: \"" << name << "\" - empty." << std::endl;
+        LockedStream(sout) << "File: \"" << name << "\" - empty." << std::endl;
       }
     }
 
@@ -2225,17 +2423,10 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
     shortname = name;
   }
 
-#ifdef _OPENMP
   if (noiselevel > nlQuiet)
   {
-    #pragma omp critical(stdio)
-    sout << "Opening: \"" << shortname << "\"" << std::endl;
+    LockedStream(sout) << "Opening: \"" << shortname << "\"" << std::endl;
   }
-#else
-  std::string message = "Scanning: \"";
-  message.append(shortname).append("\": ");
-  ProgressMeter<u64> fileprogress(sout, message, diskfile->FileSize(), noiselevel);
-#endif
 
   // Assume we will make a perfect match for the file
   matchtype = eFullMatch;
@@ -2257,10 +2448,10 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
   std::vector<char> alignedmatch;
   u32 alignedcount = 0;
   const bool vouched = TakeKnownBlocks(diskfile, sourcefile, alignedmatch, alignedcount);
-  bool aligned = vouched;
-  if (!aligned)
-    aligned = ScanDataFileAligned(diskfile, progress, sourcefile,
-                                  alignedmatch, alignedcount);
+  const bool aligned = vouched
+                       || ScanDataFileAligned(diskfile, progress, sourcefile,
+                                              alignedmatch, alignedcount,
+                                              hashfull, hash16k);
 
   // Being told that none of the blocks are usable is an answer in itself, so
   // the file is not searched after all
@@ -2333,16 +2524,24 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
     searchranges.push_back(std::make_pair((u64)0, filesize));
   }
 
+  // Whichever scan read the whole of the file from its start produced the 16k
+  // hash, and the whole file hash if that was asked for. Vouched blocks are
+  // taken without reading anything
+  bool filehashes = aligned && !vouched;
+
   if (!searchranges.empty())
   {
 
-  // The MD5 hash of the whole file is only needed to match against source
-  // files which have no verification packet, and only when no block at all is
-  // found. That can only happen when the whole of the file is being searched.
-  const bool computefilehashes = !unverifiablesourcefiles.empty()
-                                 && 1 == searchranges.size()
+  const bool wholefilesearched = 1 == searchranges.size()
                                  && 0 == searchranges[0].first
                                  && filesize == searchranges[0].second;
+
+  // The MD5 hash of the whole file is only needed to match against source
+  // files which have no verification packet, and when it was asked for.
+  const bool computefilehashes = ((fullhash && !aligned) || !unverifiablesourcefiles.empty())
+                                 && wholefilesearched;
+
+  filehashes = filehashes || wholefilesearched;
 
   // Create the checksummer for the file
   FileCheckSummer filechecksummer(diskfile, blocksize, windowtable, computefilehashes);
@@ -2386,9 +2585,6 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
     if (printprogress >= blocksize || filechecksummer.ShortBlock())
     {
       progress.Add(printprogress);
-#ifndef _OPENMP
-      fileprogress.Add(printprogress);
-#endif
       printprogress = 0;
     }
     oldoffset = filechecksummer.Offset();
@@ -2540,7 +2736,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
   }
 
   // Get the Full and 16k hash values of the file
-  if (computefilehashes)
+  if (wholefilesearched)
     filechecksummer.GetFileHashes(hashfull, hash16k);
 
   }
@@ -2558,14 +2754,18 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
   // Did we make any matches at all
   if (count > 0)
   {
-    // If this still might be a perfect match, check the file size and
-    // number of blocks to confirm. The file hashes need not be checked:
-    // a full match means every block of the file was matched, in order,
-    // starting at offset 0, and each of those matches required the MD5
-    // hash of the block to be verified.
+    // If this still might be a perfect match, check the file size and number
+    // of blocks to confirm. A full match verifies the file against the
+    // verification packet, and the description packet's hashes are a
+    // separate claim, so the 16k hash is checked as well, and the hash of
+    // the whole file when that was asked for.
     if (matchtype            != eFullMatch ||
         count                != sourcefile->GetVerificationPacket()->BlockCount() ||
-        diskfile->FileSize() != sourcefile->GetDescriptionPacket()->FileSize())
+        diskfile->FileSize() != sourcefile->GetDescriptionPacket()->FileSize() ||
+        (filehashes &&
+         (hash16k != sourcefile->GetDescriptionPacket()->Hash16k() ||
+          (fullhash &&
+           hashfull != sourcefile->GetDescriptionPacket()->HashFull()))))
     {
       matchtype = ePartialMatch;
 
@@ -2577,8 +2777,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
           // Were we scanning the target file or an extra file
           if (originalsourcefile != 0)
           {
-            #pragma omp critical(stdio)
-            sout << "Target: \""
+            LockedStream(sout) << "Target: \""
               << name
               << "\" - damaged, found "
               << count
@@ -2587,8 +2786,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
           }
           else
           {
-            #pragma omp critical(stdio)
-            sout << "File: \""
+            LockedStream(sout) << "File: \""
               << name
               << "\" - found "
               << count
@@ -2601,8 +2799,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
           // Did we find data blocks that belong to the target file
           if (originalsourcefile == sourcefile)
           {
-            #pragma omp critical(stdio)
-            sout << "Target: \""
+            LockedStream(sout) << "Target: \""
               << name
               << "\" - damaged. Found "
               << count
@@ -2617,8 +2814,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
             std::string targetname;
             DiskFile::SplitRelativeFilename(sourcefile->TargetFileName(), basepath, targetname);
 
-            #pragma omp critical(stdio)
-            sout << "Target: \""
+            LockedStream(sout) << "Target: \""
               << name
               << "\" - damaged. Found "
               << count
@@ -2634,8 +2830,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
             std::string targetname;
             DiskFile::SplitRelativeFilename(sourcefile->TargetFileName(), basepath, targetname);
 
-            #pragma omp critical(stdio)
-            sout << "File: \""
+            LockedStream(sout) << "File: \""
               << name
               << "\" - found "
               << count
@@ -2650,8 +2845,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
 
         if (skippeddata > 0)
         {
-          #pragma omp critical(stdio)
-          sout << skippeddata << " bytes of data were skipped whilst scanning.\n"
+          LockedStream(sout) << skippeddata << " bytes of data were skipped whilst scanning.\n"
             "If there are not enough blocks found to repair: try again "
             "with the -N option." << std::endl;
         }
@@ -2664,8 +2858,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
         // Did we match the target file
         if (originalsourcefile == sourcefile)
         {
-          #pragma omp critical(stdio)
-          sout << "Target: \"" << name << "\" - found." << std::endl;
+          LockedStream(sout) << "Target: \"" << name << "\" - found." << std::endl;
         }
         // Were we scanning the target file or an extra file
         else if (originalsourcefile != 0)
@@ -2673,8 +2866,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
           std::string targetname;
           DiskFile::SplitRelativeFilename(sourcefile->TargetFileName(), basepath, targetname);
 
-          #pragma omp critical(stdio)
-          sout << "Target: \""
+          LockedStream(sout) << "Target: \""
             << name
             << "\" - is a match for \""
             << targetname
@@ -2686,8 +2878,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
           std::string targetname;
           DiskFile::SplitRelativeFilename(sourcefile->TargetFileName(), basepath, targetname);
 
-          #pragma omp critical(stdio)
-          sout << "File: \""
+          LockedStream(sout) << "File: \""
             << name
             << "\" - is a match for \""
             << targetname
@@ -2707,8 +2898,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
       // had already found in other files.
       if (duplicatecount > 0)
       {
-        #pragma omp critical(stdio)
-        sout << "File: \""
+        LockedStream(sout) << "File: \""
           << name
           << "\" - found "
           << duplicatecount
@@ -2717,8 +2907,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
       }
       else
       {
-        #pragma omp critical(stdio)
-        sout << "File: \""
+        LockedStream(sout) << "File: \""
           << name
           << "\" - no data found."
           << std::endl;
@@ -2726,8 +2915,7 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
 
       if (skippeddata > 0)
       {
-        #pragma omp critical(stdio)
-        sout << skippeddata << " bytes of data were skipped whilst scanning.\n"
+        LockedStream(sout) << skippeddata << " bytes of data were skipped whilst scanning.\n"
           "If there are not enough blocks found to repair: try again "
           "with the -N option." << std::endl;
       }
@@ -3091,6 +3279,9 @@ bool Par2Repairer::ComputeRSmatrix(void)
   // Start iterating through the available recovery packets
   std::map<u32,RecoveryPacket*>::iterator rp = recoverypacketmap.begin();
 
+  // The exponents of those recovery blocks, kept for the processor
+  std::vector<u16> exponents;
+
   // Continue to fill the remaining list of data blocks to be read
   while (inputblock != inputblocks.end())
   {
@@ -3113,6 +3304,8 @@ bool Par2Repairer::ComputeRSmatrix(void)
     if (!rs.SetOutput(true, (u16)exponent))
       return false;
 
+    exponents.push_back((u16)exponent);
+
     ++inputblock;
     ++rp;
   }
@@ -3121,9 +3314,52 @@ bool Par2Repairer::ComputeRSmatrix(void)
   if (missingblockcount == 0)
     return true;
 
+  // Offer the erasure pattern, so that an implementation able to solve it for
+  // itself is not made to wait for the matrix to be inverted only to read
+  // columns out of it
+  ownfactors = processor->SetErasures(present, exponents.data(), (u32)exponents.size());
+
+  if (ownfactors)
+    return true;
+
   bool success = rs.Compute(noiselevel, sout, serr);
 
   return success;
+}
+
+// The files being read take the buffers they read into from these, which
+// between them hold two batches for each of the filecount files which may be
+// read at once. A batch is a whole number of blocks, at least one, and no more
+// than MAX_CHUNK_SIZE unless a single block is already larger than that.
+void Par2Repairer::ResetScanBuffers(const size_t filecount)
+{
+  // The blocks of a file are only checked where they are expected to be when
+  // there are verification packets to check them against and more than one
+  // thread to do it with, so otherwise nothing would ever be read into them
+  if (!blockverifiable || totalthreads < 2)
+  {
+    scanbuffers.Reset(0, 0);
+    return;
+  }
+
+  // Every file being read shares these threads to check its blocks with
+  if (!blockpool)
+    blockpool.reset(new TaskPool(totalthreads));
+
+  if (blockpool->ThreadCount() < 2)
+  {
+    scanbuffers.Reset(0, 0);
+    return;
+  }
+
+  const u32 readers = FileThreads(filecount);
+
+  const size_t batchsize = (size_t)std::max(1u, totalthreads / readers) * (size_t)blocksize;
+  const size_t maxbatchsize = MAX_CHUNK_SIZE != 0
+    ? std::max((size_t)blocksize, (size_t)MAX_CHUNK_SIZE)
+    : batchsize;
+
+  scanbuffers.Reset(2 * readers, std::min(batchsize, maxbatchsize));
 }
 
 // Allocate memory buffers for reading and writing data to disk.
@@ -3140,17 +3376,31 @@ bool Par2Repairer::AllocateBuffers(size_t memorylimit)
     chunksize = (size_t)blocksize;
   }
 
-  // Allocate the two buffers
-  inputbuffer = new u8[(size_t)chunksize];
-  outputbuffer = new u8[(size_t)chunksize * missingblockcount];
-
   if (MAX_CHUNK_SIZE != 0 && chunksize > MAX_CHUNK_SIZE)
     chunksize = MAX_CHUNK_SIZE;
+
+  // Allocate the two buffers
+  transferbuffer = new u8[(size_t)chunksize * NUM_TRANSFER_BUFFERS];
+  outputbuffer = new u8[(size_t)chunksize];
+
+  ProcessorConfig config;
+  config.numthreads = totalthreads;
+  config.memorylimit = memorylimit;
+
+  processor = backends.processor
+    ? backends.processor(config)
+    : std::unique_ptr<Processor>(new ReferenceProcessor(rs, totalthreads));
+
+  if (!processor || !processor->Init((size_t)chunksize, missingblockcount))
+  {
+    serr << "Could not allocate buffer memory." << std::endl;
+    return false;
+  }
 
   if (noiselevel >= nlDebug)
     sout << "[DEBUG] Process chunk size: " << chunksize << std::endl;
 
-  if (inputbuffer == NULL || outputbuffer == NULL)
+  if (transferbuffer == NULL || outputbuffer == NULL)
   {
     serr << "Could not allocate buffer memory." << std::endl;
     return false;
@@ -3164,9 +3414,6 @@ bool Par2Repairer::ProcessData(u64 blockoffset, size_t blocklength, ProgressMete
 {
   u64 totalwritten = 0;
 
-  // Clear the output buffer
-  memset(outputbuffer, 0, (size_t)chunksize * missingblockcount);
-
   std::vector<DataBlock*>::iterator inputblock = inputblocks.begin();
   std::vector<DataBlock*>::iterator copyblock  = copyblocks.begin();
   u32                          inputindex = 0;
@@ -3176,6 +3423,22 @@ bool Par2Repairer::ProcessData(u64 blockoffset, size_t blocklength, ProgressMete
   // Are there any blocks which need to be reconstructed
   if (missingblockcount > 0)
   {
+    processor->SetSliceSize(blocklength);
+    processor->DiscardOutput();
+
+    // The matrix column for one input block, unused when the processor has its own
+    std::vector<u16> factors(ownfactors ? 0 : missingblockcount);
+
+    // Every buffer starts free
+    std::future<void> bufferfree[NUM_TRANSFER_BUFFERS];
+    for (u32 buffer=0; buffer<NUM_TRANSFER_BUFFERS; buffer++)
+    {
+      std::promise<void> free;
+      free.set_value();
+      bufferfree[buffer] = free.get_future();
+    }
+    u32 bufferindex = 0;
+
     // For each input block
     while (inputblock != inputblocks.end())
     {
@@ -3199,6 +3462,10 @@ bool Par2Repairer::ProcessData(u64 blockoffset, size_t blocklength, ProgressMete
         }
       }
 
+      // Wait for the next input buffer to come free
+      void *inputbuffer = &((u8*)transferbuffer)[(size_t)chunksize * bufferindex];
+      bufferfree[bufferindex].get();
+
       // Read data from the current input block
       if (!(*inputblock)->ReadData(blockoffset, blocklength, inputbuffer))
         return false;
@@ -3220,23 +3487,25 @@ bool Par2Repairer::ProcessData(u64 blockoffset, size_t blocklength, ProgressMete
         ++copyblock;
       }
 
-      // For each output block
-      #pragma omp parallel for
-      for (i64 outputindex=0; outputindex<missingblockcount; outputindex++)
+      // Look up the matrix column and process the data against every output block
+      if (!ownfactors)
       {
-        u32 internalOutputindex = (u32) outputindex;
-        // Select the appropriate part of the output buffer
-        void *outbuf = &((u8*)outputbuffer)[chunksize * internalOutputindex];
-
-        // Process the data
-        rs.Process(blocklength, inputindex, inputbuffer, internalOutputindex, outbuf);
-
-          progress.Add(blocklength);
+        for (u32 outputindex=0; outputindex<missingblockcount; outputindex++)
+          factors[outputindex] = rs.GetFactor(inputindex, outputindex);
       }
+
+      processor->WaitForAdd();
+      bufferfree[bufferindex] = processor->AddInput(inputbuffer, blocklength, inputindex,
+                                                    ownfactors ? NULL : factors.data());
+      bufferindex = (bufferindex + 1) % NUM_TRANSFER_BUFFERS;
+
+      progress.Add(blocklength);
 
       ++inputblock;
       ++inputindex;
     }
+
+    processor->EndInput();
   }
   else
   {
@@ -3269,11 +3538,11 @@ bool Par2Repairer::ProcessData(u64 blockoffset, size_t blocklength, ProgressMete
         }
 
         // Read data from the current input block
-        if (!(*inputblock)->ReadData(blockoffset, blocklength, inputbuffer))
+        if (!(*inputblock)->ReadData(blockoffset, blocklength, transferbuffer))
           return false;
 
         size_t wrote;
-        if (!(*copyblock)->WriteData(blockoffset, blocklength, inputbuffer, wrote))
+        if (!(*copyblock)->WriteData(blockoffset, blocklength, transferbuffer, wrote))
           return false;
         totalwritten += wrote;
       }
@@ -3298,8 +3567,14 @@ bool Par2Repairer::ProcessData(u64 blockoffset, size_t blocklength, ProgressMete
   std::vector<DataBlock*>::iterator outputblock = outputblocks.begin();
   for (u32 outputindex=0; outputindex<missingblockcount;outputindex++)
   {
-    // Select the appropriate part of the output buffer
-    char *outbuf = &((char*)outputbuffer)[chunksize * outputindex];
+    // Take the accumulated output block from the processor
+    const void *outbuf = processor->PeekOutput(outputindex);
+    if (outbuf == NULL)
+    {
+      if (!processor->GetOutput(outputindex, outputbuffer))
+        return false;
+      outbuf = outputbuffer;
+    }
 
     // Write the data to the target file
     size_t wrote;
@@ -3319,7 +3594,7 @@ bool Par2Repairer::ProcessData(u64 blockoffset, size_t blocklength, ProgressMete
 // Verify that all of the reconstructed target files are now correct
 bool Par2Repairer::VerifyTargetFiles(const std::string &basepath)
 {
-  bool finalresult = true;
+  std::atomic<bool> finalresult(true);
 
   // Verify the target files in alphabetical order
   std::sort(verifylist.begin(), verifylist.end(), SortSourceFilesByFileName);
@@ -3331,23 +3606,14 @@ bool Par2Repairer::VerifyTargetFiles(const std::string &basepath)
     if (verifylist[i])
       mttotalsize += verifylist[i]->GetDescriptionPacket()->FileSize();
   }
-#ifdef _OPENMP
   ProgressMeter<u64> progress(sout, "Scanning: ", mttotalsize, noiselevel, observer);
-#else
-  ProgressMeter<u64> progress(sout, "", mttotalsize, nlQuiet, observer);
-#endif
 
   // Iterate through each file in the verification list
-#ifdef _OPENMP
-  const u32 filethreadcount = FileThreads(verifylist.size());
-#endif
-  #pragma omp parallel for schedule(dynamic) num_threads(filethreadcount)
-  for (int i=0; i< static_cast<int>(verifylist.size()); ++i)
+  foreach_parallel(verifylist, FileThreads(verifylist.size()), [&](Par2RepairerSourceFile *sourcefile)
   {
     if (IsCancelled())
-      continue;
+      return;
 
-    Par2RepairerSourceFile *sourcefile = verifylist[i];
     DiskFile *targetfile = sourcefile->GetTargetFile();
 
     // Close the file
@@ -3369,16 +3635,16 @@ bool Par2Repairer::VerifyTargetFiles(const std::string &basepath)
     if (!targetfile->Open())
     {
       finalresult = false;
-      continue;
+      return;
     }
 
     // Verify the file again
-    if (!VerifyDataFile(targetfile, sourcefile, basepath MT_PROGRESS))
+    if (!VerifyDataFile(targetfile, sourcefile, basepath, progress))
       finalresult = false;
 
     // Close the file again
     targetfile->Close();
-  }
+  });
 
   // Find out how much data we have found
   UpdateVerificationResults();
@@ -3483,4 +3749,4 @@ bool Par2Repairer::RemoveParFiles(void)
   return true;
 }
 
-} // namespace Par2
+} // namespace par2

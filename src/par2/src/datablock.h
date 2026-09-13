@@ -20,7 +20,7 @@
 #ifndef __DATABLOCK_H__
 #define __DATABLOCK_H__
 
-namespace Par2
+namespace par2
 {
 
 class DiskFile;
@@ -157,6 +157,6 @@ inline u64 DataBlock::GetLength(void) const
   return length;
 }
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __DATABLOCK_H__

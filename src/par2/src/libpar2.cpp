@@ -19,7 +19,7 @@
 
 #include "libpar2internal.h"
 
-namespace Par2
+namespace par2
 {
 
 // The command line falls back to this when -m is not given
@@ -202,7 +202,7 @@ void Par2Verifier::Restart(void)
   impl->SetObserver(observer);
   impl->SetDataSkipping(skipdata, skipleaway);
 
-  for (std::map<std::string, std::vector<char> >::const_iterator kb = knownblocks.begin();
+  for (std::map<std::string, std::vector<bool> >::const_iterator kb = knownblocks.begin();
        kb != knownblocks.end();
        ++kb)
   {
@@ -326,6 +326,12 @@ bool Par2Verifier::GetFileInfo(std::vector<Par2FileInfo> *files) const
   return impl->GetFileInfo(files);
 }
 
+bool Par2Verifier::GetBlockChecksums(const std::string &filename,
+                                    std::vector<u32> *crcs) const
+{
+  return impl->GetBlockChecksums(filename, crcs);
+}
+
 bool Par2Verifier::GetBackupFiles(std::vector<std::string> *files) const
 {
   return impl->GetBackupFiles(files);
@@ -345,7 +351,7 @@ bool Par2Verifier::GetVerifyResult(Par2VerifyResult *result) const
 }
 
 void Par2Verifier::SetKnownBlocks(const std::string &filename,
-                                 const std::vector<char> &blocks)
+                                 const std::vector<bool> &blocks)
 {
   if (blocks.empty())
     knownblocks.erase(filename);
@@ -422,22 +428,16 @@ Result par2create(std::ostream &sout,
 		  const u32 firstblock,
 		  const Scheme recoveryfilescheme,
 		  const u32 recoveryfilecount,
-		  const u32 recoveryblockcount
+		  const u32 recoveryblockcount,
+		  const Backends &backends
 		  )
 {
-#ifndef _OPENMP
-  (void)nthreads;
-  (void)filethreads;
-#endif
-
-  Par2Creator creator(sout, serr, noiselevel);
+  Par2Creator creator(sout, serr, noiselevel, backends);
   Result result = creator.Process(
 				  memorylimit,
 				  basepath,
-#ifdef _OPENMP
 				  nthreads,
 				  filethreads,
-#endif
 				  parfilename,
 				  extrafiles,
 				  blocksize,
@@ -463,29 +463,25 @@ Result par2repair(std::ostream &sout,
 		  const bool purgefiles,
 		  const bool renameonly,
 		  const bool skipdata,
-		  const u64 skipleaway
+		  const u64 skipleaway,
+		  const bool fullhash,
+		  const Backends &backends
 		  )
 {
-#ifndef _OPENMP
-  (void)nthreads;
-  (void)filethreads;
-#endif
-
-  Par2Repairer repairer(sout, serr, noiselevel);
+  Par2Repairer repairer(sout, serr, noiselevel, backends);
   Result result = repairer.Process(
 				   memorylimit,
 				   basepath,
-#ifdef _OPENMP
 				   nthreads,
 				   filethreads,
-#endif
 				   parfilename,
 				   extrafiles,
 				   dorepair,
 				   purgefiles,
 				   renameonly,
 				   skipdata,
-				   skipleaway);
+				   skipleaway,
+				   fullhash);
 
   return result;
 }
@@ -506,15 +502,9 @@ Result par1repair(std::ostream &sout,
 		  // skipleaway is not used by Par1
 		  )
 {
-#ifndef _OPENMP
-  (void)nthreads;
-#endif
-
   Par1Repairer repairer(sout, serr, noiselevel);
   Result result = repairer.Process(memorylimit,
-#ifdef _OPENMP
 				   nthreads,
-#endif
 				   parfilename,
 				   extrafiles,
 				   dorepair,
@@ -598,4 +588,4 @@ bool ComputeRecoveryFileCount(std::ostream &sout,
   return true;
 }
 
-} // namespace Par2
+} // namespace par2

@@ -21,7 +21,7 @@
 #ifndef __VERIFICATIONPACKET_H__
 #define __VERIFICATIONPACKET_H__
 
-namespace Par2
+namespace par2
 {
 
 // The file verification packet stores details that allow individual blocks
@@ -85,6 +85,6 @@ inline const FILEVERIFICATIONENTRY* VerificationPacket::VerificationEntry(u32 bl
 }
 
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __VERIFICATIONPACKET_H__

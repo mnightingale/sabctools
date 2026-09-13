@@ -20,7 +20,7 @@
 
 #include "libpar2internal.h"
 
-namespace Par2
+namespace par2
 {
 
 #ifdef _MSC_VER
@@ -119,10 +119,8 @@ Par1Repairer::~Par1Repairer(void)
 
 Result Par1Repairer::Process(const size_t memorylimit,
 			     // basepath is not used by Par1
-#ifdef _OPENMP
 			     const u32 nthreads,
 			     // filethreads is not used by Par1
-#endif
 			     std::string parfilename,
 			     const std::vector<std::string> &extrafiles,
 			     const bool dorepair,   // derived from operation
@@ -131,12 +129,6 @@ Result Par1Repairer::Process(const size_t memorylimit,
 			     // skipleaway is not used by Par1
 			     )
 {
-#ifdef _OPENMP
-  // Set the number of threads
-  if (nthreads != 0)
-    omp_set_num_threads(nthreads);
-#endif
-
   // Determine the searchpath from the location of the main PAR file
   std::string name;
   DiskFile::SplitFilename(parfilename, searchpath, name);
@@ -1483,4 +1475,4 @@ bool Par1Repairer::RemoveParFiles(void)
   return true;
 }
 
-} // namespace Par2
+} // namespace par2

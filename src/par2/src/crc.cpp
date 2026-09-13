@@ -20,7 +20,7 @@
 
 #include "libpar2internal.h"
 
-namespace Par2
+namespace par2
 {
 
 #ifdef _MSC_VER
@@ -124,4 +124,4 @@ u32 CRCUpdateBlock(u32 crc, u64 length)
   return GF32Multiply(crc, CRCExp8(length), ccitttable.polynom);
 }
 
-} // namespace Par2
+} // namespace par2

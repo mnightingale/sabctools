@@ -21,7 +21,7 @@
 #ifndef __DESCRIPTIONPACKET_H__
 #define __DESCRIPTIONPACKET_H__
 
-namespace Par2
+namespace par2
 {
 
 // The description packet records details about a file (including its name,
@@ -116,6 +116,6 @@ inline const MD5Hash& DescriptionPacket::Hash16k(void) const
   return ((const FILEDESCRIPTIONPACKET*)packetdata)->hash16k;
 }
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __DESCRIPTIONPACKET_H__

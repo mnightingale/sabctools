@@ -23,28 +23,28 @@
 
 #include <atomic>
 
-namespace Par2
+namespace par2
 {
 
 class Par2Repairer
 {
 public:
-  Par2Repairer(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel);
+  Par2Repairer(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel,
+               const Backends &backends = Backends());
   ~Par2Repairer(void);
 
   Result Process(const size_t memorylimit,
 		 const std::string &basepath,
-#ifdef _OPENMP
 		 const u32 nthreads,
 		 const u32 filethreads,
-#endif
 		 std::string parfilename,
 		 const std::vector<std::string> &extrafiles,
 		 const bool dorepair,   // derived from operation
 		 const bool purgefiles,
 		 const bool renameonly,
 		 const bool skipdata,
-		 const u64 skipleaway
+		 const u64 skipleaway,
+		 const bool fullhash
 		 );
 
   // Ask the operation in progress to stop as soon as it can, from any thread.
@@ -62,6 +62,12 @@ public:
   // been loaded and prepared.
   bool GetFileInfo(std::vector<Par2FileInfo> *files) const;
 
+  // The CRC32 the set records for each block of the named file, one entry per
+  // block starting at block 0. False when the set does not describe that file,
+  // or describes it without a verification packet.
+  bool GetBlockChecksums(const std::string &filename,
+                         std::vector<u32> *crcs) const;
+
   // The numbers behind the last verification
   bool GetVerifyResult(Par2VerifyResult *result) const;
 
@@ -75,8 +81,8 @@ public:
 
   // Accept the caller's word that these blocks of the named file are intact,
   // so that they are not read and hashed again. The name is the one reported
-  // by GetFileInfo and blocks must have one entry per block of that file, a
-  // non-zero value meaning the block is present at its expected offset.
+  // by GetFileInfo and blocks must have one entry per block of that file, set
+  // where the block is present at its expected offset.
   //
   // An entry set for every block means the file is intact and it is never
   // read. None set means it holds nothing usable, and it is not read either.
@@ -84,7 +90,7 @@ public:
   //
   // The blocks are trusted without being verified. Supplying a block which is
   // not intact will silently produce incorrect output.
-  void SetKnownBlocks(const std::string &filename, const std::vector<char> &blocks);
+  void SetKnownBlocks(const std::string &filename, const std::vector<bool> &blocks);
 
 protected:
   // Steps in verifying and repairing files:
@@ -182,7 +188,9 @@ protected:
                            ProgressMeter<u64>     &progress,    // [in]
                            Par2RepairerSourceFile *sourcefile,  // [in]     The file it should match
                            std::vector<char>      &matched,     // [out]    One entry per block
-                           u32                    &matchcount); // [out]
+                           u32                    &matchcount,  // [out]
+                           MD5Hash                &hashfull,    // [out]    Only set when the whole hash is wanted
+                           MD5Hash                &hash16k);    // [out]
 
   // Perform a sliding window scan of the DiskFile looking for blocks of data that
   // might belong to any of the source files (for which a verification packet was
@@ -233,16 +241,21 @@ protected:
   bool RemoveBackupFiles(void);
   bool RemoveParFiles(void);
 
-#ifdef _OPENMP
+  // Make the buffers the files being scanned read into, or give them up when
+  // no file will have its blocks checked where they are expected to be
+  void ResetScanBuffers(const size_t filecount);
+
+  // The number of files to read at once, which is what limits how many are
+  // open at a time rather than how much of the work they get
   u32                                 FileThreads(size_t filecount) const
     {return (u32)std::max<size_t>(1, std::min<size_t>(filethreads, filecount));}
-#endif
 
 protected:
   std::ostream &sout; // stream for output (for commandline, this is cout)
   std::ostream &serr; // stream for errors (for commandline, this is cerr)
 
   const NoiseLevel noiselevel;              // OnScreen display
+  const Backends backends;                  // The implementations the application supplied
 
   Par2Observer *observer;                   // Notified of progress, or 0
 
@@ -251,18 +264,24 @@ protected:
   u32                       packetsloaded;           // Useable packets read so far
 
   // Blocks the caller has vouched for, keyed by the name the set records
-  std::map<std::string, std::vector<char> > knownblocks;
+  std::map<std::string, std::vector<bool> > knownblocks;
 
   std::string               searchpath;              // Where to find files on disk
 
   std::string               basepath;
 
-#ifdef _OPENMP
-  u32 filethreads;             // Number of threads for file processing
-#endif
+  u32 totalthreads;            // Number of threads the whole repair may use
+  u32 filethreads;             // Number of files to read at once
+
+  // The threads which check the blocks of every file being read, the buffers
+  // those files read into, and how many files are being read at the moment
+  std::unique_ptr<TaskPool> blockpool;
+  BufferPool                scanbuffers;
+  std::atomic<u32>          activereaders;
 
   bool                      skipdata;                // Should we skip data whilst scanning
   u64                       skipleaway;              // The leaway +/- we should allow whilst scanning
+  bool                      fullhash;                // Should the whole of each file be hashed too
 
   bool                      firstpacket;             // Whether or not a valid packet has been found.
   MD5Hash                   setid;                   // The SetId extracted from the first packet.
@@ -273,6 +292,8 @@ protected:
   CreatorPacket            *creatorpacket;           // One copy of the creator packet.
 
   DiskFileMap               diskFileMap;
+  std::mutex                diskFileMapMutex;        // Guards diskFileMap while files are verified in parallel.
+  std::mutex                extraFilesMutex;         // Guards the caller's list of extra files.
 
   std::map<MD5Hash,Par2RepairerSourceFile*> sourcefilemap;// Map from FileId to SourceFile
   std::vector<Par2RepairerSourceFile*>      sourcefiles;  // The source files
@@ -310,10 +331,12 @@ protected:
 
   ReedSolomon<Galois16>     rs;                      // The Reed Solomon matrix.
 
-  void                     *inputbuffer;             // Buffer for reading DataBlocks (chunksize)
-  void                     *outputbuffer;            // Buffer for writing DataBlocks (chunksize * missingblockcount)
+  void                     *transferbuffer;          // Input blocks in flight (chunksize * NUM_TRANSFER_BUFFERS)
+  void                     *outputbuffer;            // Buffer for writing DataBlocks (chunksize)
+  std::unique_ptr<Processor> processor;              // Multiplies the input blocks by the RS matrix
+  bool                      ownfactors;              // Whether the processor solved the erasure itself
 };
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __PAR2REPAIRER_H__

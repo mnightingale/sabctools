@@ -2,14 +2,15 @@
 
 | | |
 |---|---|
-| Upstream | https://github.com/mnightingale/par2cmdline.git |
-| Ref | `f141857fdf59372449f5419ea3cafef5be7d310a` |
-| Commit | `f141857fdf59372449f5419ea3cafef5be7d310a` |
-| Vendored | 2026-08-31 |
+| Upstream | https://github.com/Parchive/par2cmdline.git |
+| Ref | `5947c384f09c467acc16b3f9c711d0701ccaa574` |
+| Commit | `5947c384f09c467acc16b3f9c711d0701ccaa574` |
+| Vendored | 2026-09-13 |
 
-This is a fork of [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) carrying
-a stack of `libpar2/*` topic branches that make par2 usable as a library, being prepared
-for upstream. The pinned commit is the tip of that stack.
+This is [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) itself, on the
+`libpar2/*` topic branches that make par2 usable as a library. The pinned commit is the
+tip of that stack, currently `libpar2/block-checksums`; it is a topic branch rather than
+master, so it is rebased and the pin names a commit rather than the branch.
 
 ## Why this rather than par2cmdline-turbo
 

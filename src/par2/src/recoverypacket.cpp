@@ -20,7 +20,7 @@
 
 #include "libpar2internal.h"
 
-namespace Par2
+namespace par2
 {
 
 #ifdef _MSC_VER
@@ -132,4 +132,4 @@ bool RecoveryPacket::Load(DiskFile      *_diskfile,
   return diskfile->Read(offset + sizeof(packet.header), &packet.exponent, sizeof(packet)-sizeof(packet.header));
 }
 
-} // namespace Par2
+} // namespace par2

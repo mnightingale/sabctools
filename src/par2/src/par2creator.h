@@ -21,7 +21,7 @@
 #ifndef __PAR2CREATOR_H__
 #define __PAR2CREATOR_H__
 
-namespace Par2
+namespace par2
 {
 
 class MainPacket;
@@ -32,16 +32,15 @@ class CriticalPacket;
 class Par2Creator
 {
 public:
-  Par2Creator(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel);
+  Par2Creator(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel,
+              const Backends &backends = Backends());
   ~Par2Creator(void);
 
   // Create recovery files from the source files specified on the command line
   Result Process(const size_t memorylimit,
 		 const std::string &basepath,
-#ifdef _OPENMP
 		 const u32 nthreads,
 		 const u32 filethreads,
-#endif
 		 const std::string &parfilename,
 		 const std::vector<std::string> &extrafiles,
 		 const u64 blocksize,
@@ -81,7 +80,7 @@ protected:
   bool InitialiseOutputFiles(const std::string &par2filename);
 
   // Allocate memory buffers for reading and writing data to disk.
-  bool AllocateBuffers(void);
+  bool AllocateBuffers(size_t memorylimit);
 
   // Compute the Reed Solomon matrix
   bool ComputeRSMatrix(void);
@@ -104,22 +103,25 @@ protected:
   // Close all files.
   bool CloseFiles(void);
 
+  u32                                 GetFileThreads(void) const {return filethreads;}
+
 protected:
   std::ostream &sout; // stream for output (for commandline, this is cout)
   std::ostream &serr; // stream for errors (for commandline, this is cerr)
 
   const NoiseLevel noiselevel; // How noisy we should be
+  const Backends backends;     // The implementations the application supplied
 
-#ifdef _OPENMP
+  u32 totalthreads;            // Number of threads the whole create may use
   u32 filethreads;             // Number of threads for file processing
-#endif
 
   u64 blocksize;      // The size of each block.
   size_t chunksize;   // How much of each block will be processed at a
                       // time (due to memory constraints).
 
-  void *inputbuffer;  // chunksize
-  void *outputbuffer; // chunksize * recoveryblockcount
+  void *transferbuffer; // chunksize * NUM_TRANSFER_BUFFERS
+  void *outputbuffer; // chunksize
+  std::unique_ptr<Processor> processor; // Multiplies the input blocks by the RS matrix
 
   u32 sourcefilecount;   // Number of source files for which recovery data will be computed.
   u32 sourceblockcount;  // Total number of data blocks that the source files will be
@@ -142,6 +144,8 @@ protected:
   std::vector<Par2CreatorSourceFile*> sourcefiles;  // Array containing details of the source files
                                                // as well as the file verification and file
                                                // description packets for them.
+  std::mutex                      sourcefilesMutex; // Guards sourcefiles and criticalpackets while
+                                                    // the source files are opened in parallel.
 
   std::vector<DataBlock>          sourceblocks;     // Array with one entry for every source block.
 
@@ -160,6 +164,6 @@ protected:
                              // the recovery data is computed.
 };
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __PAR2CREATOR_H__

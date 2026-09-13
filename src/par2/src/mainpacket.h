@@ -21,7 +21,7 @@
 #ifndef __MAINPACKET_H__
 #define __MAINPACKET_H__
 
-namespace Par2
+namespace par2
 {
 
 // The main packet ties all other critical packets together.
@@ -111,6 +111,6 @@ inline const MD5Hash& MainPacket::SetId(void) const
 }
 
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __MAINPACKET_H__

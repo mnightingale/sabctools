@@ -20,7 +20,7 @@
 
 #include "libpar2internal.h"
 
-namespace Par2
+namespace par2
 {
 
 #ifdef _MSC_VER
@@ -385,4 +385,4 @@ std::string DescriptionPacket::TranslateFilenameFromPar2ToLocal(std::ostream &so
   return local_filename;
 }
 
-} // namespace Par2
+} // namespace par2

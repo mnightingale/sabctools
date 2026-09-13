@@ -44,7 +44,7 @@
 #include <par2/libpar2.h>
 #include "diskfile.h"
 
-namespace Par2
+namespace par2
 {
 
 // The CommandLine object is responsible for understanding the format
@@ -102,6 +102,7 @@ public:
   bool                                GetFollowLinks(void) const {return followlinks;}
   bool                                GetSkipData(void) const    {return skipdata;}
   u64                                 GetSkipLeaway(void) const  {return skipleaway;}
+  bool                                GetFullHash(void) const    {return fullhash;}
   u32                                 GetNumThreads(void) {return nthreads;}
   u32                                 GetFileThreads(void) {return filethreads;}
 
@@ -149,8 +150,6 @@ protected:
   std::string basepath;             // the path par2 is run from
   u32 nthreads;         // Default number of threads
   u32 filethreads;      // Number of threads for file processing
-  // NOTE: using the "-t" option to set the number of threads does not
-  // end up here, but results in a direct call to "omp_set_num_threads"
 
   std::string parfilename;          // The name of the PAR2 file to create, or
                                // the name of the first PAR2 file to read
@@ -181,6 +180,8 @@ protected:
                                // skip data that is too far away.
   u64 skipleaway;              // The maximum leaway +/- that we will
                                // allow when searching for blocks.
+  bool fullhash;               // Whether to check the hash of the whole of each
+                               // file as well as the hash of each of its blocks
 
 
   // options for creating par files
@@ -210,6 +211,6 @@ protected:
 
 };
 
-} // namespace Par2
+} // namespace par2
 
 #endif // __COMMANDLINE_H__
