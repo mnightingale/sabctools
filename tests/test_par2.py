@@ -19,6 +19,7 @@ import hashlib
 import os
 import shutil
 import threading
+import zlib
 
 import pytest
 
@@ -98,6 +99,42 @@ class TestPar2Load:
         rep.load()
         assert rep.recovery_block_count == RECOVERY_BLOCKS
         assert rep.source_block_count == 1920
+
+
+class TestPar2SetChecksums:
+    """What the par2 packets say the data should be, as opposed to what is on disk."""
+
+    def test_hash16k_is_the_md5_of_the_first_16k(self, par2set):
+        rep = repairer(par2set)
+        rep.load()
+        for entry in rep.files:
+            with open(os.path.join(par2set, entry["name"]), "rb") as f:
+                expected = hashlib.md5(f.read(16384)).digest()
+            assert entry["hash16k"] == expected
+
+    def test_block_checksums_match_the_data(self, par2set):
+        rep = repairer(par2set)
+        rep.load()
+        blocksize = rep.block_size
+        for entry in rep.files:
+            crcs = rep.block_checksums(entry["name"])
+            assert len(crcs) == entry["blocks"]
+            with open(os.path.join(par2set, entry["name"]), "rb") as f:
+                data = f.read()
+            for index, crc in enumerate(crcs):
+                # par2 hashes the final block padded out to the block size
+                block = data[index * blocksize : (index + 1) * blocksize].ljust(blocksize, b"\0")
+                assert zlib.crc32(block) == crc
+
+    def test_block_checksums_of_a_file_outside_the_set_is_none(self, par2set):
+        rep = repairer(par2set)
+        rep.load()
+        assert rep.block_checksums("not-in-the-set.bin") is None
+
+    def test_block_checksums_before_load_is_rejected(self, par2set):
+        rep = repairer(par2set)
+        with pytest.raises(RuntimeError):
+            rep.block_checksums("alpha.bin")
 
 
 class TestPar2Verify:

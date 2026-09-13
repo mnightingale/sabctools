@@ -74,6 +74,11 @@ class Par2File(TypedDict):
     """Size of the file in bytes"""
     blocks: int
     """Number of par2 blocks this file spans, 0 if it cannot be recovered"""
+    hash16k: bytes
+    """MD5 of the file's first 16k, as hashlib.md5().digest() orders it.
+
+    What identifies a file of the set whose name is not known.
+    """
 
 class Par2Repairer:
     def __init__(
@@ -134,6 +139,18 @@ class Par2Repairer:
         even when scanning the rest finds them intact.
 
         Call after load(), which is when block_size becomes known, and before verify().
+        """
+
+    def block_checksums(self, filename: str) -> Optional[List[int]]:
+        """The CRC32 the set records for each block of that file, from block 0.
+
+        What the par2 packets say the data should be, rather than anything read off
+        disk, so it is available as soon as the packets are. par2 checksums the final
+        block of a file padded out to block_size with zeroes.
+
+        None when the set does not describe that file, which includes a file it holds
+        no verification packet for and so cannot recover. Filenames are as recorded in
+        the par2 set. Call after load().
         """
 
     def verify_file(self, filename: str) -> Par2Result:
