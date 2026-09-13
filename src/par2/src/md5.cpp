@@ -39,10 +39,10 @@ std::ostream& operator<<(std::ostream &result, const MD5Hash &h)
 
   snprintf(buffer, sizeof(buffer),
           "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
-          h.hash[15], h.hash[14], h.hash[13], h.hash[12],
-          h.hash[11], h.hash[10], h.hash[9],  h.hash[8],
-          h.hash[7],  h.hash[6],  h.hash[5],  h.hash[4],
-          h.hash[3],  h.hash[2],  h.hash[1],  h.hash[0]);
+          h.hash[0],  h.hash[1],  h.hash[2],  h.hash[3],
+          h.hash[4],  h.hash[5],  h.hash[6],  h.hash[7],
+          h.hash[8],  h.hash[9],  h.hash[10], h.hash[11],
+          h.hash[12], h.hash[13], h.hash[14], h.hash[15]);
 
   return result << buffer;
 }
@@ -53,10 +53,10 @@ std::string MD5Hash::print(void) const
 
   snprintf(buffer, sizeof(buffer),
           "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
-          hash[15], hash[14], hash[13], hash[12],
-          hash[11], hash[10], hash[9],  hash[8],
-          hash[7],  hash[6],  hash[5],  hash[4],
-          hash[3],  hash[2],  hash[1],  hash[0]);
+          hash[0],  hash[1],  hash[2],  hash[3],
+          hash[4],  hash[5],  hash[6],  hash[7],
+          hash[8],  hash[9],  hash[10], hash[11],
+          hash[12], hash[13], hash[14], hash[15]);
 
   return buffer;
 }

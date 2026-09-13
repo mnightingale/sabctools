@@ -3,13 +3,13 @@
 | | |
 |---|---|
 | Upstream | https://github.com/Parchive/par2cmdline.git |
-| Ref | `5947c384f09c467acc16b3f9c711d0701ccaa574` |
-| Commit | `5947c384f09c467acc16b3f9c711d0701ccaa574` |
+| Ref | `b54b231b70970a668152061e06c717c44aea8275` |
+| Commit | `b54b231b70970a668152061e06c717c44aea8275` |
 | Vendored | 2026-09-13 |
 
 This is [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) itself, on the
 `libpar2/*` topic branches that make par2 usable as a library. The pinned commit is the
-tip of that stack, currently `libpar2/block-checksums`; it is a topic branch rather than
+tip of that stack, currently `libpar2/md5-print-order`; it is a topic branch rather than
 master, so it is rebased and the pin names a commit rather than the branch.
 
 ## Why this rather than par2cmdline-turbo

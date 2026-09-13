@@ -142,7 +142,7 @@ public:
     if (0 == info || 0 == mainpacket)
       return false;
 
-    info->setid = setid.print();
+    memcpy(info->setid.data(), setid.hash, sizeof(setid.hash));
     info->blocksize = blocksize;
     info->datablocks = sourceblockcount;
     info->recoveryblocks = (u32)recoverypacketmap.size();

@@ -36,10 +36,10 @@ import vendor_common
 REPO = "https://github.com/Parchive/par2cmdline.git"
 
 # Tip of the libpar2/* stack, which is where the library API lives, currently the
-# branch libpar2/block-checksums. Pinned to the commit rather than the branch: these
+# branch libpar2/md5-print-order. Pinned to the commit rather than the branch: these
 # are topic branches being prepared for upstream, so they are rebased, and a branch
 # name would not name the same tree twice running.
-REF = "5947c384f09c467acc16b3f9c711d0701ccaa574"
+REF = "b54b231b70970a668152061e06c717c44aea8275"
 
 DEST = os.path.join(vendor_common.ROOT, "src", "par2")
 
@@ -86,7 +86,7 @@ def write_vendor_notes(commit: str, ref: str):
 
 This is [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) itself, on the
 `libpar2/*` topic branches that make par2 usable as a library. The pinned commit is the
-tip of that stack, currently `libpar2/block-checksums`; it is a topic branch rather than
+tip of that stack, currently `libpar2/md5-print-order`; it is a topic branch rather than
 master, so it is rebased and the pin names a commit rather than the branch.
 
 ## Why this rather than par2cmdline-turbo

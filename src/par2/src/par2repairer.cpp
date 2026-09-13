@@ -611,8 +611,8 @@ bool Par2Repairer::GetFileInfo(std::vector<Par2FileInfo> *files) const
     info.localfilename = sourcefile->TargetFileName();
     info.filesize = descriptionpacket->FileSize();
     info.blockcount = verificationpacket ? verificationpacket->BlockCount() : 0;
-    info.hashfull = descriptionpacket->HashFull().print();
-    info.hash16k = descriptionpacket->Hash16k().print();
+    memcpy(info.hashfull.data(), descriptionpacket->HashFull().hash, 16);
+    memcpy(info.hash16k.data(), descriptionpacket->Hash16k().hash, 16);
 
     files->push_back(info);
   }
@@ -795,7 +795,7 @@ Result Par2Repairer::PreparePackets(void)
   if (observer)
   {
     Par2SetInfo info;
-    info.setid = setid.print();
+    memcpy(info.setid.data(), setid.hash, sizeof(setid.hash));
     info.blocksize = blocksize;
     info.datablocks = sourceblockcount;
     info.recoverablefilecount = mainpacket->RecoverableFileCount();

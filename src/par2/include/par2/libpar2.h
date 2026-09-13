@@ -20,6 +20,7 @@
 #ifndef __LIBPAR2_H__
 #define __LIBPAR2_H__
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -115,7 +116,8 @@ typedef enum Result
 // What a PAR2 set describes, known once its packets have been loaded
 struct Par2SetInfo
 {
-  std::string setid;            // The recovery set id, as printed by par2
+  std::array<u8, 16> setid;     // The recovery set id, an MD5 in the order its
+                                // bytes are stored
   u64 blocksize;                // Size of each block
   u32 datablocks;               // Number of blocks in the recovery set
   u32 recoveryblocks;           // Recovery blocks read so far, which each
@@ -134,8 +136,9 @@ struct Par2FileInfo
   u64 filesize;                 // Size of the file
   u32 blockcount;               // Blocks the file is divided into, 0 if it
                                 // cannot be recovered
-  std::string hashfull;         // MD5 of the whole file, as printed by par2
-  std::string hash16k;          // MD5 of its first 16k, which is what
+  std::array<u8, 16> hashfull;  // MD5 of the whole file, in the order its bytes
+                                // are stored
+  std::array<u8, 16> hash16k;   // MD5 of its first 16k, which is what
                                 // identifies a file whose name is unknown
 };
 
