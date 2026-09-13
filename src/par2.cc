@@ -455,6 +455,39 @@ static PyObject* Par2Repairer_verify_file(Par2RepairerObject* self, PyObject* ar
     return PyLong_FromLong((long)result);
 }
 
+/*
+ * The CRC32 the set records for each block of one file, which is what the par2 packets
+ * say the data should be rather than anything read off disk. None when the set does not
+ * describe that file, which includes a file it holds no verification packet for and so
+ * cannot recover.
+ */
+static PyObject* Par2Repairer_block_checksums(Par2RepairerObject* self, PyObject* arg) {
+    if (!ready_and_loaded(self, "block_checksums"))
+        return NULL;
+
+    const char* filename = PyUnicode_AsUTF8(arg);
+    if (filename == NULL)
+        return NULL;
+
+    std::vector<par2::u32> crcs;
+    if (!self->verifier->GetBlockChecksums(filename, &crcs))
+        Py_RETURN_NONE;
+
+    PyObject* list = PyList_New((Py_ssize_t)crcs.size());
+    if (list == NULL)
+        return NULL;
+
+    for (size_t i = 0; i < crcs.size(); i++) {
+        PyObject* value = PyLong_FromUnsignedLong((unsigned long)crcs[i]);
+        if (value == NULL) {
+            Py_DECREF(list);
+            return NULL;
+        }
+        PyList_SET_ITEM(list, (Py_ssize_t)i, value);
+    }
+    return list;
+}
+
 static PyObject* Par2Repairer_repair(Par2RepairerObject* self, PyObject* Py_UNUSED(ignored)) {
     if (!ready_and_loaded(self, "repair"))
         return NULL;
@@ -649,6 +682,10 @@ static PyMethodDef Par2Repairer_methods[] = {
      "downloading; what an earlier scan found for it is discarded first. May be called\n"
      "before load(), which returns INSUFFICIENT_CRITICAL_DATA and scans the file once\n"
      "the par2 packets arrive."},
+    {"block_checksums", (PyCFunction)Par2Repairer_block_checksums, METH_O,
+     "block_checksums(filename) -> list[int] | None\n\nThe CRC32 the set records for each\n"
+     "block of that file, one entry per block from block 0. None when the set does not\n"
+     "describe the file. Requires load() first."},
     {"verify", (PyCFunction)Par2Repairer_verify, METH_NOARGS,
      "verify() -> Par2Result\n\nScan the source files. Requires load() first. May be called\n"
      "more than once; each call is a fresh pass."},
@@ -797,6 +834,34 @@ static PyObject* get_renames(Par2RepairerObject* self, void*) {
  * with ".." is defused before either is reported - but either may still contain a
  * directory separator, because a set may describe files in subdirectories.
  */
+static int hexnibble(char c) {
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    return -1;
+}
+
+/*
+ * par2 prints an MD5 most significant byte first, so the hex libpar2 reports runs
+ * backwards against the 16 bytes the packet holds, which is the order hashlib.md5()
+ * digests in. out receives the packet order.
+ */
+static bool md5_from_par2_hex(const std::string& hex, unsigned char* out) {
+    if (hex.size() != 32)
+        return false;
+    for (int i = 0; i < 16; i++) {
+        const int hi = hexnibble(hex[30 - 2 * i]);
+        const int lo = hexnibble(hex[31 - 2 * i]);
+        if (hi < 0 || lo < 0)
+            return false;
+        out[i] = (unsigned char)((hi << 4) | lo);
+    }
+    return true;
+}
+
 static PyObject* get_files(Par2RepairerObject* self, void*) {
     if (self->verifier == NULL)
         Py_RETURN_NONE;
@@ -810,11 +875,19 @@ static PyObject* get_files(Par2RepairerObject* self, void*) {
         return list;
 
     for (size_t i = 0; i < files.size(); i++) {
-        PyObject* entry = Py_BuildValue("{s:s, s:s, s:K, s:I}",
+        unsigned char hash16k[16];
+        if (!md5_from_par2_hex(files[i].hash16k, hash16k)) {
+            PyErr_Format(Par2Error, "par2 reported a malformed hash for: %s", files[i].filename.c_str());
+            Py_DECREF(list);
+            return NULL;
+        }
+
+        PyObject* entry = Py_BuildValue("{s:s, s:s, s:K, s:I, s:y#}",
                                         "name", files[i].filename.c_str(),
                                         "target", files[i].localfilename.c_str(),
                                         "size", (unsigned long long)files[i].filesize,
-                                        "blocks", files[i].blockcount);
+                                        "blocks", files[i].blockcount,
+                                        "hash16k", (const char*)hash16k, (Py_ssize_t)16);
         if (entry == NULL) {
             Py_DECREF(list);
             return NULL;
