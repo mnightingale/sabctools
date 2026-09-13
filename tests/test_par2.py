@@ -198,6 +198,96 @@ class TestPar2Repair:
         assert rep.repair() == sabctools.Par2Result.REPAIR_NOT_POSSIBLE
 
 
+class TestPar2KnownBlocks:
+    """Quick verify: blocks the download already vouched for are never read."""
+
+    def damage(self, par2set, name="alpha.bin"):
+        with open(os.path.join(par2set, name), "r+b") as f:
+            f.seek(1000)
+            f.write(b"\x5a" * 2000)
+
+    def test_vouched_blocks_are_not_read(self, par2set):
+        # Damage that a scan finds, so taking the caller's word is visible in the result
+        self.damage(par2set)
+
+        rep = repairer(par2set)
+        rep.load()
+        rep.set_known_blocks({entry["name"]: [True] * entry["blocks"] for entry in rep.files})
+
+        assert rep.verify() == sabctools.Par2Result.SUCCESS
+        assert rep.quick_verified_files == 3
+        assert rep.damaged_file_count == 0
+
+    def test_the_same_damage_is_found_when_scanned(self, par2set):
+        self.damage(par2set)
+
+        rep = repairer(par2set)
+        rep.load()
+
+        assert rep.verify() == sabctools.Par2Result.REPAIR_POSSIBLE
+        assert rep.quick_verified_files == 0
+
+    def test_a_file_written_off_is_not_read_either(self, par2set):
+        rep = repairer(par2set)
+        rep.load()
+        alpha = next(entry for entry in rep.files if entry["name"] == "alpha.bin")
+        rep.set_known_blocks({"alpha.bin": [False] * alpha["blocks"]})
+
+        # alpha is 960 of the 1920 source blocks, more than the 576 recovery blocks
+        assert rep.verify() == sabctools.Par2Result.REPAIR_NOT_POSSIBLE
+        assert rep.missing_block_count == alpha["blocks"]
+
+    def test_vouching_is_per_block(self, par2set):
+        """Vouched blocks are counted present without being read, the rest are scanned.
+
+        Vouching for only part of a file still leaves it reported as needing repair, so
+        the result code is the same either way; what shows the block list was honoured
+        is the block shortfall, which the damaged-but-vouched blocks do not count towards.
+        """
+        rep = repairer(par2set)
+        rep.load()
+        alpha = next(entry for entry in rep.files if entry["name"] == "alpha.bin")
+
+        # alpha is 960 blocks of 64 bytes, so the second half starts at 30720
+        half = alpha["blocks"] // 2
+        with open(os.path.join(par2set, "alpha.bin"), "r+b") as f:
+            f.seek(half * 64 + 100)
+            f.write(b"\x5a" * 2000)
+
+        rep.set_known_blocks({"alpha.bin": [False] * half + [True] * (alpha["blocks"] - half)})
+        assert rep.verify() == sabctools.Par2Result.REPAIR_POSSIBLE
+        assert rep.missing_block_count == 0
+
+        # the same damage, scanned rather than vouched for, is a real shortfall
+        scanned = repairer(par2set)
+        scanned.load()
+        assert scanned.verify() == sabctools.Par2Result.REPAIR_POSSIBLE
+        assert scanned.missing_block_count > 0
+
+    def test_a_second_call_retracts_what_the_first_said(self, par2set):
+        self.damage(par2set)
+
+        rep = repairer(par2set)
+        rep.load()
+        rep.set_known_blocks({entry["name"]: [True] * entry["blocks"] for entry in rep.files})
+        assert rep.quick_verified_files == 3
+
+        rep.set_known_blocks({})
+        assert rep.quick_verified_files == 0
+        assert rep.verify() == sabctools.Par2Result.REPAIR_POSSIBLE
+
+    def test_before_load_is_rejected(self, par2set):
+        rep = repairer(par2set)
+        with pytest.raises(RuntimeError):
+            rep.set_known_blocks({"alpha.bin": [True]})
+
+    def test_a_non_mapping_is_rejected(self, par2set):
+        rep = repairer(par2set)
+        rep.load()
+        with pytest.raises(TypeError):
+            rep.set_known_blocks([("alpha.bin", [True])])
+
+
 class TestPar2VerifyFile:
     """Feeding files in one at a time, which is how a download arrives."""
 

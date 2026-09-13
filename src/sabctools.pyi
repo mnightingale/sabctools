@@ -128,6 +128,11 @@ class Par2Repairer:
         fine and an empty one restores the default behaviour. Filenames are as recorded
         in the par2 set, and each sequence runs from block 0.
 
+        A file with every block marked true is treated as intact and a file with none
+        marked is treated as holding nothing usable; in both cases it is never read.
+        Marking only some of a file's blocks still leaves it reported as needing repair,
+        even when scanning the rest finds them intact.
+
         Call after load(), which is when block_size becomes known, and before verify().
         """
 
