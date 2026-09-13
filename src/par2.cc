@@ -767,7 +767,9 @@ static PyObject* get_data_size(Par2RepairerObject* self, void*) {
 
 static PyObject* get_setid(Par2RepairerObject* self, void*) {
     par2::Par2SetInfo info;
-    return PyUnicode_FromString(set_info(self, &info) ? info.setid.c_str() : "");
+    if (!set_info(self, &info))
+        return PyBytes_FromStringAndSize(NULL, 0);
+    return PyBytes_FromStringAndSize((const char*)info.setid.data(), 16);
 }
 
 static PyObject* get_quick_verified_files(Par2RepairerObject* self, void*) {
@@ -834,34 +836,6 @@ static PyObject* get_renames(Par2RepairerObject* self, void*) {
  * with ".." is defused before either is reported - but either may still contain a
  * directory separator, because a set may describe files in subdirectories.
  */
-static int hexnibble(char c) {
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    return -1;
-}
-
-/*
- * par2 prints an MD5 most significant byte first, so the hex libpar2 reports runs
- * backwards against the 16 bytes the packet holds, which is the order hashlib.md5()
- * digests in. out receives the packet order.
- */
-static bool md5_from_par2_hex(const std::string& hex, unsigned char* out) {
-    if (hex.size() != 32)
-        return false;
-    for (int i = 0; i < 16; i++) {
-        const int hi = hexnibble(hex[30 - 2 * i]);
-        const int lo = hexnibble(hex[31 - 2 * i]);
-        if (hi < 0 || lo < 0)
-            return false;
-        out[i] = (unsigned char)((hi << 4) | lo);
-    }
-    return true;
-}
-
 static PyObject* get_files(Par2RepairerObject* self, void*) {
     if (self->verifier == NULL)
         Py_RETURN_NONE;
@@ -875,19 +849,12 @@ static PyObject* get_files(Par2RepairerObject* self, void*) {
         return list;
 
     for (size_t i = 0; i < files.size(); i++) {
-        unsigned char hash16k[16];
-        if (!md5_from_par2_hex(files[i].hash16k, hash16k)) {
-            PyErr_Format(Par2Error, "par2 reported a malformed hash for: %s", files[i].filename.c_str());
-            Py_DECREF(list);
-            return NULL;
-        }
-
         PyObject* entry = Py_BuildValue("{s:s, s:s, s:K, s:I, s:y#}",
                                         "name", files[i].filename.c_str(),
                                         "target", files[i].localfilename.c_str(),
                                         "size", (unsigned long long)files[i].filesize,
                                         "blocks", files[i].blockcount,
-                                        "hash16k", (const char*)hash16k, (Py_ssize_t)16);
+                                        "hash16k", (const char*)files[i].hash16k.data(), (Py_ssize_t)16);
         if (entry == NULL) {
             Py_DECREF(list);
             return NULL;
@@ -992,7 +959,7 @@ static PyGetSetDef Par2Repairer_getset[] = {
     {"block_size", (getter)get_block_size, NULL, "Block size of the set, in bytes.", NULL},
     {"data_size", (getter)get_data_size, NULL, "Total size of the recoverable files, in bytes.",
      NULL},
-    {"setid", (getter)get_setid, NULL, "The par2 set id.", NULL},
+    {"setid", (getter)get_setid, NULL, "The par2 set id, 16 bytes.", NULL},
     {"repair_possible", (getter)get_repair_possible, NULL,
      "Whether enough recovery blocks are available to repair.", NULL},
     {"cancelled", (getter)get_cancelled, NULL, "Whether cancel() stopped an operation.", NULL},

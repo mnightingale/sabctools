@@ -225,8 +225,8 @@ class Par2Repairer:
     """Block size of the set, in bytes"""
     data_size: int
     """Total size of the recoverable files, in bytes"""
-    setid: str
-    """The par2 set id"""
+    setid: bytes
+    """The par2 set id, 16 bytes, in the order the packets store it"""
     repair_possible: bool
     """Whether enough recovery blocks are available to repair"""
     cancelled: bool
