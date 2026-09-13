@@ -65,15 +65,15 @@ private:
 struct Par2RepairerObject;
 
 /* Relays par2's progress and per-file results to the Python callbacks. */
-class SabObserver final : public Par2::Par2Observer {
+class SabObserver final : public par2::Par2Observer {
 public:
     SabObserver() : owner(NULL) {}
 
     void SetOwner(Par2RepairerObject* o) { owner = o; }
 
     void OnFile(const std::string& filename) override;
-    void OnProgress(Par2::u32 permille) override;
-    void OnFileDone(const std::string& filename, Par2::u32 found, Par2::u32 needed) override;
+    void OnProgress(par2::u32 permille) override;
+    void OnFileDone(const std::string& filename, par2::u32 found, par2::u32 needed) override;
     void OnRepairStart(void) override;
 
 private:
@@ -82,7 +82,7 @@ private:
 
 typedef struct Par2RepairerObject {
     PyObject_HEAD
-    Par2::Par2Verifier* verifier;
+    par2::Par2Verifier* verifier;
     SabObserver* observer;
     NullStream* out;
     NullStream* err;
@@ -151,7 +151,7 @@ void SabObserver::OnFile(const std::string& filename) {
     call_progress(owner, owner->stage, filename.c_str(), 0);
 }
 
-void SabObserver::OnProgress(Par2::u32 permille) {
+void SabObserver::OnProgress(par2::u32 permille) {
     if (!owner)
         return;
 
@@ -172,7 +172,7 @@ void SabObserver::OnProgress(Par2::u32 permille) {
  * data, which is how a caller learns that a set of joinable .001/.002 parts was
  * consumed. Both counts are zero for a par2 file, which has no blocks of its own.
  */
-void SabObserver::OnFileDone(const std::string& filename, Par2::u32 found, Par2::u32 needed) {
+void SabObserver::OnFileDone(const std::string& filename, par2::u32 found, par2::u32 needed) {
     if (!owner || !owner->file_done_callback)
         return;
 
@@ -201,7 +201,7 @@ void SabObserver::OnRepairStart(void) {
  * Returns false with a Python exception set.
  */
 template <typename Call>
-static bool run_step(Call call, Par2::Result* result) {
+static bool run_step(Call call, par2::Result* result) {
     bool threw = false;
     std::string message;
 
@@ -343,11 +343,11 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
      * An empty basepath is taken from the first par2 file added, which is what the
      * tool does; a memory limit of zero lets par2 size itself from physical memory.
      */
-    self->verifier = new Par2::Par2Verifier(*self->out, *self->err, Par2::nlSilent,
+    self->verifier = new par2::Par2Verifier(*self->out, *self->err, par2::nlSilent,
                                             basepath ? basepath : "");
     self->verifier->SetMemoryLimit((size_t)memory_limit);
     self->verifier->SetThreadCounts(threads, file_threads);
-    self->verifier->SetDataSkipping(self->skip_data, (Par2::u64)self->skip_leaway);
+    self->verifier->SetDataSkipping(self->skip_data, (par2::u64)self->skip_leaway);
 
     self->observer = new SabObserver();
     self->observer->SetOwner(self);
@@ -380,15 +380,15 @@ static PyObject* Par2Repairer_load(Par2RepairerObject* self, PyObject* Py_UNUSED
     self->stage = STAGE_LOADING;
     self->last_progress = -1;
 
-    Par2::Result result;
-    Par2::Par2Verifier* verifier = self->verifier;
+    par2::Result result;
+    par2::Par2Verifier* verifier = self->verifier;
     const std::string parfile = *self->parfile;
     if (!run_step([&] { return verifier->AddPar2File(parfile); }, &result))
         return NULL;
 
-    if (result == Par2::eSuccess)
+    if (result == par2::eSuccess)
         self->loaded = true;
-    if (result == Par2::eCancelled)
+    if (result == par2::eCancelled)
         self->cancelled = true;
 
     return PyLong_FromLong((long)result);
@@ -396,16 +396,16 @@ static PyObject* Par2Repairer_load(Par2RepairerObject* self, PyObject* Py_UNUSED
 
 /* Scan the source files, leaving the outcome in self. False with a Python exception
    set. */
-static bool do_verify(Par2RepairerObject* self, Par2::Result* result) {
+static bool do_verify(Par2RepairerObject* self, par2::Result* result) {
     self->stage = STAGE_VERIFYING;
     self->last_progress = -1;
 
-    Par2::Par2Verifier* verifier = self->verifier;
+    par2::Par2Verifier* verifier = self->verifier;
     const std::vector<std::string>& extras = *self->extrafiles;
     if (!run_step([&] { return verifier->Verify(extras); }, result))
         return false;
 
-    if (*result == Par2::eCancelled)
+    if (*result == par2::eCancelled)
         self->cancelled = true;
     else
         self->verified = true;
@@ -416,7 +416,7 @@ static PyObject* Par2Repairer_verify(Par2RepairerObject* self, PyObject* Py_UNUS
     if (!ready_and_loaded(self, "verify"))
         return NULL;
 
-    Par2::Result result;
+    par2::Result result;
     if (!do_verify(self, &result))
         return NULL;
     return PyLong_FromLong((long)result);
@@ -441,15 +441,15 @@ static PyObject* Par2Repairer_verify_file(Par2RepairerObject* self, PyObject* ar
     self->stage = STAGE_VERIFYING;
     self->last_progress = -1;
 
-    Par2::Result result;
-    Par2::Par2Verifier* verifier = self->verifier;
+    par2::Result result;
+    par2::Par2Verifier* verifier = self->verifier;
     const std::string path = filename;
     if (!run_step([&] { return verifier->VerifyFile(path); }, &result))
         return NULL;
 
-    if (result == Par2::eCancelled)
+    if (result == par2::eCancelled)
         self->cancelled = true;
-    else if (result != Par2::eInsufficientCriticalData)
+    else if (result != par2::eInsufficientCriticalData)
         self->verified = true;
 
     return PyLong_FromLong((long)result);
@@ -463,10 +463,10 @@ static PyObject* Par2Repairer_repair(Par2RepairerObject* self, PyObject* Py_UNUS
        eLogicError rather than scanning on its own. Run the pass here so a caller
        that only wants the files fixed need not ask for it. */
     if (!self->verified) {
-        Par2::Result verified;
+        par2::Result verified;
         if (!do_verify(self, &verified))
             return NULL;
-        if (verified == Par2::eCancelled || verified == Par2::eRepairNotPossible)
+        if (verified == par2::eCancelled || verified == par2::eRepairNotPossible)
             return PyLong_FromLong((long)verified);
     }
 
@@ -486,12 +486,12 @@ static PyObject* Par2Repairer_repair(Par2RepairerObject* self, PyObject* Py_UNUS
      */
     const bool verifyafter = !(self->skip_repaired_verification && !self->known->empty());
 
-    Par2::Result result;
-    Par2::Par2Verifier* verifier = self->verifier;
+    par2::Result result;
+    par2::Par2Verifier* verifier = self->verifier;
     if (!run_step([&] { return verifier->Repair(verifyafter); }, &result))
         return NULL;
 
-    if (result == Par2::eCancelled)
+    if (result == par2::eCancelled)
         self->cancelled = true;
 
     return PyLong_FromLong((long)result);
@@ -528,9 +528,9 @@ static PyObject* Par2Repairer_load_more(Par2RepairerObject* self, PyObject* parf
     self->stage = STAGE_LOADING;
     self->last_progress = -1;
 
-    Par2::Par2Verifier* verifier = self->verifier;
+    par2::Par2Verifier* verifier = self->verifier;
     for (size_t i = 0; i < paths.size(); i++) {
-        Par2::Result result;
+        par2::Result result;
         const std::string& path = paths[i];
         if (!run_step([&] { return verifier->AddPar2File(path); }, &result))
             return NULL;
@@ -538,19 +538,19 @@ static PyObject* Par2Repairer_load_more(Par2RepairerObject* self, PyObject* parf
            sibling volumes, and reports eFileIOError only when the named file is
            absent and nothing new was read. Here the caller named the file, so that
            is a mistake worth reporting rather than a silent no-op. */
-        if (result == Par2::eFileIOError) {
+        if (result == par2::eFileIOError) {
             PyErr_Format(Par2Error, "par2 could not read: %s", path.c_str());
             return NULL;
         }
     }
 
     if (self->verified) {
-        Par2::Result reassessed;
+        par2::Result reassessed;
         if (!run_step([&] { return verifier->Reassess(); }, &reassessed))
             return NULL;
     }
 
-    Par2::Par2SetInfo info;
+    par2::Par2SetInfo info;
     if (!self->verifier->GetSetInfo(&info))
         return PyLong_FromUnsignedLong(0);
     return PyLong_FromUnsignedLong(info.recoveryblocks);
@@ -576,7 +576,7 @@ static PyObject* Par2Repairer_set_known_blocks(Par2RepairerObject* self, PyObjec
         return NULL;
     }
 
-    std::map<std::string, std::vector<char> > vouched;
+    std::map<std::string, std::vector<bool> > vouched;
 
     PyObject *key, *value;
     Py_ssize_t position = 0;
@@ -590,7 +590,7 @@ static PyObject* Par2Repairer_set_known_blocks(Par2RepairerObject* self, PyObjec
             return NULL;
 
         Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
-        std::vector<char> blocks;
+        std::vector<bool> blocks;
         blocks.reserve((size_t)count);
         for (Py_ssize_t i = 0; i < count; i++) {
             int good = PyObject_IsTrue(PySequence_Fast_GET_ITEM(sequence, i));
@@ -598,7 +598,7 @@ static PyObject* Par2Repairer_set_known_blocks(Par2RepairerObject* self, PyObjec
                 Py_DECREF(sequence);
                 return NULL;
             }
-            blocks.push_back(good ? 1 : 0);
+            blocks.push_back(good != 0);
         }
         Py_DECREF(sequence);
 
@@ -610,11 +610,11 @@ static PyObject* Par2Repairer_set_known_blocks(Par2RepairerObject* self, PyObjec
     for (std::set<std::string>::const_iterator it = self->known->begin();
          it != self->known->end(); ++it) {
         if (vouched.find(*it) == vouched.end())
-            self->verifier->SetKnownBlocks(*it, std::vector<char>());
+            self->verifier->SetKnownBlocks(*it, std::vector<bool>());
     }
 
     self->known->clear();
-    for (std::map<std::string, std::vector<char> >::const_iterator it = vouched.begin();
+    for (std::map<std::string, std::vector<bool> >::const_iterator it = vouched.begin();
          it != vouched.end(); ++it) {
         self->verifier->SetKnownBlocks(it->first, it->second);
         if (!it->second.empty())
@@ -663,73 +663,73 @@ static PyMethodDef Par2Repairer_methods[] = {
 
 /* ------------------------------------------------------------------------- */
 
-static bool set_info(Par2RepairerObject* self, Par2::Par2SetInfo* info) {
+static bool set_info(Par2RepairerObject* self, par2::Par2SetInfo* info) {
     return self->verifier != NULL && self->verifier->GetSetInfo(info);
 }
 
-static bool verify_result(Par2RepairerObject* self, Par2::Par2VerifyResult* result) {
+static bool verify_result(Par2RepairerObject* self, par2::Par2VerifyResult* result) {
     return self->verifier != NULL && self->verifier->GetVerifyResult(result);
 }
 
 static PyObject* get_missing_block_count(Par2RepairerObject* self, void*) {
-    Par2::Par2VerifyResult result;
+    par2::Par2VerifyResult result;
     return PyLong_FromUnsignedLong(verify_result(self, &result) ? result.missingblockcount : 0);
 }
 
 static PyObject* get_available_block_count(Par2RepairerObject* self, void*) {
-    Par2::Par2VerifyResult result;
+    par2::Par2VerifyResult result;
     return PyLong_FromUnsignedLong(verify_result(self, &result) ? result.availableblockcount : 0);
 }
 
 static PyObject* get_source_block_count(Par2RepairerObject* self, void*) {
-    Par2::Par2SetInfo info;
+    par2::Par2SetInfo info;
     return PyLong_FromUnsignedLong(set_info(self, &info) ? info.datablocks : 0);
 }
 
 /* From the set rather than the verify result, which is empty until a scan has run.
    The two agree once one has. */
 static PyObject* get_recovery_block_count(Par2RepairerObject* self, void*) {
-    Par2::Par2SetInfo info;
+    par2::Par2SetInfo info;
     return PyLong_FromUnsignedLong(set_info(self, &info) ? info.recoveryblocks : 0);
 }
 
 static PyObject* get_recoverable_file_count(Par2RepairerObject* self, void*) {
-    Par2::Par2SetInfo info;
+    par2::Par2SetInfo info;
     return PyLong_FromUnsignedLong(set_info(self, &info) ? info.recoverablefilecount : 0);
 }
 
 static PyObject* get_complete_file_count(Par2RepairerObject* self, void*) {
-    Par2::Par2VerifyResult result;
+    par2::Par2VerifyResult result;
     return PyLong_FromUnsignedLong(verify_result(self, &result) ? result.completefilecount : 0);
 }
 
 static PyObject* get_damaged_file_count(Par2RepairerObject* self, void*) {
-    Par2::Par2VerifyResult result;
+    par2::Par2VerifyResult result;
     return PyLong_FromUnsignedLong(verify_result(self, &result) ? result.damagedfilecount : 0);
 }
 
 static PyObject* get_missing_file_count(Par2RepairerObject* self, void*) {
-    Par2::Par2VerifyResult result;
+    par2::Par2VerifyResult result;
     return PyLong_FromUnsignedLong(verify_result(self, &result) ? result.missingfilecount : 0);
 }
 
 static PyObject* get_renamed_file_count(Par2RepairerObject* self, void*) {
-    Par2::Par2VerifyResult result;
+    par2::Par2VerifyResult result;
     return PyLong_FromUnsignedLong(verify_result(self, &result) ? result.renamedfilecount : 0);
 }
 
 static PyObject* get_block_size(Par2RepairerObject* self, void*) {
-    Par2::Par2SetInfo info;
+    par2::Par2SetInfo info;
     return PyLong_FromUnsignedLongLong(set_info(self, &info) ? info.blocksize : 0);
 }
 
 static PyObject* get_data_size(Par2RepairerObject* self, void*) {
-    Par2::Par2SetInfo info;
+    par2::Par2SetInfo info;
     return PyLong_FromUnsignedLongLong(set_info(self, &info) ? info.datasize : 0);
 }
 
 static PyObject* get_setid(Par2RepairerObject* self, void*) {
-    Par2::Par2SetInfo info;
+    par2::Par2SetInfo info;
     return PyUnicode_FromString(set_info(self, &info) ? info.setid.c_str() : "");
 }
 
@@ -746,7 +746,7 @@ static PyObject* get_cancelled(Par2RepairerObject* self, void*) {
  * "Repair is possible" line is derived the same way.
  */
 static PyObject* get_repair_possible(Par2RepairerObject* self, void*) {
-    Par2::Par2VerifyResult result;
+    par2::Par2VerifyResult result;
     if (!verify_result(self, &result))
         Py_RETURN_FALSE;
     return PyBool_FromLong(result.recoveryblockcount >= result.missingblockcount);
@@ -805,7 +805,7 @@ static PyObject* get_files(Par2RepairerObject* self, void*) {
     if (list == NULL)
         return NULL;
 
-    std::vector<Par2::Par2FileInfo> files;
+    std::vector<par2::Par2FileInfo> files;
     if (!self->verifier->GetFileInfo(&files))
         return list;
 
@@ -988,16 +988,16 @@ int par2_init(PyObject* m) {
     /* Mirrors libpar2.h's Result enum. */
     PyObject* members = Py_BuildValue(
         "{s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i}",
-        "SUCCESS", (int)Par2::eSuccess,
-        "REPAIR_POSSIBLE", (int)Par2::eRepairPossible,
-        "REPAIR_NOT_POSSIBLE", (int)Par2::eRepairNotPossible,
-        "INVALID_COMMAND_LINE_ARGUMENTS", (int)Par2::eInvalidCommandLineArguments,
-        "INSUFFICIENT_CRITICAL_DATA", (int)Par2::eInsufficientCriticalData,
-        "REPAIR_FAILED", (int)Par2::eRepairFailed,
-        "FILE_IO_ERROR", (int)Par2::eFileIOError,
-        "LOGIC_ERROR", (int)Par2::eLogicError,
-        "MEMORY_ERROR", (int)Par2::eMemoryError,
-        "CANCELLED", (int)Par2::eCancelled);
+        "SUCCESS", (int)par2::eSuccess,
+        "REPAIR_POSSIBLE", (int)par2::eRepairPossible,
+        "REPAIR_NOT_POSSIBLE", (int)par2::eRepairNotPossible,
+        "INVALID_COMMAND_LINE_ARGUMENTS", (int)par2::eInvalidCommandLineArguments,
+        "INSUFFICIENT_CRITICAL_DATA", (int)par2::eInsufficientCriticalData,
+        "REPAIR_FAILED", (int)par2::eRepairFailed,
+        "FILE_IO_ERROR", (int)par2::eFileIOError,
+        "LOGIC_ERROR", (int)par2::eLogicError,
+        "MEMORY_ERROR", (int)par2::eMemoryError,
+        "CANCELLED", (int)par2::eCancelled);
     if (members == NULL)
         return 0;
 
