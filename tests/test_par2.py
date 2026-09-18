@@ -58,6 +58,10 @@ def repairer(basepath, **kwargs):
 
 
 class TestPar2Load:
+    def test_the_result_is_a_par2result(self, par2set):
+        # Not the bare int behind it, so callers can report which one it was
+        assert repairer(par2set).load().name == "SUCCESS"
+
     def test_reads_the_set(self, par2set):
         rep = repairer(par2set)
         assert rep.load() == sabctools.Par2Result.SUCCESS
