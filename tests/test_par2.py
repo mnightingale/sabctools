@@ -506,8 +506,20 @@ class TestPar2Progress:
         rep.verify()
         rep.repair()
 
-        stages = {stage for stage, _, _ in events}
-        assert {"loading", "verifying", "repairing", "verifying_repair"} <= stages
+        # par2 says which step each count belongs to, so the stages arrive in the
+        # order it works in, each counting from zero again
+        order = []
+        for stage, _, _ in events:
+            if not order or order[-1] != stage:
+                order.append(stage)
+        assert order == [
+            "loading",
+            "verifying",
+            "constructing",
+            "solving",
+            "repairing",
+            "verifying_repair",
+        ]
         for stage, _, percent in events:
             assert 0 <= percent <= 100, (stage, percent)
 
