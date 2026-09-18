@@ -23,7 +23,6 @@
 #include <map>
 #include <ostream>
 #include <set>
-#include <streambuf>
 #include <string>
 #include <utility>
 #include <vector>
@@ -49,19 +48,6 @@ static const char* const STAGE_VERIFYING = "verifying";
 static const char* const STAGE_REPAIRING = "repairing";
 static const char* const STAGE_VERIFYING_REPAIR = "verifying_repair";
 
-class NullBuffer : public std::streambuf {
-public:
-    int overflow(int c) override { return c; }
-};
-
-class NullStream : public std::ostream {
-public:
-    NullStream() : std::ostream(&buffer) {}
-
-private:
-    NullBuffer buffer;
-};
-
 struct Par2RepairerObject;
 
 /* Relays par2's progress and per-file results to the Python callbacks. */
@@ -72,7 +58,7 @@ public:
     void SetOwner(Par2RepairerObject* o) { owner = o; }
 
     void OnFile(const std::string& filename) override;
-    void OnProgress(par2::u32 permille) override;
+    void OnProgress(par2::Phase phase, par2::u32 permille) override;
     void OnFileDone(const std::string& filename, par2::u32 found, par2::u32 needed) override;
     void OnRepairStart(void) override;
 
@@ -84,8 +70,6 @@ typedef struct Par2RepairerObject {
     PyObject_HEAD
     par2::Par2Verifier* verifier;
     SabObserver* observer;
-    NullStream* out;
-    NullStream* err;
 
     PyObject* progress_callback;
     PyObject* file_done_callback;
@@ -151,9 +135,31 @@ void SabObserver::OnFile(const std::string& filename) {
     call_progress(owner, owner->stage, filename.c_str(), 0);
 }
 
-void SabObserver::OnProgress(par2::u32 permille) {
+/* par2 says which step a count belongs to; the caller is told in its own terms. */
+static const char* stage_of(par2::Phase phase) {
+    switch (phase) {
+        case par2::phLoading:
+            return STAGE_LOADING;
+        case par2::phScanning:
+            return STAGE_VERIFYING;
+        case par2::phVerifyingRepair:
+            return STAGE_VERIFYING_REPAIR;
+        default:
+            return STAGE_REPAIRING;
+    }
+}
+
+void SabObserver::OnProgress(par2::Phase phase, par2::u32 permille) {
     if (!owner)
         return;
+
+    /* Each step runs its own count from zero, so a new one starts the thinning
+       below again rather than dropping everything under the last step's percent. */
+    const char* stage = stage_of(phase);
+    if (stage != owner->stage) {
+        owner->stage = stage;
+        owner->last_progress = -1;
+    }
 
     /* par2 reports tenths of a percent and does so very often. Acquiring the GIL
        for each one would dominate the runtime, so only report whole percents. */
@@ -233,8 +239,6 @@ static PyObject* Par2Repairer_new(PyTypeObject* type, PyObject* args, PyObject* 
 
     self->verifier = NULL;
     self->observer = NULL;
-    self->out = NULL;
-    self->err = NULL;
     self->progress_callback = NULL;
     self->file_done_callback = NULL;
     self->parfile = NULL;
@@ -258,8 +262,6 @@ static void Par2Repairer_dealloc(Par2RepairerObject* self) {
     delete self->parfile;
     delete self->extrafiles;
     delete self->known;
-    delete self->out;
-    delete self->err;
     Py_XDECREF(self->progress_callback);
     Py_XDECREF(self->file_done_callback);
     Py_TYPE(self)->tp_free((PyObject*)self);
@@ -309,15 +311,11 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
     delete self->parfile;
     delete self->extrafiles;
     delete self->known;
-    delete self->out;
-    delete self->err;
     self->verifier = NULL;
     self->observer = NULL;
     self->parfile = NULL;
     self->extrafiles = NULL;
     self->known = NULL;
-    self->out = NULL;
-    self->err = NULL;
 
     self->parfile = new std::string(parfile);
     self->extrafiles = new std::vector<std::string>(extras);
@@ -331,20 +329,14 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
     self->stage = STAGE_LOADING;
     self->last_progress = -1;
 
-    self->out = new NullStream();
-    self->err = new NullStream();
-
     /*
-     * nlSilent, because both streams are discarded anyway and the observer is
-     * documented as unaffected by the noise level. That was not true of the older
-     * subclassing approach, where several of the Sig* hooks and two of the
-     * cancellation checks sat inside noise-level guards.
+     * Built without streams, so the work is followed through the observer alone and
+     * there is no noise level to set: everything it governs is written output.
      *
      * An empty basepath is taken from the first par2 file added, which is what the
      * tool does; a memory limit of zero lets par2 size itself from physical memory.
      */
-    self->verifier = new par2::Par2Verifier(*self->out, *self->err, par2::nlSilent,
-                                            basepath ? basepath : "");
+    self->verifier = new par2::Par2Verifier(basepath ? basepath : "");
     self->verifier->SetMemoryLimit((size_t)memory_limit);
     self->verifier->SetThreadCounts(threads, file_threads);
     self->verifier->SetDataSkipping(self->skip_data, (par2::u64)self->skip_leaway);

@@ -511,9 +511,12 @@ class TestPar2Progress:
         for stage, _, percent in events:
             assert 0 <= percent <= 100, (stage, percent)
 
-        # Loading reports the par2 files it opens, but no percentage - par2 signals a
-        # byte offset rather than a fraction for that stage
-        assert {f for stage, f, _ in events if stage == "loading"} == {"rec.par2", "rec.vol000+576.par2"}
+        # Loading names each par2 file it opens, and reports that file's percentage
+        # under an empty name
+        assert {f for stage, f, _ in events if stage == "loading" and f} == {
+            "rec.par2",
+            "rec.vol000+576.par2",
+        }
 
     def test_callback_can_be_cleared(self, par2set):
         rep = repairer(par2set)
