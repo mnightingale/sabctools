@@ -63,6 +63,8 @@ public:
     void OnProgress(par2::Phase phase, par2::u32 permille) override;
     void OnFileDone(const std::string& filename, par2::u32 found, par2::u32 needed) override;
     void OnRepairStart(void) override;
+    void OnError(const par2::Par2Error& error) override;
+    void OnWarning(const par2::Par2Warning& warning) override;
 
 private:
     Par2RepairerObject* owner;
@@ -75,6 +77,8 @@ typedef struct Par2RepairerObject {
 
     PyObject* progress_callback;
     PyObject* file_done_callback;
+    PyObject* error_callback;
+    PyObject* warning_callback;
 
     /* Verify takes these, so they are held from construction until it runs. */
     std::string* parfile;
@@ -206,6 +210,50 @@ void SabObserver::OnRepairStart(void) {
     owner->last_progress = -1;
 }
 
+/*
+ * Relay one (code, message, filename) report to the user's callback. Called from the
+ * thread that found the thing, under the same rules as call_progress.
+ */
+static void call_report(PyObject* callback, int code, const std::string& message,
+                        const std::string& filename) {
+    if (!callback)
+        return;
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    PyObject* result =
+        PyObject_CallFunction(callback, "iss", code, message.c_str(), filename.c_str());
+    if (result == NULL) {
+        PyErr_WriteUnraisable(callback);
+    } else {
+        Py_DECREF(result);
+    }
+
+    PyGILState_Release(gstate);
+}
+
+/*
+ * Fires once per error as par2 finds it. The operation may carry on and may still
+ * succeed - a file it could not open is not a failed verify - so this reports what
+ * went wrong on the way, and the Par2Result says whether it mattered.
+ */
+void SabObserver::OnError(const par2::Par2Error& error) {
+    if (!owner)
+        return;
+    call_report(owner->error_callback, (int)error.code, error.message, error.filename);
+}
+
+/*
+ * Fires once per warning as par2 finds it, most often a name the set records which
+ * this system will not take as it stands. Nothing else reports these: no outcome
+ * depends on them, so there is no property to read them back from afterwards.
+ */
+void SabObserver::OnWarning(const par2::Par2Warning& warning) {
+    if (!owner)
+        return;
+    call_report(owner->warning_callback, (int)warning.code, warning.message, warning.filename);
+}
+
 /* ------------------------------------------------------------------------- */
 
 /*
@@ -247,6 +295,8 @@ static PyObject* Par2Repairer_new(PyTypeObject* type, PyObject* args, PyObject* 
     self->observer = NULL;
     self->progress_callback = NULL;
     self->file_done_callback = NULL;
+    self->error_callback = NULL;
+    self->warning_callback = NULL;
     self->parfile = NULL;
     self->extrafiles = NULL;
     self->skip_data = true;
@@ -270,6 +320,8 @@ static void Par2Repairer_dealloc(Par2RepairerObject* self) {
     delete self->known;
     Py_XDECREF(self->progress_callback);
     Py_XDECREF(self->file_done_callback);
+    Py_XDECREF(self->error_callback);
+    Py_XDECREF(self->warning_callback);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
@@ -895,46 +947,76 @@ static PyObject* get_backup_files(Par2RepairerObject* self, void*) {
     return list;
 }
 
-static PyObject* get_progress_callback(Par2RepairerObject* self, void*) {
-    if (self->progress_callback == NULL)
+/*
+ * Why the last call failed, or None where it did not. Describes the call that
+ * returned last and the first thing that went wrong during it; error_callback sees
+ * every one of them as it happens, which is what a parallel scan needs.
+ */
+static PyObject* get_last_error(Par2RepairerObject* self, void*) {
+    if (self->verifier == NULL)
         Py_RETURN_NONE;
-    Py_INCREF(self->progress_callback);
-    return self->progress_callback;
+
+    par2::Par2Error error;
+    if (!self->verifier->GetLastError(&error))
+        Py_RETURN_NONE;
+
+    return Py_BuildValue("{s:i, s:s, s:s}",
+                         "code", (int)error.code,
+                         "message", error.message.c_str(),
+                         "filename", error.filename.c_str());
+}
+
+static PyObject* get_callback(PyObject* callback) {
+    if (callback == NULL)
+        Py_RETURN_NONE;
+    Py_INCREF(callback);
+    return callback;
+}
+
+static int set_callback(PyObject** slot, PyObject* value, const char* name) {
+    if (value == NULL || value == Py_None) {
+        Py_CLEAR(*slot);
+        return 0;
+    }
+    if (!PyCallable_Check(value)) {
+        PyErr_Format(PyExc_TypeError, "%s must be callable or None", name);
+        return -1;
+    }
+    Py_INCREF(value);
+    Py_XSETREF(*slot, value);
+    return 0;
+}
+
+static PyObject* get_progress_callback(Par2RepairerObject* self, void*) {
+    return get_callback(self->progress_callback);
 }
 
 static int set_progress_callback(Par2RepairerObject* self, PyObject* value, void*) {
-    if (value == NULL || value == Py_None) {
-        Py_CLEAR(self->progress_callback);
-        return 0;
-    }
-    if (!PyCallable_Check(value)) {
-        PyErr_SetString(PyExc_TypeError, "progress_callback must be callable or None");
-        return -1;
-    }
-    Py_INCREF(value);
-    Py_XSETREF(self->progress_callback, value);
-    return 0;
+    return set_callback(&self->progress_callback, value, "progress_callback");
 }
 
 static PyObject* get_file_done_callback(Par2RepairerObject* self, void*) {
-    if (self->file_done_callback == NULL)
-        Py_RETURN_NONE;
-    Py_INCREF(self->file_done_callback);
-    return self->file_done_callback;
+    return get_callback(self->file_done_callback);
 }
 
 static int set_file_done_callback(Par2RepairerObject* self, PyObject* value, void*) {
-    if (value == NULL || value == Py_None) {
-        Py_CLEAR(self->file_done_callback);
-        return 0;
-    }
-    if (!PyCallable_Check(value)) {
-        PyErr_SetString(PyExc_TypeError, "file_done_callback must be callable or None");
-        return -1;
-    }
-    Py_INCREF(value);
-    Py_XSETREF(self->file_done_callback, value);
-    return 0;
+    return set_callback(&self->file_done_callback, value, "file_done_callback");
+}
+
+static PyObject* get_error_callback(Par2RepairerObject* self, void*) {
+    return get_callback(self->error_callback);
+}
+
+static int set_error_callback(Par2RepairerObject* self, PyObject* value, void*) {
+    return set_callback(&self->error_callback, value, "error_callback");
+}
+
+static PyObject* get_warning_callback(Par2RepairerObject* self, void*) {
+    return get_callback(self->warning_callback);
+}
+
+static int set_warning_callback(Par2RepairerObject* self, PyObject* value, void*) {
+    return set_callback(&self->warning_callback, value, "warning_callback");
 }
 
 static PyGetSetDef Par2Repairer_getset[] = {
@@ -969,12 +1051,21 @@ static PyGetSetDef Par2Repairer_getset[] = {
     {"files", (getter)get_files, NULL, "Per-file state as a list of dicts.", NULL},
     {"backup_files", (getter)get_backup_files, NULL,
      "Damaged files repair() renamed out of the way.", NULL},
+    {"last_error", (getter)get_last_error, NULL,
+     "Why the last call failed as {code, message, filename}, or None if it did not.",
+     NULL},
     {"progress_callback", (getter)get_progress_callback, (setter)set_progress_callback,
      "Callable invoked as (stage, filename, percent), or None.", NULL},
     {"file_done_callback", (getter)get_file_done_callback, (setter)set_file_done_callback,
      "Callable invoked as (filename, blocks_found, blocks_total) once per file,\n"
      "or None. blocks_found > 0 means that file contributed data to the repair;\n"
      "both counts are 0 for a par2 file.", NULL},
+    {"error_callback", (getter)get_error_callback, (setter)set_error_callback,
+     "Callable invoked as (code, message, filename) once per error, or None.\n"
+     "code is a Par2ErrorCode. The operation may still succeed.", NULL},
+    {"warning_callback", (getter)get_warning_callback, (setter)set_warning_callback,
+     "Callable invoked as (code, message, filename) once per warning, or None.\n"
+     "code is a Par2WarningCode. Nothing else reports these.", NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 
 static PyTypeObject Par2RepairerType = {
@@ -1019,12 +1110,36 @@ static PyTypeObject Par2RepairerType = {
 
 /* ------------------------------------------------------------------------- */
 
+/* Add an IntEnum of the given members to the module, stealing the members dict. */
+static int add_int_enum(PyObject* m, const char* name, PyObject* members) {
+    if (members == NULL)
+        return 0;
+
+    PyObject* enum_module = PyImport_ImportModule("enum");
+    if (enum_module == NULL) {
+        Py_DECREF(members);
+        return 0;
+    }
+
+    PyObject* type = PyObject_CallMethod(enum_module, "IntEnum", "(sO)", name, members);
+    Py_DECREF(enum_module);
+    Py_DECREF(members);
+    if (type == NULL)
+        return 0;
+
+    if (PyModule_AddObject(m, name, type) < 0) {
+        Py_DECREF(type);
+        return 0;
+    }
+    return 1;
+}
+
 int par2_init(PyObject* m) {
     if (PyType_Ready(&Par2RepairerType) < 0)
         return 0;
 
     /* Mirrors libpar2.h's Result enum. */
-    PyObject* members = Py_BuildValue(
+    if (!add_int_enum(m, "Par2Result", Py_BuildValue(
         "{s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i}",
         "SUCCESS", (int)par2::eSuccess,
         "REPAIR_POSSIBLE", (int)par2::eRepairPossible,
@@ -1035,26 +1150,39 @@ int par2_init(PyObject* m) {
         "FILE_IO_ERROR", (int)par2::eFileIOError,
         "LOGIC_ERROR", (int)par2::eLogicError,
         "MEMORY_ERROR", (int)par2::eMemoryError,
-        "CANCELLED", (int)par2::eCancelled);
-    if (members == NULL)
+        "CANCELLED", (int)par2::eCancelled)))
         return 0;
 
-    PyObject* enum_module = PyImport_ImportModule("enum");
-    if (enum_module == NULL) {
-        Py_DECREF(members);
+    /* Mirrors libpar2.h's ErrorCode enum, which refines a failing Par2Result. */
+    if (!add_int_enum(m, "Par2ErrorCode", Py_BuildValue(
+        "{s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i, s:i}",
+        "NONE", (int)par2::ecNone,
+        "NOT_VERIFIED", (int)par2::ecNotVerified,
+        "INVALID_SETTING", (int)par2::ecInvalidSetting,
+        "PAR2_FILE_MISSING", (int)par2::ecPar2FileMissing,
+        "MAIN_PACKET_MISSING", (int)par2::ecMainPacketMissing,
+        "FILE_DESCRIPTION_MISSING", (int)par2::ecFileDescriptionMissing,
+        "DUPLICATE_SOURCE_FILE", (int)par2::ecDuplicateSourceFile,
+        "TOO_MANY_SOURCE_BLOCKS", (int)par2::ecTooManySourceBlocks,
+        "FILE_OPEN_FAILED", (int)par2::ecFileOpenFailed,
+        "FILE_CREATE_FAILED", (int)par2::ecFileCreateFailed,
+        "FILE_RENAME_FAILED", (int)par2::ecFileRenameFailed,
+        "FILE_READ_FAILED", (int)par2::ecFileReadFailed,
+        "FILE_WRITE_FAILED", (int)par2::ecFileWriteFailed,
+        "OUT_OF_MEMORY", (int)par2::ecOutOfMemory,
+        "PROCESSOR_FAILED", (int)par2::ecProcessorFailed,
+        "INTERNAL_ERROR", (int)par2::ecInternalError)))
         return 0;
-    }
 
-    PyObject* result_enum = PyObject_CallMethod(enum_module, "IntEnum", "(sO)", "Par2Result", members);
-    Py_DECREF(enum_module);
-    Py_DECREF(members);
-    if (result_enum == NULL)
+    /* Mirrors libpar2.h's WarningCode enum. */
+    if (!add_int_enum(m, "Par2WarningCode", Py_BuildValue(
+        "{s:i, s:i, s:i, s:i, s:i}",
+        "NONE", (int)par2::wcNone,
+        "FILENAME_UNSAFE", (int)par2::wcFilenameUnsafe,
+        "FILENAME_CHANGED", (int)par2::wcFilenameChanged,
+        "INCOMPLETE_WRITE", (int)par2::wcIncompleteWrite,
+        "INCOMPLETE_READ", (int)par2::wcIncompleteRead)))
         return 0;
-
-    if (PyModule_AddObject(m, "Par2Result", result_enum) < 0) {
-        Py_DECREF(result_enum);
-        return 0;
-    }
 
     Par2Error = PyErr_NewException("sabctools.Par2Error", NULL, NULL);
     if (Par2Error == NULL)
