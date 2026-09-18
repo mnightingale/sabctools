@@ -186,12 +186,12 @@ class Par2Repairer:
     progress_callback: Optional[Callable[[str, str, int], None]]
     """Called as (stage, filename, percent).
 
-    `stage` is one of "loading", "verifying", "repairing", "verifying_repair".
-    `filename` is set when a new file is opened and empty on percentage updates;
-    `percent` is 0-100 and always 0 during "loading", where par2 does not report a
-    usable fraction. Invoked from par2's worker threads, so it must be quick and must
-    not call back into the repairer other than cancel(). Exceptions raised here cannot
-    unwind through par2 and are reported via sys.unraisablehook.
+    `stage` is one of "loading", "verifying", "constructing", "solving", "repairing",
+    "verifying_repair", each of which counts from 0 again. `filename` is set when a new
+    file is opened and empty on percentage updates; `percent` is 0-100. Invoked from
+    par2's worker threads, so it must be quick and must not call back into the repairer
+    other than cancel(). Exceptions raised here cannot unwind through par2 and are
+    reported via sys.unraisablehook.
     """
 
     file_done_callback: Optional[Callable[[str, int, int], None]]
