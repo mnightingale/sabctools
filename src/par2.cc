@@ -43,6 +43,16 @@
 
 static PyObject* Par2Error = NULL;
 
+/* The IntEnums the module exposes, held so that a value can be returned as a member
+   of one rather than as the bare int behind it. */
+static PyObject* Par2ResultType = NULL;
+static PyObject* Par2ErrorCodeType = NULL;
+static PyObject* Par2WarningCodeType = NULL;
+
+static PyObject* enum_value(PyObject* type, int value) {
+    return PyObject_CallFunction(type, "i", value);
+}
+
 static const char* const STAGE_LOADING = "loading";
 static const char* const STAGE_VERIFYING = "verifying";
 static const char* const STAGE_CONSTRUCTING = "constructing";
@@ -214,15 +224,15 @@ void SabObserver::OnRepairStart(void) {
  * Relay one (code, message, filename) report to the user's callback. Called from the
  * thread that found the thing, under the same rules as call_progress.
  */
-static void call_report(PyObject* callback, int code, const std::string& message,
-                        const std::string& filename) {
+static void call_report(PyObject* callback, PyObject* type, int code,
+                        const std::string& message, const std::string& filename) {
     if (!callback)
         return;
 
     PyGILState_STATE gstate = PyGILState_Ensure();
 
-    PyObject* result =
-        PyObject_CallFunction(callback, "iss", code, message.c_str(), filename.c_str());
+    PyObject* result = PyObject_CallFunction(callback, "Nss", enum_value(type, code),
+                                             message.c_str(), filename.c_str());
     if (result == NULL) {
         PyErr_WriteUnraisable(callback);
     } else {
@@ -240,7 +250,8 @@ static void call_report(PyObject* callback, int code, const std::string& message
 void SabObserver::OnError(const par2::Par2Error& error) {
     if (!owner)
         return;
-    call_report(owner->error_callback, (int)error.code, error.message, error.filename);
+    call_report(owner->error_callback, Par2ErrorCodeType, (int)error.code, error.message,
+                error.filename);
 }
 
 /*
@@ -251,7 +262,8 @@ void SabObserver::OnError(const par2::Par2Error& error) {
 void SabObserver::OnWarning(const par2::Par2Warning& warning) {
     if (!owner)
         return;
-    call_report(owner->warning_callback, (int)warning.code, warning.message, warning.filename);
+    call_report(owner->warning_callback, Par2WarningCodeType, (int)warning.code, warning.message,
+                warning.filename);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -441,7 +453,7 @@ static PyObject* Par2Repairer_load(Par2RepairerObject* self, PyObject* Py_UNUSED
     if (result == par2::eCancelled)
         self->cancelled = true;
 
-    return PyLong_FromLong((long)result);
+    return enum_value(Par2ResultType, (int)result);
 }
 
 /* Scan the source files, leaving the outcome in self. False with a Python exception
@@ -469,7 +481,7 @@ static PyObject* Par2Repairer_verify(Par2RepairerObject* self, PyObject* Py_UNUS
     par2::Result result;
     if (!do_verify(self, &result))
         return NULL;
-    return PyLong_FromLong((long)result);
+    return enum_value(Par2ResultType, (int)result);
 }
 
 /*
@@ -502,7 +514,7 @@ static PyObject* Par2Repairer_verify_file(Par2RepairerObject* self, PyObject* ar
     else if (result != par2::eInsufficientCriticalData)
         self->verified = true;
 
-    return PyLong_FromLong((long)result);
+    return enum_value(Par2ResultType, (int)result);
 }
 
 /*
@@ -550,7 +562,7 @@ static PyObject* Par2Repairer_repair(Par2RepairerObject* self, PyObject* Py_UNUS
         if (!do_verify(self, &verified))
             return NULL;
         if (verified == par2::eCancelled || verified == par2::eRepairNotPossible)
-            return PyLong_FromLong((long)verified);
+            return enum_value(Par2ResultType, (int)verified);
     }
 
     self->stage = STAGE_REPAIRING;
@@ -577,7 +589,7 @@ static PyObject* Par2Repairer_repair(Par2RepairerObject* self, PyObject* Py_UNUS
     if (result == par2::eCancelled)
         self->cancelled = true;
 
-    return PyLong_FromLong((long)result);
+    return enum_value(Par2ResultType, (int)result);
 }
 
 /*
@@ -960,8 +972,8 @@ static PyObject* get_last_error(Par2RepairerObject* self, void*) {
     if (!self->verifier->GetLastError(&error))
         Py_RETURN_NONE;
 
-    return Py_BuildValue("{s:i, s:s, s:s}",
-                         "code", (int)error.code,
+    return Py_BuildValue("{s:N, s:s, s:s}",
+                         "code", enum_value(Par2ErrorCodeType, (int)error.code),
                          "message", error.message.c_str(),
                          "filename", error.filename.c_str());
 }
@@ -1110,8 +1122,9 @@ static PyTypeObject Par2RepairerType = {
 
 /* ------------------------------------------------------------------------- */
 
-/* Add an IntEnum of the given members to the module, stealing the members dict. */
-static int add_int_enum(PyObject* m, const char* name, PyObject* members) {
+/* Add an IntEnum of the given members to the module, stealing the members dict and
+   leaving a reference of our own in slot. */
+static int add_int_enum(PyObject* m, const char* name, PyObject* members, PyObject** slot) {
     if (members == NULL)
         return 0;
 
@@ -1127,10 +1140,13 @@ static int add_int_enum(PyObject* m, const char* name, PyObject* members) {
     if (type == NULL)
         return 0;
 
+    Py_INCREF(type);
     if (PyModule_AddObject(m, name, type) < 0) {
+        Py_DECREF(type);
         Py_DECREF(type);
         return 0;
     }
+    *slot = type;
     return 1;
 }
 
@@ -1150,7 +1166,7 @@ int par2_init(PyObject* m) {
         "FILE_IO_ERROR", (int)par2::eFileIOError,
         "LOGIC_ERROR", (int)par2::eLogicError,
         "MEMORY_ERROR", (int)par2::eMemoryError,
-        "CANCELLED", (int)par2::eCancelled)))
+        "CANCELLED", (int)par2::eCancelled), &Par2ResultType))
         return 0;
 
     /* Mirrors libpar2.h's ErrorCode enum, which refines a failing Par2Result. */
@@ -1171,7 +1187,7 @@ int par2_init(PyObject* m) {
         "FILE_WRITE_FAILED", (int)par2::ecFileWriteFailed,
         "OUT_OF_MEMORY", (int)par2::ecOutOfMemory,
         "PROCESSOR_FAILED", (int)par2::ecProcessorFailed,
-        "INTERNAL_ERROR", (int)par2::ecInternalError)))
+        "INTERNAL_ERROR", (int)par2::ecInternalError), &Par2ErrorCodeType))
         return 0;
 
     /* Mirrors libpar2.h's WarningCode enum. */
@@ -1181,7 +1197,7 @@ int par2_init(PyObject* m) {
         "FILENAME_UNSAFE", (int)par2::wcFilenameUnsafe,
         "FILENAME_CHANGED", (int)par2::wcFilenameChanged,
         "INCOMPLETE_WRITE", (int)par2::wcIncompleteWrite,
-        "INCOMPLETE_READ", (int)par2::wcIncompleteRead)))
+        "INCOMPLETE_READ", (int)par2::wcIncompleteRead), &Par2WarningCodeType))
         return 0;
 
     Par2Error = PyErr_NewException("sabctools.Par2Error", NULL, NULL);
