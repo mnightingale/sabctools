@@ -60,8 +60,48 @@ class Par2Result(IntEnum):
     MEMORY_ERROR = 8
     CANCELLED = 9
 
+class Par2ErrorCode(IntEnum):
+    """Why an operation failed, refining the Par2Result it returned."""
+
+    NONE = 0
+    NOT_VERIFIED = 1
+    INVALID_SETTING = 2
+    PAR2_FILE_MISSING = 3
+    MAIN_PACKET_MISSING = 4
+    FILE_DESCRIPTION_MISSING = 5
+    DUPLICATE_SOURCE_FILE = 6
+    TOO_MANY_SOURCE_BLOCKS = 7
+    FILE_OPEN_FAILED = 8
+    FILE_CREATE_FAILED = 9
+    FILE_RENAME_FAILED = 10
+    FILE_READ_FAILED = 11
+    FILE_WRITE_FAILED = 12
+    OUT_OF_MEMORY = 13
+    PROCESSOR_FAILED = 14
+    INTERNAL_ERROR = 15
+
+class Par2WarningCode(IntEnum):
+    """Something worth knowing which did not stop the work."""
+
+    NONE = 0
+    FILENAME_UNSAFE = 1
+    """A name the set records which this system may not accept as it stands"""
+    FILENAME_CHANGED = 2
+    """The name a file will be written under is not the name the set records"""
+    INCOMPLETE_WRITE = 3
+    INCOMPLETE_READ = 4
+
 class Par2Error(Exception):
     """Raised when par2 fails in a way it has no return code for."""
+
+class Par2LastError(TypedDict):
+    """Why the last call failed, as reported by Par2Repairer.last_error."""
+
+    code: Par2ErrorCode
+    message: str
+    """One line, without a trailing newline. May be empty."""
+    filename: str
+    """The file it concerns, empty where it concerns none"""
 
 class Par2File(TypedDict):
     """One file of a par2 set, as reported by Par2Repairer.files."""
@@ -201,6 +241,29 @@ class Par2Repairer:
     way to tell that joinable .001/.002 parts were consumed - par2 never reports those
     as source files. Both counts are 0 for a par2 file, which has no blocks of its own.
     Same threading rules as progress_callback.
+    """
+
+    error_callback: Optional[Callable[[Par2ErrorCode, str, str], None]]
+    """Called as (code, message, filename) once per error, as par2 finds it.
+
+    The operation may carry on and may still succeed - a file par2 could not open does
+    not fail a verify - so the Par2Result says whether it mattered. Use this rather than
+    last_error to see every error a parallel scan turns up. Same threading rules as
+    progress_callback.
+    """
+
+    warning_callback: Optional[Callable[[Par2WarningCode, str, str], None]]
+    """Called as (code, message, filename) once per warning, as par2 finds it.
+
+    Most often a name the set records which this system will not take as it stands.
+    Nothing else reports these: no outcome depends on them, so there is no property to
+    read them back from afterwards. Same threading rules as progress_callback.
+    """
+
+    last_error: Optional[Par2LastError]
+    """Why the last call failed, or None where it did not.
+
+    Describes the call that returned last and the first thing that went wrong during it.
     """
 
     missing_block_count: int

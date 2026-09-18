@@ -557,6 +557,50 @@ class TestPar2Progress:
         assert rep.verify() == sabctools.Par2Result.SUCCESS
 
 
+class TestPar2Errors:
+    def test_a_clean_run_reports_nothing(self, par2set):
+        rep = repairer(par2set)
+        rep.load()
+        assert rep.verify() == sabctools.Par2Result.SUCCESS
+        assert rep.last_error is None
+
+    def test_a_missing_set_says_which_file_and_why(self, tmp_path):
+        missing = os.path.join(str(tmp_path), "nope.par2")
+        rep = sabctools.Par2Repairer(missing, basepath=str(tmp_path))
+        assert rep.load() == sabctools.Par2Result.FILE_IO_ERROR
+
+        error = rep.last_error
+        assert error["code"] == sabctools.Par2ErrorCode.PAR2_FILE_MISSING
+        assert error["filename"] == missing
+        assert error["message"]
+
+    def test_the_callback_sees_it_as_it_happens(self, tmp_path):
+        errors = []
+        rep = sabctools.Par2Repairer(os.path.join(str(tmp_path), "nope.par2"), basepath=str(tmp_path))
+        rep.error_callback = lambda code, message, filename: errors.append(code)
+        rep.load()
+
+        assert errors == [sabctools.Par2ErrorCode.PAR2_FILE_MISSING]
+
+    def test_callbacks_can_be_cleared(self, par2set):
+        rep = repairer(par2set)
+        rep.error_callback = lambda *a: None
+        rep.warning_callback = lambda *a: None
+        assert rep.error_callback is not None
+        assert rep.warning_callback is not None
+        rep.error_callback = None
+        rep.warning_callback = None
+        assert rep.error_callback is None
+        assert rep.warning_callback is None
+
+    def test_non_callable_is_rejected(self, par2set):
+        rep = repairer(par2set)
+        with pytest.raises(TypeError):
+            rep.error_callback = "not callable"
+        with pytest.raises(TypeError):
+            rep.warning_callback = "not callable"
+
+
 class TestPar2Cancel:
     def test_cancel_from_callback(self, par2set):
         rep = repairer(par2set)
