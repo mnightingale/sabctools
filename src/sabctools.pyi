@@ -290,6 +290,12 @@ class Par2Repairer:
     """Total size of the recoverable files, in bytes"""
     setid: bytes
     """The par2 set id, 16 bytes, in the order the packets store it"""
+    creator: str
+    """The client that created the set, as its creator packet records it.
+
+    Empty until load(), and where the set carries no creator packet. The text is
+    whatever the client chose to write; bytes that are not UTF-8 are replaced.
+    """
     repair_possible: bool
     """Whether enough recovery blocks are available to repair"""
     cancelled: bool
