@@ -18,6 +18,7 @@
 import hashlib
 import os
 import shutil
+import struct
 import threading
 import zlib
 
@@ -53,6 +54,23 @@ def digests():
     return {name: md5(os.path.join(PAR2FILES, name)) for name in DATA_FILES}
 
 
+def rewrite_creator(path, transform):
+    """Rewrite the client text of each creator packet in a par2 file, keeping its length
+    and recomputing the packet hash so par2 still accepts it."""
+    with open(path, "rb") as f:
+        data = bytearray(f.read())
+    offset = data.find(b"PAR 2.0\x00Creator\x00")
+    while offset >= 0:
+        start = offset - 48
+        length = struct.unpack_from("<Q", data, start + 8)[0]
+        body = transform(bytes(data[start + 64 : start + length]))
+        data[start + 64 : start + length] = body
+        data[start + 16 : start + 32] = hashlib.md5(data[start + 32 : start + length]).digest()
+        offset = data.find(b"PAR 2.0\x00Creator\x00", start + length)
+    with open(path, "wb") as f:
+        f.write(data)
+
+
 def repairer(basepath, **kwargs):
     return sabctools.Par2Repairer(os.path.join(basepath, "rec.par2"), basepath=basepath, **kwargs)
 
@@ -72,6 +90,20 @@ class TestPar2Load:
         # The recovery set id sits at offset 32 of every packet header
         with open(os.path.join(par2set, "rec.par2"), "rb") as f:
             assert rep.setid == f.read(48)[32:48]
+
+    def test_reports_the_client_that_created_the_set(self, par2set):
+        rep = repairer(par2set)
+        assert rep.creator == ""
+        rep.load()
+        # The zero padding that rounds the packet to four bytes is not part of it
+        assert rep.creator == "Created by par2cmdline-turbo version 1.1.1."
+
+    def test_a_creator_which_is_not_utf8_does_not_raise(self, par2set):
+        for name in ("rec.par2", "rec.vol000+576.par2"):
+            rewrite_creator(os.path.join(par2set, name), lambda body: body.replace(b"Created", b"Cr\xe9ated"))
+        rep = repairer(par2set)
+        assert rep.load() == sabctools.Par2Result.SUCCESS
+        assert rep.creator.startswith("Cr\ufffdated by par2cmdline-turbo")
 
     def test_verify_before_load_is_rejected(self, par2set):
         rep = repairer(par2set)

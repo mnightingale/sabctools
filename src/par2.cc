@@ -834,6 +834,18 @@ static PyObject* get_setid(Par2RepairerObject* self, void*) {
     return PyBytes_FromStringAndSize((const char*)info.setid.data(), 16);
 }
 
+/*
+ * The client that created the set, as its creator packet records it. That is free
+ * text in whatever the client chose to write, so bytes which are not UTF-8 are
+ * replaced rather than raised.
+ */
+static PyObject* get_creator(Par2RepairerObject* self, void*) {
+    par2::Par2SetInfo info;
+    if (!set_info(self, &info))
+        return PyUnicode_FromString("");
+    return PyUnicode_DecodeUTF8(info.creator.data(), (Py_ssize_t)info.creator.size(), "replace");
+}
+
 static PyObject* get_quick_verified_files(Par2RepairerObject* self, void*) {
     return PyLong_FromSize_t(self->known ? self->known->size() : 0);
 }
@@ -1052,6 +1064,9 @@ static PyGetSetDef Par2Repairer_getset[] = {
     {"data_size", (getter)get_data_size, NULL, "Total size of the recoverable files, in bytes.",
      NULL},
     {"setid", (getter)get_setid, NULL, "The par2 set id, 16 bytes.", NULL},
+    {"creator", (getter)get_creator, NULL,
+     "The client that created the set, as its creator packet records it. Empty\n"
+     "until load(), and where the set carries none.", NULL},
     {"repair_possible", (getter)get_repair_possible, NULL,
      "Whether enough recovery blocks are available to repair.", NULL},
     {"cancelled", (getter)get_cancelled, NULL, "Whether cancel() stopped an operation.", NULL},
