@@ -72,7 +72,6 @@ public:
     void OnFile(const std::string& filename) override;
     void OnProgress(par2::Phase phase, par2::u32 permille) override;
     void OnFileDone(const std::string& filename, par2::u32 found, par2::u32 needed) override;
-    void OnRepairStart(void) override;
     void OnError(const par2::Par2Error& error) override;
     void OnWarning(const par2::Par2Warning& warning) override;
 
@@ -211,13 +210,6 @@ void SabObserver::OnFileDone(const std::string& filename, par2::u32 found, par2:
         Py_DECREF(result);
     }
     PyGILState_Release(gstate);
-}
-
-void SabObserver::OnRepairStart(void) {
-    if (!owner)
-        return;
-    owner->stage = STAGE_REPAIRING;
-    owner->last_progress = -1;
 }
 
 /*
