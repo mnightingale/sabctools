@@ -1,7 +1,6 @@
 # Build the vendored par2cmdline as a static library.
 #
-# Upstream ships autotools and an MSVC project, neither of which fits a Python
-# extension build. There is no CMake to drive, so unlike rapidyenc this is not an
+# Upstream's own CMake is not driven here: unlike rapidyenc this is not an
 # ExternalProject but a target in our own build - which is straightforward here
 # precisely because this fork carries no ParPar: no per-ISA flag matrix, no
 # compiler probes, nothing that has to stay in upstream's hands.
@@ -19,14 +18,14 @@ include(TestBigEndian)
 set(PAR2_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/par2")
 
 # --- what upstream builds into libpar2 ---------------------------------------
-# Mirrors libpar2_a_SOURCES in the vendored Makefile.am. Deliberately a list
+# Mirrors add_library(libpar2) in upstream's CMakeLists.txt. Deliberately a list
 # rather than a glob, and checked against the tree below, so that re-vendoring a
 # reshaped upstream fails at configure time instead of at link time.
 #
-# commandline.cpp and wargs.cpp are not in that list and are not built: the option
-# parser and the wide argv adapter belong to the tool, and the library proper never
-# includes their headers. That separation is what lets the glue depend on the public
-# header alone.
+# commandline.cpp, cli.cpp and wargs.cpp are not in that list and are not built: the
+# option parser, the command line and the wide argv adapter belong to the tool, and
+# the library proper never includes their headers. That separation is what lets the
+# glue depend on the public header alone.
 set(PAR2_SOURCES
     crc.cpp
     creatorpacket.cpp
@@ -55,7 +54,7 @@ set(PAR2_SOURCES
 )
 
 file(GLOB _par2_present RELATIVE "${PAR2_DIR}/src" CONFIGURE_DEPENDS "${PAR2_DIR}/src/*.cpp")
-list(REMOVE_ITEM _par2_present commandline.cpp wargs.cpp)
+list(REMOVE_ITEM _par2_present commandline.cpp cli.cpp wargs.cpp)
 set(_par2_expected ${PAR2_SOURCES})
 list(SORT _par2_present)
 list(SORT _par2_expected)
@@ -64,7 +63,7 @@ if(NOT _par2_present STREQUAL _par2_expected)
         "the vendored par2 sources do not match cmake/par2.cmake.\n"
         "  in the tree : ${_par2_present}\n"
         "  expected    : ${_par2_expected}\n"
-        "Re-check libpar2_a_SOURCES in src/par2/Makefile.am and update PAR2_SOURCES.")
+        "Re-check add_library(libpar2) in upstream's CMakeLists.txt and update PAR2_SOURCES.")
 endif()
 
 list(TRANSFORM PAR2_SOURCES PREPEND "${PAR2_DIR}/src/")
@@ -108,7 +107,7 @@ configure_file(
 # --- the library --------------------------------------------------------------
 add_library(par2 STATIC ${PAR2_SOURCES})
 
-# C++14, which is what upstream's own Makefile.am asks for. Building it at the
+# C++14, which is what upstream's own CMakeLists.txt asks for. Building it at the
 # standard upstream targets is what lets a re-vendor catch a regression here rather
 # than at the next release. Not C++20: libc++ instantiates constexpr destructors
 # eagerly there and par2's incomplete types do not survive it.

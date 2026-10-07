@@ -110,6 +110,7 @@ public:
        const std::string &_basepath, const Backends &backends)
     : Par2Repairer(sout, serr, noiselevel, backends)
     , prepared(eInsufficientCriticalData)
+    , preparefailure()
   {
     basepath = _basepath;
   }
@@ -147,33 +148,46 @@ public:
     // file and nothing new arrived.
     const u32 before = packetsloaded;
 
-    // Read it again even if it has been seen before
-    if (!LoadPackets(DiskFile::GetCanonicalPathname(parfilename), none, true) || IsCancelled())
-    {
-      if (IsCancelled())
-        return eCancelled;
+    // Read it again even if it has been seen before. What a cancel left read is
+    // prepared all the same, so that no packet stays unchecked.
+    bool opened = true;
+    const bool loaded = LoadPackets(parfilename, none, true, &opened);
+    const bool stopped = IsCancelled();
 
+    if (!loaded && !stopped)
+    {
       errorlog.Record(ecInternalError, "Could not load the PAR2 packets", parfilename);
       return eLogicError;
     }
 
-    if (packetsloaded == before && !DiskFile::FileExists(parfilename))
+    if (!stopped && packetsloaded == before && !DiskFile::FileExists(parfilename))
     {
       errorlog.Record(ecPar2FileMissing, "There is no such PAR2 file", parfilename);
       return eFileIOError;
     }
 
     // Nor is one which is there but could not be opened
-    Par2Error failure;
-    if (packetsloaded == before && errorlog.First(&failure) && ecFileOpenFailed == failure.code
-        && DiskFile::GetCanonicalPathname(failure.filename) == DiskFile::GetCanonicalPathname(parfilename))
+    if (!stopped && packetsloaded == before && !opened)
       return eFileIOError;
 
     prepared = PreparePackets();
+    preparefailure = Par2Error();
+    errorlog.First(&preparefailure);
 
     if (setchanged)
       *setchanged = (sourceblockcount != blocksbefore) || (DescribedFileCount() != filesbefore)
                     || (VerifiableFileCount() != verifiablebefore);
+
+    return stopped ? eCancelled : prepared;
+  }
+
+  // What the packets read so far amount to, recorded as Add records it
+  Result Prepared(void)
+  {
+    ClearLastError();
+
+    if (prepared != eSuccess)
+      errorlog.Record(preparefailure.code, preparefailure.message, preparefailure.filename);
 
     return prepared;
   }
@@ -186,10 +200,35 @@ public:
   // Forget every scan, keeping what the PAR2 files hold
   void DiscardScans(void)
   {
+    for (auto *sourcefile : sourcefiles)
+    {
+      if (0 == sourcefile)
+        continue;
+
+      sourcefile->SetTargetFile(0);
+      sourcefile->SetTargetExists(false);
+      sourcefile->SetCompleteFile(0);
+
+      if (sourcefile->GetDescriptionPacket() != 0)
+      {
+        auto block = sourcefile->SourceBlocks();
+        for (u32 i = 0; i < sourcefile->BlockCount(); ++i, ++block)
+        {
+          if (block->IsSet())
+            block->ClearLocation();
+        }
+      }
+    }
+
+    renamedlist.clear();
+
     for (auto *diskfile : diskFileMap.Files())
     {
       if (0 == packetfiles.count(diskfile))
-        DiscardScannedFile(diskfile);
+      {
+        diskFileMap.Remove(diskfile);
+        delete diskfile;
+      }
     }
   }
 
@@ -223,7 +262,7 @@ public:
 
     if (prepared != eSuccess)
     {
-      errorlog.Record(ecTooManySourceBlocks, "The set needs more blocks than can be held");
+      errorlog.Record(preparefailure.code, preparefailure.message, preparefailure.filename);
       return prepared;
     }
 
@@ -233,9 +272,11 @@ public:
   Result Scan(const std::string &filename, const size_t memorylimit,
               const u32 _nthreads, const u32 _filethreads)
   {
+    ClearLastError();
+
     if (0 != mainpacket && prepared != eSuccess)
     {
-      errorlog.Record(ecTooManySourceBlocks, "The set needs more blocks than can be held");
+      errorlog.Record(preparefailure.code, preparefailure.message, preparefailure.filename);
       return prepared;
     }
 
@@ -266,7 +307,7 @@ public:
 
     if (prepared != eSuccess)
     {
-      errorlog.Record(ecTooManySourceBlocks, "The set needs more blocks than can be held");
+      errorlog.Record(preparefailure.code, preparefailure.message, preparefailure.filename);
       return prepared;
     }
 
@@ -293,7 +334,7 @@ public:
 
     if (prepared != eSuccess)
     {
-      errorlog.Record(ecTooManySourceBlocks, "The set needs more blocks than can be held");
+      errorlog.Record(preparefailure.code, preparefailure.message, preparefailure.filename);
       return prepared;
     }
 
@@ -304,6 +345,7 @@ public:
 
 private:
   Result prepared;                          // What the last PreparePackets returned
+  Par2Error preparefailure;                 // and why, when it failed
 };
 
 // Append a path separator unless there is one already. Empty is left alone.
@@ -317,6 +359,16 @@ std::string WithSeparator(const std::string &path)
     return path;
 
   return path + PATHSEP;
+}
+
+// The name of a set, without the ".par2" its index file ends in
+std::string SetNameFor(const std::string &parfilename)
+{
+  if (parfilename.length() > 5 &&
+      0 == stricmp(parfilename.substr(parfilename.length()-5, 5).c_str(), ".par2"))
+    return parfilename.substr(0, parfilename.length()-5);
+
+  return parfilename;
 }
 
 // Absolute and ending in a separator, which is the form every path this API
@@ -345,6 +397,63 @@ std::string BasePathFor(const std::string &parfilename)
   return basepath;
 }
 
+// What a Par2Verifier keeps of its own, apart from the engine
+struct Par2Verifier::State
+{
+  State(std::ostream &_sout, std::ostream &_serr, NoiseLevel _noiselevel,
+        const std::string &_basepath, Backends _backends)
+  : nullstream()
+  , sout(_sout)
+  , serr(_serr)
+  , noiselevel(_noiselevel)
+  , backends(std::move(_backends))
+  , observer(0)
+  , memorylimit(MemoryLimit(0))
+  , nthreads(0)
+  , filethreads(0)
+  , skipdata(false)
+  , skipleaway(DEFAULT_SKIP_LEAWAY)
+  , fullhash(false)
+  , par2files()
+  , scannedfiles()
+  , knownblocks()
+  , verified(false)
+  , scanned(false)
+  , repaired(false)
+  , readback(false)
+  , cancelled(false)
+  , restarting(false)
+  , basepath(NormaliseBasePath(_basepath))
+  , lasterror()
+  {
+  }
+
+  std::unique_ptr<std::ostream> nullstream;
+  std::ostream &sout;
+  std::ostream &serr;
+  NoiseLevel noiselevel;
+  Backends backends;
+  Par2Observer *observer;
+  size_t memorylimit;
+  u32 nthreads;
+  u32 filethreads;
+  bool skipdata;
+  u64 skipleaway;
+  bool fullhash;
+  std::vector<std::string> par2files;
+  std::set<std::string> scannedfiles;
+  std::map<std::string, std::vector<bool> > knownblocks;
+  bool verified;
+  bool scanned;
+  bool repaired;
+  bool readback;
+  std::mutex cancelmutex;
+  bool cancelled;
+  bool restarting;
+  std::string basepath;
+  Par2Error lasterror;
+};
+
 // A repair, or a set which changes shape after files were scanned, leaves a
 // Par2Repairer with results which no longer hold, so the work starts again from
 // a new one. The PAR2 files that were added are read again.
@@ -353,62 +462,65 @@ void Par2Verifier::Restart(void)
   // A cancel which arrives while the engine is replaced and the PAR2 files
   // are read again is kept for the new one rather than given to either
   {
-    std::lock_guard<std::mutex> lock(cancelmutex);
-    restarting = true;
-    impl = std::make_unique<Impl>(sout, serr, nlSilent, basepath, backends);
+    std::lock_guard<std::mutex> lock(state->cancelmutex);
+    state->restarting = true;
+    impl = std::make_unique<Impl>(state->sout, state->serr, nlSilent, state->basepath, state->backends);
   }
 
   // The replay repeats work the observer has already been told about, so it is
   // told none of it, and nothing is written to the streams again. The observer
   // is attached once the handle is back where it was.
-  impl->SetDataSkipping(skipdata, skipleaway);
-  impl->SetFullHash(fullhash);
+  impl->SetDataSkipping(state->skipdata, state->skipleaway);
+  impl->SetFullHash(state->fullhash);
 
-  for (std::map<std::string, std::vector<bool> >::const_iterator kb = knownblocks.begin();
-       kb != knownblocks.end();
+  for (std::map<std::string, std::vector<bool> >::const_iterator kb = state->knownblocks.begin();
+       kb != state->knownblocks.end();
        ++kb)
   {
     impl->SetKnownBlocks(kb->first, kb->second);
   }
 
-  for (const auto &par2file : par2files)
+  for (const auto &par2file : state->par2files)
   {
     impl->Add(par2file, 0);
   }
 
-  verified = false;
-  scanned = false;
-  repaired = false;
+  state->verified = false;
+  state->scanned = false;
+  state->repaired = false;
 
   // A cancel reaches the rescan, which stops where it got to
   {
-    std::lock_guard<std::mutex> lock(cancelmutex);
-    restarting = false;
+    std::lock_guard<std::mutex> lock(state->cancelmutex);
+    state->restarting = false;
 
-    if (cancelled)
+    if (state->cancelled)
       impl->Cancel();
   }
 
-  const std::vector<std::string> rescan = scannedfiles;
-  scannedfiles.clear();
+  const std::set<std::string> rescan = state->scannedfiles;
+  state->scannedfiles.clear();
+
+  bool cutshort = false;
 
   for (const auto &f : rescan)
   {
-    if (impl->IsCancelled())
+    if (impl->IsCancelled() || eCancelled == VerifyFile(f))
+    {
+      cutshort = true;
       break;
-
-    VerifyFile(f);
+    }
   }
 
   // What the rescan did not reach is kept for the next one
-  if (impl->IsCancelled())
+  if (cutshort)
   {
-    scannedfiles = rescan;
-    verified = false;
+    state->scannedfiles = rescan;
+    state->verified = false;
   }
 
-  impl->SetNoiseLevel(noiselevel);
-  impl->SetObserver(observer);
+  impl->SetNoiseLevel(state->noiselevel);
+  impl->SetObserver(state->observer);
 }
 
 // Discards everything written to it
@@ -441,51 +553,32 @@ private:
 
 Par2Verifier::Par2Verifier(std::ostream &sout, std::ostream &serr, NoiseLevel noiselevel,
                            const std::string &_basepath, Backends _backends)
-: nullstream()
-, sout(sout)
-, serr(serr)
-, noiselevel(noiselevel)
-, backends(std::move(_backends))
-, observer(0)
-, memorylimit(MemoryLimit(0))
-, nthreads(0)
-, filethreads(0)
-, skipdata(false)
-, skipleaway(DEFAULT_SKIP_LEAWAY)
-, fullhash(false)
-, par2files()
-, scannedfiles()
-, knownblocks()
-, verified(false)
-, scanned(false)
-, repaired(false)
-, cancelled(false)
-, restarting(false)
-, basepath(NormaliseBasePath(_basepath))
-, lasterror()
-, impl(new Impl(sout, serr, noiselevel, basepath, backends))
+: state(new State(sout, serr, noiselevel, _basepath, std::move(_backends)))
+, impl(new Impl(sout, serr, noiselevel, state->basepath, state->backends))
 {
 }
 
 Par2Verifier::Par2Verifier(const std::string &_basepath, Backends _backends)
-: Par2Verifier(std::unique_ptr<NullStream>(new NullStream), _basepath, std::move(_backends))
+: Par2Verifier(std::unique_ptr<std::ostream>(new NullStream), _basepath, std::move(_backends))
 {
 }
 
-Par2Verifier::Par2Verifier(std::unique_ptr<NullStream> _nullstream, const std::string &_basepath, Backends _backends)
+Par2Verifier::Par2Verifier(std::unique_ptr<std::ostream> _nullstream, const std::string &_basepath, Backends _backends)
 : Par2Verifier(*_nullstream, *_nullstream, nlSilent, _basepath, std::move(_backends))
 {
-  nullstream = std::move(_nullstream);
+  state->nullstream = std::move(_nullstream);
 }
 
 Par2Verifier::~Par2Verifier() = default;
 
 // The engine records the error, but Restart throws the engine away, so the
-// handle keeps its own copy of what the call it is returning from recorded.
-void Par2Verifier::TakeLastError(void)
+// handle keeps its own copy of what the call it is returning from recorded. A
+// call which succeeded or was cancelled carries none.
+void Par2Verifier::TakeLastError(const Result result)
 {
-  lasterror = Par2Error();
-  impl->GetLastError(&lasterror);
+  state->lasterror = Par2Error();
+  if (result != eSuccess && result != eCancelled)
+    impl->GetLastError(&state->lasterror);
 }
 
 // Make an error the one the call reports, and tell the observer
@@ -504,67 +597,69 @@ static void ReportError(Par2Error &lasterror, Par2Observer *observer, const Erro
 // What the handle itself has to report, rather than the work it delegates
 void Par2Verifier::RecordLastError(const ErrorCode code, const std::string &message)
 {
-  ReportError(lasterror, observer, code, message);
+  ReportError(state->lasterror, state->observer, code, message);
 }
 
 bool Par2Verifier::GetLastError(Par2Error *error) const
 {
-  if (0 == error || ecNone == lasterror.code)
+  if (0 == error || ecNone == state->lasterror.code)
     return false;
 
-  *error = lasterror;
+  *error = state->lasterror;
   return true;
 }
 
 void Par2Verifier::SetObserver(Par2Observer *_observer)
 {
-  observer = _observer;
+  state->observer = _observer;
   impl->SetObserver(_observer);
 }
 
 void Par2Verifier::SetMemoryLimit(const size_t _memorylimit)
 {
-  memorylimit = MemoryLimit(_memorylimit);
+  state->memorylimit = MemoryLimit(_memorylimit);
 }
 
 void Par2Verifier::SetDataSkipping(const bool enabled, const u64 leaway)
 {
-  skipdata = enabled;
-  skipleaway = (leaway != 0) ? leaway : DEFAULT_SKIP_LEAWAY;
+  state->skipdata = enabled;
+  state->skipleaway = (leaway != 0) ? leaway : DEFAULT_SKIP_LEAWAY;
 
-  impl->SetDataSkipping(skipdata, skipleaway);
+  impl->SetDataSkipping(state->skipdata, state->skipleaway);
 }
 
 void Par2Verifier::SetFullHash(const bool enabled)
 {
-  fullhash = enabled;
+  state->fullhash = enabled;
 
-  impl->SetFullHash(fullhash);
+  impl->SetFullHash(state->fullhash);
 }
 
 void Par2Verifier::SetThreadCounts(const u32 _nthreads, const u32 _filethreads)
 {
-  nthreads = _nthreads;
-  filethreads = _filethreads;
+  state->nthreads = _nthreads;
+  state->filethreads = _filethreads;
 }
 
 Result Par2Verifier::AddPar2File(const std::string &_parfilename)
 {
   const std::string parfilename = DiskFile::GetCanonicalPathname(_parfilename);
 
-  // Naming the same file again is not an error, there is simply nothing to do
-  if (std::find(par2files.begin(), par2files.end(), parfilename) != par2files.end())
+  // Naming the same file again reads nothing more, and says what the packets
+  // read so far amount to
+  if (std::find(state->par2files.begin(), state->par2files.end(), parfilename) != state->par2files.end())
   {
-    lasterror = Par2Error();
-    return eSuccess;
+    const Result result = impl->Prepared();
+    TakeLastError(result);
+    return result;
   }
 
   // Take it from the first PAR2 file named, before any packets are read
-  const bool derived = basepath.empty();
+  const bool derived = state->basepath.empty();
   if (derived)
   {
-    basepath = NormaliseBasePath(BasePathFor(parfilename));
-    impl->SetBasePath(basepath);
+    state->basepath = NormaliseBasePath(BasePathFor(parfilename));
+    impl->SetBasePath(state->basepath);
   }
 
   bool setchanged = false;
@@ -572,51 +667,51 @@ Result Par2Verifier::AddPar2File(const std::string &_parfilename)
 
   // Restart replays the scans through VerifyFile, which would otherwise leave
   // the handle holding what the replay found rather than what Add recorded
-  TakeLastError();
-  const Par2Error added = lasterror;
+  TakeLastError(result);
+  const Par2Error added = state->lasterror;
 
   // Remembered even without the critical packets, so that a later restart
   // replays it alongside the file that completes the set. A cancelled load is
   // not remembered, so that naming it again after ClearCancel reads the rest.
   if (result != eFileIOError && result != eCancelled)
   {
-    par2files.push_back(parfilename);
+    state->par2files.push_back(parfilename);
   }
   else if (derived && result == eFileIOError)
   {
     // Taken again from the next one
-    basepath.clear();
-    impl->SetBasePath(basepath);
+    state->basepath.clear();
+    impl->SetBasePath(state->basepath);
   }
 
   // Extra recovery data leaves what the scan found still true, so it is kept
   // and Reassess can use it. A set of a different shape does not, even when the
   // scan was cancelled. Files scanned before the set was known are replayed by
   // the same restart.
-  if (setchanged && (scanned || !scannedfiles.empty()))
+  if (setchanged && (state->scanned || !state->scannedfiles.empty()))
     Restart();
 
-  lasterror = added;
+  state->lasterror = added;
 
   return result;
 }
 
 Result Par2Verifier::Reassess(void)
 {
-  if (!verified)
+  if (!state->verified)
   {
     RecordLastError(ecNotVerified, "Nothing has been verified yet");
     return eLogicError;
   }
 
-  if (repaired)
+  if (state->repaired)
   {
     RecordLastError(ecNotVerified, "Nothing has been verified since the last repair");
     return eLogicError;
   }
 
   const Result result = impl->Reassess();
-  TakeLastError();
+  TakeLastError(result);
 
   return result;
 }
@@ -639,11 +734,12 @@ bool Par2Verifier::GetBlockChecksums(const std::string &filename,
 
 // Guarded by verified, unlike GetBlockChecksums: before anything has been
 // scanned every block would read as not found, which is not the same as
-// nothing having been looked at.
+// nothing having been looked at. After a repair which rebuilt files without
+// reading them back, what was found describes the files it replaced.
 bool Par2Verifier::GetFoundBlocks(const std::string &filename,
                                   std::vector<bool> *blocks) const
 {
-  if (!verified)
+  if (!state->verified || (state->repaired && !state->readback))
     return false;
 
   return impl->GetFoundBlocks(filename, blocks);
@@ -661,7 +757,7 @@ bool Par2Verifier::GetRenamedFiles(std::vector<std::pair<std::string, std::strin
 
 bool Par2Verifier::GetVerifyResult(Par2VerifyResult *result) const
 {
-  if (!verified)
+  if (!state->verified)
     return false;
 
   return impl->GetVerifyResult(result);
@@ -674,9 +770,9 @@ bool Par2Verifier::SetKnownBlocks(const std::string &filename,
     return false;
 
   if (blocks.empty())
-    knownblocks.erase(filename);
+    state->knownblocks.erase(filename);
   else
-    knownblocks[filename] = blocks;
+    state->knownblocks[filename] = blocks;
 
   return true;
 }
@@ -686,41 +782,42 @@ Result Par2Verifier::Verify(const std::vector<std::string> &extrafiles)
   // A full pass covers everything the individual scans did, so they are dropped
   // rather than replayed into it. Whatever was scanned before, by a pass that
   // was cancelled too, is started afresh.
-  scannedfiles.clear();
+  state->scannedfiles.clear();
 
-  if (repaired)
+  if (state->repaired)
     Restart();
   else
     impl->DiscardScans();
 
-  verified = false;
+  state->verified = false;
 
-  const Result result = impl->Check(extrafiles, memorylimit, nthreads, filethreads);
-  TakeLastError();
+  const Result result = impl->Check(extrafiles, state->memorylimit, state->nthreads, state->filethreads);
+  TakeLastError(result);
 
   if (result != eInsufficientCriticalData)
-    scanned = true;
+    state->scanned = true;
 
   if (result == eSuccess || result == eRepairPossible || result == eRepairNotPossible)
-    verified = true;
+    state->verified = true;
 
   return result;
 }
 
 Result Par2Verifier::VerifyFile(const std::string &filename)
 {
-  // The files a repair wrote or renamed are scanned by a new engine
-  if (repaired)
+  // After a repair a new engine starts from nothing, and each file is scanned
+  // again as it is fed in
+  if (state->repaired)
   {
-    scannedfiles.erase(std::remove(scannedfiles.begin(), scannedfiles.end(), filename), scannedfiles.end());
+    state->scannedfiles.clear();
     Restart();
   }
 
-  const Result result = impl->Scan(filename, memorylimit, nthreads, filethreads);
-  TakeLastError();
+  const Result result = impl->Scan(filename, state->memorylimit, state->nthreads, state->filethreads);
+  TakeLastError(result);
 
   if (result != eInsufficientCriticalData)
-    scanned = true;
+    state->scanned = true;
 
   if (result == eCancelled)
     return result;
@@ -728,24 +825,23 @@ Result Par2Verifier::VerifyFile(const std::string &filename)
   // Remembered even when the set is not known yet, so that adding the PAR2 file
   // which describes it replays the scan rather than losing it. Scanning one
   // again replaces what the last scan of it found, so it is remembered once.
-  if (std::find(scannedfiles.begin(), scannedfiles.end(), filename) == scannedfiles.end())
-    scannedfiles.push_back(filename);
+  state->scannedfiles.insert(DiskFile::GetCanonicalPathname(filename));
 
   if (result == eSuccess || result == eRepairPossible || result == eRepairNotPossible)
-    verified = true;
+    state->verified = true;
 
   return result;
 }
 
 Result Par2Verifier::Repair(const bool verifyafter)
 {
-  if (!verified)
+  if (!state->verified)
   {
     RecordLastError(ecNotVerified, "Nothing has been verified yet");
     return eLogicError;
   }
 
-  if (repaired)
+  if (state->repaired)
   {
     RecordLastError(ecNotVerified, "Nothing has been verified since the last repair");
     return eLogicError;
@@ -753,33 +849,45 @@ Result Par2Verifier::Repair(const bool verifyafter)
 
   if (!impl->CanRepair())
   {
-    lasterror = Par2Error();
+    state->lasterror = Par2Error();
     return eRepairNotPossible;
   }
 
-  repaired = true;
+  Par2VerifyResult before;
+  impl->GetVerifyResult(&before);
 
-  const Result result = impl->Rebuild(memorylimit, nthreads, filethreads, verifyafter);
-  TakeLastError();
+  // A repair forgets every block vouched for
+  for (const auto &kb : state->knownblocks)
+    impl->SetKnownBlocks(kb.first, std::vector<bool>());
+  state->knownblocks.clear();
+
+  state->repaired = true;
+
+  const Result result = impl->Rebuild(state->memorylimit, state->nthreads, state->filethreads, verifyafter);
+
+  // A repair which only renames files writes nothing to read back
+  state->readback = result == eSuccess
+                    && (verifyafter || before.damagedfilecount + before.missingfilecount == 0);
+  TakeLastError(result);
 
   return result;
 }
 
 void Par2Verifier::Cancel(void)
 {
-  std::lock_guard<std::mutex> lock(cancelmutex);
-  cancelled = true;
+  std::lock_guard<std::mutex> lock(state->cancelmutex);
+  state->cancelled = true;
 
-  if (!restarting)
+  if (!state->restarting)
     impl->Cancel();
 }
 
 void Par2Verifier::ClearCancel(void)
 {
-  std::lock_guard<std::mutex> lock(cancelmutex);
-  cancelled = false;
+  std::lock_guard<std::mutex> lock(state->cancelmutex);
+  state->cancelled = false;
 
-  if (!restarting)
+  if (!state->restarting)
     impl->ClearCancel();
 }
 
@@ -795,203 +903,219 @@ public:
   }
 };
 
+// What a Par2Creator keeps of its own, apart from the engine
+struct Par2Creator::State
+{
+  State(std::ostream &_sout, std::ostream &_serr, NoiseLevel _noiselevel,
+        const std::string &_basepath, Backends _backends)
+  : nullstream()
+  , sout(_sout)
+  , serr(_serr)
+  , noiselevel(_noiselevel)
+  , backends(std::move(_backends))
+  , observer(0)
+  , sourcefiles()
+  , blocksize(0)
+  , recoveryblockcount(0)
+  , recoveryfilescheme(scVariable)
+  , recoveryfilecount(0)
+  , firstrecoveryblock(0)
+  , memorylimit(MemoryLimit(0))
+  , nthreads(0)
+  , filethreads(0)
+  , cancelled(false)
+  , basepath(NormaliseBasePath(_basepath))
+  , lasterror()
+  {
+  }
+
+  std::unique_ptr<std::ostream> nullstream;
+  std::ostream &sout;
+  std::ostream &serr;
+  NoiseLevel noiselevel;
+  Backends backends;
+  Par2Observer *observer;
+  std::vector<std::string> sourcefiles;
+  u64 blocksize;
+  u32 recoveryblockcount;
+  Scheme recoveryfilescheme;
+  u32 recoveryfilecount;
+  u32 firstrecoveryblock;
+  size_t memorylimit;
+  u32 nthreads;
+  u32 filethreads;
+  std::mutex cancelmutex;
+  bool cancelled;
+  std::string basepath;
+  Par2Error lasterror;
+};
+
 // A create leaves the engine holding the packets of the set it wrote, so a
 // second one has to start from a new engine. Nothing is replayed into it:
 // every setting lives on the handle and is passed into the run.
 void Par2Creator::Restart(void)
 {
-  std::lock_guard<std::mutex> lock(cancelmutex);
+  std::lock_guard<std::mutex> lock(state->cancelmutex);
 
-  impl = std::make_unique<Impl>(sout, serr, noiselevel, backends);
-  impl->SetObserver(observer);
+  impl = std::make_unique<Impl>(state->sout, state->serr, state->noiselevel, state->backends);
+  impl->SetObserver(state->observer);
 
-  if (cancelled)
+  if (state->cancelled)
     impl->Cancel();
 }
 
 // The engine records the error, but Restart throws the engine away, so the
-// handle keeps its own copy of what the call it is returning from recorded.
-void Par2Creator::TakeLastError(void)
+// handle keeps its own copy of what the call it is returning from recorded. A
+// call which succeeded or was cancelled carries none.
+void Par2Creator::TakeLastError(const Result result)
 {
-  lasterror = Par2Error();
-  impl->GetLastError(&lasterror);
+  state->lasterror = Par2Error();
+  if (result != eSuccess && result != eCancelled)
+    impl->GetLastError(&state->lasterror);
 }
 
 Par2Creator::Par2Creator(std::ostream &sout, std::ostream &serr, NoiseLevel noiselevel,
                          const std::string &_basepath, Backends _backends)
-: nullstream()
-, sout(sout)
-, serr(serr)
-, noiselevel(noiselevel)
-, backends(std::move(_backends))
-, observer(0)
-, sourcefiles()
-, blocksize(0)
-, recoveryblockcount(0)
-, recoveryfilescheme(scVariable)
-, recoveryfilecount(0)
-, firstrecoveryblock(0)
-, memorylimit(MemoryLimit(0))
-, nthreads(0)
-, filethreads(0)
-, cancelled(false)
-, basepath(NormaliseBasePath(_basepath))
-, lasterror()
-, impl(new Impl(sout, serr, noiselevel, backends))
+: state(new State(sout, serr, noiselevel, _basepath, std::move(_backends)))
+, impl(new Impl(sout, serr, noiselevel, state->backends))
 {
 }
 
 Par2Creator::Par2Creator(const std::string &_basepath, Backends _backends)
-: Par2Creator(std::unique_ptr<NullStream>(new NullStream), _basepath, std::move(_backends))
+: Par2Creator(std::unique_ptr<std::ostream>(new NullStream), _basepath, std::move(_backends))
 {
 }
 
-Par2Creator::Par2Creator(std::unique_ptr<NullStream> _nullstream, const std::string &_basepath, Backends _backends)
+Par2Creator::Par2Creator(std::unique_ptr<std::ostream> _nullstream, const std::string &_basepath, Backends _backends)
 : Par2Creator(*_nullstream, *_nullstream, nlSilent, _basepath, std::move(_backends))
 {
-  nullstream = std::move(_nullstream);
+  state->nullstream = std::move(_nullstream);
 }
 
 Par2Creator::~Par2Creator() = default;
 
 void Par2Creator::SetObserver(Par2Observer *_observer)
 {
-  observer = _observer;
+  state->observer = _observer;
   impl->SetObserver(_observer);
 }
 
 void Par2Creator::AddSourceFile(const std::string &filename)
 {
-  sourcefiles.push_back(filename);
+  state->sourcefiles.push_back(filename);
 }
 
 void Par2Creator::AddSourceFiles(const std::vector<std::string> &filenames)
 {
-  sourcefiles.insert(sourcefiles.end(), filenames.begin(), filenames.end());
+  state->sourcefiles.insert(state->sourcefiles.end(), filenames.begin(), filenames.end());
 }
 
 void Par2Creator::SetBlockSize(const u64 _blocksize)
 {
-  blocksize = _blocksize;
+  state->blocksize = _blocksize;
 }
 
 void Par2Creator::SetRecoveryBlockCount(const u32 _recoveryblockcount)
 {
-  recoveryblockcount = _recoveryblockcount;
+  state->recoveryblockcount = _recoveryblockcount;
 }
 
 void Par2Creator::SetRecoveryFileScheme(const Scheme scheme, const u32 _recoveryfilecount)
 {
-  recoveryfilescheme = scheme;
-  recoveryfilecount = _recoveryfilecount;
+  state->recoveryfilescheme = scheme;
+  state->recoveryfilecount = _recoveryfilecount;
 }
 
 void Par2Creator::SetFirstRecoveryBlock(const u32 firstblock)
 {
-  firstrecoveryblock = firstblock;
+  state->firstrecoveryblock = firstblock;
 }
 
 void Par2Creator::SetMemoryLimit(const size_t _memorylimit)
 {
-  memorylimit = MemoryLimit(_memorylimit);
+  state->memorylimit = MemoryLimit(_memorylimit);
 }
 
 void Par2Creator::SetThreadCounts(const u32 _nthreads, const u32 _filethreads)
 {
-  nthreads = _nthreads;
-  filethreads = _filethreads;
+  state->nthreads = _nthreads;
+  state->filethreads = _filethreads;
 }
 
 Result Par2Creator::Create(const std::string &parfilename)
 {
   // Taken from the name of each set when none was given, before any file is
   // read
-  const std::string setbasepath = basepath.empty()
+  const std::string setbasepath = state->basepath.empty()
     ? NormaliseBasePath(BasePathFor(parfilename))
-    : basepath;
+    : state->basepath;
 
   // The volume files are named after the set rather than after its index file,
   // so the name is taken either way round
-  std::string setname = parfilename;
-  if (setname.length() > 5 &&
-      0 == stricmp(setname.substr(setname.length()-5, 5).c_str(), ".par2"))
-  {
-    setname = setname.substr(0, setname.length()-5);
-  }
+  const std::string setname = SetNameFor(DiskFile::GetCanonicalPathname(parfilename));
 
   // Resolved against the working directory, so that the names the set records
   // come out relative to the basepath whatever the caller wrote them as. Empty
   // files and a file named twice are left out.
   std::vector<std::string> files;
-  files.reserve(sourcefiles.size());
-  for (const auto &sourcefile : sourcefiles)
+  files.reserve(state->sourcefiles.size());
+  std::set<std::string> seen;
+  for (const auto &sourcefile : state->sourcefiles)
   {
     const std::string file = DiskFile::GetCanonicalPathname(sourcefile);
 
     if (DiskFile::FileExists(file) && 0 == DiskFile::GetFileSize(file))
       continue;
 
-    if (std::find(files.begin(), files.end(), file) == files.end())
+    if (seen.insert(file).second)
       files.push_back(file);
   }
 
   if (files.empty())
   {
-    ReportError(lasterror, observer, ecInvalidSetting, "There are no files with any data to create a set for");
+    ReportError(state->lasterror, state->observer, ecInvalidSetting, "There are no files with any data to create a set for");
 
     return eInvalidCommandLineArguments;
   }
 
-  // A set records each name relative to the basepath, so a file outside it
-  // cannot be described
-  for (const auto &file : files)
-  {
-    if (file.compare(0, setbasepath.length(), setbasepath) != 0)
-    {
-      ReportError(lasterror, observer, ecInvalidSetting, "The file is not inside the basepath", file);
-
-      return eInvalidCommandLineArguments;
-    }
-  }
-
   Restart();
 
-  const Result result = impl->Process(memorylimit,
+  const Result result = impl->Process(state->memorylimit,
                                       setbasepath,
-                                      nthreads,
-                                      filethreads,
+                                      state->nthreads,
+                                      state->filethreads,
                                       setname,
                                       files,
-                                      blocksize,
-                                      firstrecoveryblock,
-                                      recoveryfilescheme,
-                                      recoveryfilecount,
-                                      recoveryblockcount);
-  TakeLastError();
+                                      state->blocksize,
+                                      state->firstrecoveryblock,
+                                      state->recoveryfilescheme,
+                                      state->recoveryfilecount,
+                                      state->recoveryblockcount);
+  TakeLastError(result);
 
   return result;
 }
 
 void Par2Creator::Cancel(void)
 {
-  std::lock_guard<std::mutex> lock(cancelmutex);
-  cancelled = true;
+  std::lock_guard<std::mutex> lock(state->cancelmutex);
+  state->cancelled = true;
   impl->Cancel();
 }
 
 void Par2Creator::ClearCancel(void)
 {
-  std::lock_guard<std::mutex> lock(cancelmutex);
-  cancelled = false;
+  std::lock_guard<std::mutex> lock(state->cancelmutex);
+  state->cancelled = false;
   impl->ClearCancel();
 }
 
 bool Par2Creator::GetLastError(Par2Error *error) const
 {
-  if (0 == error || ecNone == lasterror.code)
+  if (0 == error || ecNone == state->lasterror.code)
     return false;
 
-  *error = lasterror;
+  *error = state->lasterror;
   return true;
 }
 

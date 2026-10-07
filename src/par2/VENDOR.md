@@ -3,16 +3,15 @@
 | | |
 |---|---|
 | Upstream | https://github.com/Parchive/par2cmdline.git |
-| Ref | `f5c16e2d47dbbba812d3f27467eb8fedf7711422` |
-| Commit | `f5c16e2d47dbbba812d3f27467eb8fedf7711422` |
-| Vendored | 2026-09-29 |
+| Ref | `84b851d075743b228ca9e4efdef949b95cae29b6` |
+| Commit | `84b851d075743b228ca9e4efdef949b95cae29b6` |
+| Vendored | 2026-10-07 |
 
 This is [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) itself, on the
-`libpar2/*` topic branches that make par2 usable as a library. The pinned commit is on
-`libpar2/streamless`, the branch which carries the API the glue uses; the stack goes
-further, and the branches above it hold the CMake build and the command line tool. It is a
-topic branch rather than master, so it is rebased and the pin names a commit rather than
-the branch.
+`libpar2/*` topic branches that make par2 usable as a library. The pinned commit is the top
+of that stack, `libpar2/cli`, which carries the CMake build and the command line tool as
+well as the API the glue uses. It is a topic branch rather than master, so it is rebased
+and the pin names a commit rather than the branch.
 
 ## Why this rather than par2cmdline-turbo
 
@@ -26,8 +25,8 @@ handle and a `Par2Observer` callback interface, with the implementation behind a
 glue therefore depends on nothing but that header, which is the point - once these changes
 reach turbo, moving there is a re-vendor rather than a rewrite.
 
-The trade for now is that upstream has neither turbo's CMake nor its ParPar SIMD backend,
-so repair throughput is the scalar implementation.
+The trade for now is that upstream does not have turbo's ParPar SIMD backend, so repair
+throughput is the scalar implementation.
 
 ## Licensing
 
@@ -45,10 +44,10 @@ match, so a plain re-run reproduces the same tree.
 
 ## How it is built
 
-Upstream builds with autotools, which does not fit a Python extension build and does not
-cover MSVC. Our own `CMakeLists.txt` compiles the sources in `src/` into a static library
-instead. That is viable here precisely because there is no ParPar: no per-ISA flag matrix,
-no compiler probes, nothing upstream needs to own.
+Upstream builds with CMake, but our own `CMakeLists.txt` compiles the sources in `src/`
+into a static library rather than nesting upstream's project. That is viable here
+precisely because there is no ParPar: no per-ISA flag matrix, no compiler probes, nothing
+upstream needs to own.
 
 `src/par2.cc` calls only the public API in `include/par2/libpar2.h`. The headers under
 `src/` are upstream's internals and are not part of its compatibility promise.

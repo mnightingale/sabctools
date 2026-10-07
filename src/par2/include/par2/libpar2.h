@@ -17,13 +17,11 @@
 //  along with this program; if not, write to the Free Software
 //  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-#ifndef __LIBPAR2_H__
-#define __LIBPAR2_H__
+#ifndef PAR2_LIBPAR2_H
+#define PAR2_LIBPAR2_H
 
 #include <array>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <ostream>
 #include <string>
 #include <utility>
@@ -103,34 +101,35 @@ typedef enum Result
 // there, such as a data file which could not be read.
 typedef enum ErrorCode
 {
-  ecNone = 0,                 // Nothing failed
+  ecNone = 0,                   // Nothing failed
 
   // The application asked for something that cannot be honoured
-  ecNotVerified,              // Repair or Reassess before anything was verified
-  ecInvalidSetting,           // A setting a create was given cannot be used
+  ecNotVerified = 1,            // Repair or Reassess before anything was verified,
+                                // or a repair over a file never scanned
+  ecInvalidSetting = 2,         // A setting a create was given cannot be used
 
   // The PAR2 files
-  ecPar2FileMissing,          // The named PAR2 file is not there, and the files
-                              // named after it carried nothing new either
-  ecMainPacketMissing,        // Nothing read so far says what the set contains
+  ecPar2FileMissing = 3,        // The named PAR2 file is not there, and the files
+                                // named after it carried nothing new either
+  ecMainPacketMissing = 4,      // Nothing read so far says what the set contains
 
   // What the set describes
-  ecFileDescriptionMissing,   // The set names a recoverable file it carries no
-                              // description of
-  ecDuplicateSourceFile,      // Two of the set's files are one file on disk
-  ecTooManySourceBlocks,      // The set needs more blocks than can be held
+  ecFileDescriptionMissing = 5, // The set names a recoverable file it carries no
+                                // description of
+  ecDuplicateSourceFile = 6,    // Two of the set's files are one file on disk
+  ecTooManySourceBlocks = 7,    // The set needs more blocks than can be held
 
   // Reading and writing
-  ecFileOpenFailed,
-  ecFileCreateFailed,
-  ecFileRenameFailed,
-  ecFileReadFailed,
-  ecFileWriteFailed,
+  ecFileOpenFailed = 8,
+  ecFileCreateFailed = 9,
+  ecFileRenameFailed = 10,
+  ecFileReadFailed = 11,
+  ecFileWriteFailed = 12,
 
-  ecOutOfMemory,              // A buffer could not be allocated
-  ecProcessorFailed,          // The compute implementation could not do the work
+  ecOutOfMemory = 13,           // A buffer could not be allocated
+  ecProcessorFailed = 14,       // The compute implementation could not do the work
 
-  ecInternalError,            // An invariant the library relies on did not hold
+  ecInternalError = 15,         // An invariant the library relies on did not hold
 
 } ErrorCode;
 
@@ -140,7 +139,8 @@ struct Par2Error
 {
   ErrorCode code{};       // ecNone when nothing failed
   std::string message;    // One line, without a trailing newline. May be empty.
-  std::string filename;   // The file it concerns, empty when it concerns none
+  std::string filename;   // The absolute path of the file it concerns, empty
+                          // when it concerns none
 };
 
 
@@ -155,15 +155,16 @@ typedef enum WarningCode
   // holds a character, a separator or a drive letter which some systems
   // reserve, it climbs out of the directory with "..", or it is over 255
   // characters long
-  wcFilenameUnsafe,
+  wcFilenameUnsafe = 1,
 
   // The name a file will be written under is not the name the set records,
   // because the recorded one could not be used as it stands
-  wcFilenameChanged,
+  wcFilenameChanged = 2,
 
-  // A read or a write moved fewer bytes than were asked for
-  wcIncompleteWrite,
-  wcIncompleteRead,
+  // A read or a write moved fewer bytes than were asked for, and the rest was
+  // tried again. Only Windows reports these: elsewhere it is an error.
+  wcIncompleteWrite = 3,
+  wcIncompleteRead = 4,
 
 } WarningCode;
 
@@ -172,13 +173,13 @@ typedef enum WarningCode
 // count from 0 to 1000, and a step with nothing to do is not reported at all.
 typedef enum Phase
 {
-  phLoading,        // Reading the packets of one PAR2 file, once for each file
-  phHashing,        // Reading the source files a create was given
-  phScanning,       // Checking what is on disk against what the set records
-  phConstructing,   // Building the Reed Solomon matrix
-  phSolving,        // Solving it, which only a repair with missing blocks needs
-  phProcessing,     // Computing recovery data, or rebuilding missing blocks
-  phVerifyingRepair,// Reading back what a repair has just written
+  phLoading = 0,         // Reading the packets of one PAR2 file, once for each file
+  phHashing = 1,         // Reading the source files a create was given
+  phScanning = 2,        // Checking what is on disk against what the set records
+  phConstructing = 3,    // Building the Reed Solomon matrix
+  phSolving = 4,         // Solving it, which only a repair with missing blocks needs
+  phProcessing = 5,      // Computing recovery data, or rebuilding missing blocks
+  phVerifyingRepair = 6, // Reading back what a repair has just written
 
 } Phase;
 
@@ -188,7 +189,9 @@ struct Par2Warning
 {
   WarningCode code{};
   std::string message;    // One line, without a trailing newline
-  std::string filename;   // The file it concerns, empty when it concerns none
+  std::string filename;   // The file it concerns, empty when it concerns none:
+                          // the name the set records for wcFilenameUnsafe and
+                          // wcFilenameChanged, and its absolute path otherwise
 };
 
 
@@ -290,12 +293,17 @@ public:
   // a count going backwards.
   //
   // AddPar2File runs phLoading once for each PAR2 file it reads. A Verify runs
-  // phScanning. A Repair runs phConstructing, then phSolving when blocks are
-  // missing, then phProcessing, and then phVerifyingRepair unless it was asked
-  // not to read back what it wrote.
+  // phScanning, and a second time for the extra files it was given when the
+  // set's own files leave something missing. A Repair runs phConstructing,
+  // then phSolving when blocks are missing, then phProcessing, and then
+  // phVerifyingRepair unless it was asked not to read back what it wrote. A
+  // processor which works out its own coefficients leaves out phConstructing
+  // and phSolving.
   //
   // A Create runs phHashing, then phConstructing and phProcessing, and only
-  // phHashing when it was asked for no recovery blocks at all.
+  // phHashing when it was asked for no recovery blocks at all. When the memory
+  // allows the files to be hashed during phProcessing, as it usually does,
+  // phHashing reports nothing.
   virtual void OnProgress(Phase phase, u32 permille) {}
 
   // This file has been checked. blocksfound of blocksneeded were usable, both
@@ -320,10 +328,6 @@ public:
   virtual void OnWarning(const Par2Warning &warning) {}
 };
 
-
-// Discards everything written to it. A handle built without streams writes
-// into one of these.
-class NullStream;
 
 // Verifies and repairs one PAR2 set.
 //
@@ -352,11 +356,13 @@ public:
 
   // Built without streams nothing is written anywhere, and the work is
   // followed through an observer instead. There is no NoiseLevel because
-  // everything it governs is written output.
+  // everything it governs is written output. The one exception is on Windows,
+  // where a filename which is not valid UTF-8 is reported on stderr as it is
+  // converted.
   //
   // The observer is told exactly what it is told otherwise: OnSetInfo, OnFile,
-  // OnFileDone, OnProgress and OnError all arrive unchanged.
-  explicit Par2Verifier(const std::string &basepath = std::string(),
+  // OnFileDone, OnProgress, OnError and OnWarning all arrive unchanged.
+  explicit Par2Verifier(const std::string &basepath,
                         Backends backends = Backends());
 
   ~Par2Verifier();
@@ -370,23 +376,19 @@ public:
 
   // Read the packets of a PAR2 file and of the other PAR2 files named after
   // it. May be called more than once; a file which has already been read is
-  // skipped.
+  // skipped, and the result is what the packets read so far amount to.
   //
   // The name may be that of a file or of a whole set: the volume files beside
   // it are read too, and they carry the critical packets, so naming a set
   // whose index file is absent still describes it. eFileIOError therefore
   // means the named file does not exist *and* nothing new was read.
   //
-  // eCancelled means a cancel stopped the reading. The file is not remembered,
-  // and can be added again once the cancel is cleared.
+  // eCancelled means a cancel stopped the reading part way through. The file
+  // is not remembered, and naming it again after ClearCancel reads the rest.
   //
   // Adding a file after Verify has run is allowed: the next Verify starts a
   // fresh pass over the data, so it reflects both the added file and whatever
   // is on disk at that point.
-  //
-  // Reading reports progress, so a Cancel can stop it. eCancelled then means
-  // the file was only read as far as the cancel, and it is not remembered:
-  // name it again after ClearCancel to read the rest.
   Result AddPar2File(const std::string &parfilename);
 
   // What the packets added so far describe. False until a PAR2 file with the
@@ -417,13 +419,16 @@ public:
   // A block the caller vouched for through SetKnownBlocks reads back as found,
   // since the verify made no distinction.
   //
-  // Reads the same as GetVerifyResult does around a repair: after one which
-  // read back what it wrote it describes the repaired files, and after one
-  // which did not it still describes the state before the repair.
+  // After a repair which succeeded, and either read back what it wrote or only
+  // had to rename files, it describes the repaired files.
   //
-  // False until something has been verified, when the set does not describe
-  // that file, or when it describes it without a verification packet, as it
-  // does a file it cannot recover.
+  // False until something has been verified, and after any other repair. False
+  // too when the set does not describe that file, or describes it without a
+  // verification packet as it does a file it cannot recover; when the file was
+  // not there to be scanned, because it is missing or has not yet been given to
+  // VerifyFile; and when no block of it was found at its own offset but blocks
+  // were found in it elsewhere. A file in which nothing usable was found reads
+  // back with every entry false.
   bool GetFoundBlocks(const std::string &filename,
                       std::vector<bool> *blocks) const;
 
@@ -444,10 +449,11 @@ public:
   //
   // The blocks are trusted without being verified. Supplying a block which is
   // not intact will silently produce incorrect output. Vouching for only some
-  // of a file's blocks leaves it reported as needing repair.
+  // of a file's blocks leaves it reported as needing repair. A repair forgets
+  // everything said here, since the files it describes may be rewritten.
   bool SetKnownBlocks(const std::string &filename, const std::vector<bool> &blocks);
 
-  // Memory in bytes that Repair may use for its buffers, the -m option, which
+  // Memory in bytes that the work may use for its buffers, the -m option, which
   // the command line takes in megabytes. Zero selects the default, an eighth of
   // the physical memory, and no less than 256MB on a machine with more.
   // Anything below 1MB is taken as 1MB, the least the command line allows.
@@ -459,12 +465,12 @@ public:
   void SetDataSkipping(const bool enabled, const u64 leaway = 0);
 
   // Hash the whole of each file as well as its blocks, the --full-hash option.
-  // Applies to Verify.
+  // Applies to Verify and to VerifyFile.
   void SetFullHash(const bool enabled);
 
   // Threads for the main processing and for hashing files in parallel, the -t
   // and -T options. Either left zero stays at the default. They are read by
-  // the next Verify or Repair.
+  // the next Verify, VerifyFile or Repair.
   void SetThreadCounts(const u32 nthreads, const u32 filethreads);
 
   // Check the files described by the set against the data on disk. Returns
@@ -484,12 +490,15 @@ public:
   // scanned can be scanned again once it is finished. Blocks another file
   // supplied are left alone.
   //
-  // The name may be one the set describes or one it does not; an unrecognised
-  // file is matched by content, as an extra file is.
+  // The name is a path on this system, relative to the working directory unless
+  // it is absolute, as the localfilename field of Par2FileInfo gives it. It may
+  // be a file the set describes or one it does not; an unrecognised file is
+  // matched by content, as an extra file is.
   //
   // Returns what Verify would return for the set as it stands, so a file which
   // has not been scanned yet still counts as missing. A later Verify replaces
-  // everything the individual scans found.
+  // everything the individual scans found, and after a Repair they start again
+  // from nothing.
   //
   // May be called before any PAR2 file has been added: the result is then
   // eInsufficientCriticalData, and the file is scanned once one arrives.
@@ -539,8 +548,12 @@ public:
   // Rebuild whatever Verify found to be missing or damaged.
   //
   // Returns eLogicError with ecNotVerified if nothing has been verified yet or
-  // since the last Repair, and eRepairNotPossible if the last Verify or
-  // Reassess found too little recovery data.
+  // since the last Repair, and eRepairNotPossible if the recovery blocks added
+  // so far are too few to rebuild what is missing.
+  //
+  // A file which already exists but which VerifyFile never scanned is not
+  // written over: the repair fails with eFileIOError and ecNotVerified, naming
+  // it.
   //
   // verifyafter reads back and hashes everything that was rebuilt, and is
   // what turns a repair that did not work into eRepairFailed. With it off the
@@ -552,9 +565,10 @@ public:
   // Why the last call failed, refining the Result it returned. See ErrorCode
   // for which Results carry one.
   //
-  // Describes only the call that returned last, and the first thing that went
-  // wrong during it. An observer's OnError sees every one of them as it
-  // happens, which is what a parallel scan needs.
+  // Describes only the last AddPar2File, Verify, VerifyFile, Reassess or
+  // Repair, and the first thing that went wrong during it. An observer's
+  // OnError sees every one of them as it happens, which is what a parallel scan
+  // needs.
   bool GetLastError(Par2Error *error) const;
 
   // Ask the work in progress to stop, from any thread. Verify or Repair then
@@ -566,36 +580,15 @@ public:
 
 private:
   class Impl;
+  struct State;
 
-  Par2Verifier(std::unique_ptr<NullStream> nullstream, const std::string &basepath, Backends backends);
+  Par2Verifier(std::unique_ptr<std::ostream> nullstream, const std::string &basepath, Backends backends);
 
   void Restart(void);
-  void TakeLastError(void);
+  void TakeLastError(const Result result);
   void RecordLastError(const ErrorCode code, const std::string &message);
 
-  std::unique_ptr<NullStream> nullstream;
-  std::ostream &sout;
-  std::ostream &serr;
-  NoiseLevel noiselevel;
-  Backends backends;
-  Par2Observer *observer;
-  size_t memorylimit;
-  u32 nthreads;
-  u32 filethreads;
-  bool skipdata;
-  u64 skipleaway;
-  bool fullhash;
-  std::vector<std::string> par2files;
-  std::vector<std::string> scannedfiles;
-  std::map<std::string, std::vector<bool> > knownblocks;
-  bool verified;
-  bool scanned;
-  bool repaired;
-  std::mutex cancelmutex;
-  bool cancelled;
-  bool restarting;
-  std::string basepath;
-  Par2Error lasterror;
+  std::unique_ptr<State> state;
   std::unique_ptr<Impl> impl;
 };
 
@@ -622,8 +615,10 @@ public:
 
   // Built without streams nothing is written anywhere, and the work is
   // followed through an observer instead. There is no NoiseLevel because
-  // everything it governs is written output.
-  explicit Par2Creator(const std::string &basepath = std::string(),
+  // everything it governs is written output. The one exception is on Windows,
+  // where a filename which is not valid UTF-8 is reported on stderr as it is
+  // converted.
+  explicit Par2Creator(const std::string &basepath,
                        Backends backends = Backends());
   ~Par2Creator();
 
@@ -692,31 +687,14 @@ public:
 
 private:
   class Impl;
+  struct State;
 
-  Par2Creator(std::unique_ptr<NullStream> nullstream, const std::string &basepath, Backends backends);
+  Par2Creator(std::unique_ptr<std::ostream> nullstream, const std::string &basepath, Backends backends);
 
   void Restart(void);
-  void TakeLastError(void);
+  void TakeLastError(const Result result);
 
-  std::unique_ptr<NullStream> nullstream;
-  std::ostream &sout;
-  std::ostream &serr;
-  NoiseLevel noiselevel;
-  Backends backends;
-  Par2Observer *observer;
-  std::vector<std::string> sourcefiles;
-  u64 blocksize;
-  u32 recoveryblockcount;
-  Scheme recoveryfilescheme;
-  u32 recoveryfilecount;
-  u32 firstrecoveryblock;
-  size_t memorylimit;
-  u32 nthreads;
-  u32 filethreads;
-  std::mutex cancelmutex;
-  bool cancelled;
-  std::string basepath;
-  Par2Error lasterror;
+  std::unique_ptr<State> state;
   std::unique_ptr<Impl> impl;
 };
 
@@ -773,15 +751,6 @@ Result par1repair(std::ostream &sout,
 		  // skipleaway is not used by Par1
 		  );
 
-
-bool ComputeRecoveryFileCount(std::ostream &sout,
-			      std::ostream &serr,
-			      u32 *recoveryfilecount,
-			      Scheme recoveryfilescheme,
-			      u32 recoveryblockcount,
-			      u64 largestfilesize,
-			      u64 blocksize);
-
 } // namespace par2
 
-#endif // __LIBPAR2_H__
+#endif // PAR2_LIBPAR2_H

@@ -145,6 +145,7 @@ Result Par2SetCreator::Process(
   // Close all files.
   if (!CloseFiles())
   {
+    DeleteIncompleteRecoveryFiles();
     errorlog.RecordIfNone(ecFileWriteFailed, "Could not close the recovery files");
     return eFileIOError;
   }
@@ -162,13 +163,36 @@ void Par2SetCreator::ApplyThreadCounts(const u32 nthreads, const u32 _filethread
 
   // No more files are read at once than there are threads to hash them with,
   // and never none whatever the caller asked for
-  if (_filethreads != 0)
-    filethreads = std::max(1u, std::min(_filethreads, totalthreads));
+  filethreads = std::max(1u, std::min(_filethreads != 0 ? _filethreads : filethreads, totalthreads));
 }
 
 // Work out the shape of the set, and check that it can be written
 Result Par2SetCreator::PrepareCreation(void)
 {
+  // A set records each name relative to the basepath, so a file outside it
+  // cannot be described. Names on Windows match whatever their case.
+  for (const auto &file : extrafiles)
+  {
+#ifdef _WIN32
+    const bool inside = (0 == _strnicmp(file.c_str(), basepath.c_str(), basepath.length()));
+#else
+    const bool inside = (0 == file.compare(0, basepath.length(), basepath));
+#endif
+
+    if (!inside)
+    {
+      errorlog.Record(ecInvalidSetting, "The file is not inside the basepath", file);
+      return eInvalidCommandLineArguments;
+    }
+  }
+
+  // A set which is already there is not written over
+  if (DiskFile::FileExists(parfilename + ".par2"))
+  {
+    errorlog.Record(ecFileCreateFailed, "The PAR2 file already exists", parfilename + ".par2");
+    return eFileIOError;
+  }
+
   if (!CheckBasepath())
   {
     errorlog.RecordIfNone(ecFileCreateFailed, "Could not write beside the set", parfilename);
@@ -540,11 +564,15 @@ bool Par2SetCreator::OpenSourceFiles(void)
     // Open the source file and compute its Hashes and CRCs.
     if (!sourcefile->Open(noiselevel, sout, serr, extrafile, blocksize, deferhashcomputation, basepath, progress, backends, &cancelled, &errorlog))
     {
+      const u32 needed = sourcefile->BlockCount();
       delete sourcefile;
       openfailed = true;
 
+      if (!IsCancelled())
+        errorlog.RecordIfNone(ecFileReadFailed, "Could not read the source file", extrafile);
+
       if (observer)
-        observer->OnFileDone(reported, 0, 0);
+        observer->OnFileDone(reported, 0, needed);
 
       return;
     }
@@ -922,8 +950,8 @@ void Par2SetCreator::DeleteIncompleteRecoveryFiles(void)
 // Allocate memory buffers for reading and writing data to disk.
 bool Par2SetCreator::AllocateBuffers(void)
 {
-  transferbuffer = new u8[chunksize * NUM_TRANSFER_BUFFERS];
-  outputbuffer = new u8[chunksize];
+  transferbuffer = new (std::nothrow) u8[chunksize * NUM_TRANSFER_BUFFERS];
+  outputbuffer = new (std::nothrow) u8[chunksize];
 
   if (transferbuffer == NULL || outputbuffer == NULL)
   {
@@ -1039,6 +1067,7 @@ bool Par2SetCreator::ProcessData(u64 blockoffset, size_t blocklength, ProgressMe
       lastopenfile = (*sourceblock).GetDiskFile();
       if (!lastopenfile->Open())
       {
+        errorlog.RecordIfNone(ecFileOpenFailed, "Could not reopen the source file", lastopenfile->FileName());
         failed = true;
         break;
       }
@@ -1212,15 +1241,17 @@ bool Par2SetCreator::CloseFiles(void)
 //    (*sourcefile)->Close();
 //  }
 
-  // Close each recovery file.
+  // Close each recovery file, which writes out what is still buffered
+  bool closed = true;
   for (std::vector<DiskFile>::iterator recoveryfile = recoveryfiles.begin();
        recoveryfile != recoveryfiles.end();
        ++recoveryfile)
   {
-    recoveryfile->Close();
+    if (!recoveryfile->Close())
+      closed = false;
   }
 
-  return true;
+  return closed;
 }
 
 } // namespace par2

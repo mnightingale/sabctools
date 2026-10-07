@@ -255,8 +255,8 @@ function(_vendored_build name source_dir subdir libraries cmake_args arch out_ar
     set(${out_binary_dir} "${binary_dir}" PARENT_SCOPE)
 endfunction()
 
-# par2 has no upstream CMake to drive, so it is compiled directly here rather
-# than as a nested project. See cmake/par2.cmake.
+# par2 is compiled directly here rather than as a nested project. See
+# cmake/par2.cmake.
 include(cmake/par2.cmake)
 
 # Only the static library is wanted; the shared one and the CLI tools would be

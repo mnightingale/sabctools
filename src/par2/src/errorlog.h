@@ -42,7 +42,6 @@ public:
     , first()
     , observer(0)
   {
-    first.code = ecNone;
   }
 
   // May be set or cleared while work is in progress
@@ -56,29 +55,13 @@ public:
     std::lock_guard<std::mutex> lock(mutex);
 
     first = Par2Error();
-    first.code = ecNone;
   }
 
   void Record(const ErrorCode code,
               const std::string &message,
               const std::string &filename = std::string())
   {
-    Par2Error error;
-    error.code = code;
-    error.message = message;
-    error.filename = filename;
-
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-
-      if (ecNone == first.code)
-        first = error;
-    }
-
-    // Outside the lock, so that an observer may read the log back
-    Par2Observer *target = observer.load(std::memory_order_relaxed);
-    if (target)
-      target->OnError(error);
+    Keep(code, message, filename, false);
   }
 
   // Report something which did not stop the work. Nothing is kept: the
@@ -105,24 +88,7 @@ public:
                     const std::string &message,
                     const std::string &filename = std::string())
   {
-    Par2Error error;
-    error.code = code;
-    error.message = message;
-    error.filename = filename;
-
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-
-      if (ecNone != first.code)
-        return;
-
-      first = error;
-    }
-
-    // Outside the lock, so that an observer may read the log back
-    Par2Observer *target = observer.load(std::memory_order_relaxed);
-    if (target)
-      target->OnError(error);
+    Keep(code, message, filename, true);
   }
 
   bool First(Par2Error *error) const
@@ -141,6 +107,33 @@ public:
   }
 
 private:
+  // Keep the error if it is the first, and offer it to the observer unless
+  // onlyfirst was asked for and it is not
+  void Keep(const ErrorCode code,
+            const std::string &message,
+            const std::string &filename,
+            const bool onlyfirst)
+  {
+    Par2Error error;
+    error.code = code;
+    error.message = message;
+    error.filename = filename;
+
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+
+      if (ecNone == first.code)
+        first = error;
+      else if (onlyfirst)
+        return;
+    }
+
+    // Outside the lock, so that an observer may read the log back
+    Par2Observer *target = observer.load(std::memory_order_relaxed);
+    if (target)
+      target->OnError(error);
+  }
+
   mutable std::mutex mutex;
   Par2Error first;
   std::atomic<Par2Observer *> observer;

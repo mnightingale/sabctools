@@ -24,7 +24,9 @@
 #ifdef _WIN32
 // Windows includes
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 
 // System includes
@@ -289,6 +291,9 @@ std::string BasePathFor(const std::string &parfilename);
 // A path with a separator appended unless it has one already. Empty is left
 // alone.
 std::string WithSeparator(const std::string &path);
+
+// The name of a set, without the ".par2" its index file ends in
+std::string SetNameFor(const std::string &parfilename);
 
 } // namespace par2
 

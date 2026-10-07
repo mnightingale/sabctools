@@ -53,21 +53,50 @@ You should have received par2cmdline in the form of source code which you can co
 
 If you have only downloaded a precompiled executable, then the source code should be available from the same location where you downloaded the executable from.
 
-If you have MS Visual Studio .NET, then just open the *par2cmdline.sln* file and compile. You should then copy *par2cmdline.exe* to an appropriate location that is on your path.
+On Windows, open the source directory in Visual Studio, which reads
+*CMakeLists.txt* directly, or build it from a command prompt:
+
+    cmake -B build-cmake -A x64
+    cmake --build build-cmake --config Release
+    ctest --test-dir build-cmake -C Release
+
+You should then copy *par2.exe* to an appropriate location that is on your path.
 
 To compile on Linux and other Unix variants use the following commands:
 
-    ./automake.sh
-    ./configure
-    make
-    make check
-    make install
+    cmake -B build-cmake -DCMAKE_BUILD_TYPE=Release
+    cmake --build build-cmake -j"$(getconf _NPROCESSORS_ONLN)"
+    ctest --test-dir build-cmake
+    cmake --install build-cmake
 
 For FreeBSD you must install the following dependencies:
 
-    pkg install git automake
+    pkg install git cmake
 
-See *INSTALL* for full details on how to use the *configure* script.
+The build takes the following options:
+
+    -DPAR2_BUILD_TOOL=OFF     build only the library
+    -DPAR2_BUILD_TESTS=OFF    skip the test suite
+    -DPAR2_INSTALL=OFF        skip the install rules
+    -DPAR2_KEEP_ASSERTS=ON    keep assert checks in an optimised build
+
+To cross-compile, name one of the toolchain files in *cmake/toolchains*:
+
+    cmake -B build-windows -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/x86_64-w64-mingw32.cmake
+    cmake --build build-windows
+
+There is one for Windows with MinGW-w64 (*x86_64-w64-mingw32.cmake*), one each
+for 64-bit and 32-bit Arm Linux (*aarch64-linux-gnu.cmake* and
+*arm-linux-gnueabihf.cmake*), and one for FreeBSD, which also needs a sysroot
+(*freebsd.cmake* says how to give it one).
+
+With the emulator a toolchain file looks for installed - Wine for Windows,
+qemu-user for Arm - ctest runs the tests of the cross build under it. The test
+scripts run the *par2* executable directly, which for Arm needs qemu registered
+with binfmt_misc, as the qemu-user-static package does.
+
+An application embeds the library with either `add_subdirectory` or, once it is
+installed, `find_package(par2)`, and links `par2::par2`.
 
 ## Using par2cmdline
 

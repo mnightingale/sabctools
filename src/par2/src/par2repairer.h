@@ -84,14 +84,16 @@ public:
   // Which blocks of the named file the last verification found in that file at
   // their own offsets, one entry per block starting at block 0. False when the
   // set does not describe that file, or describes it without a verification
-  // packet.
+  // packet, when the file was not there to be scanned, and when no block of it
+  // was found at its own offset.
   bool GetFoundBlocks(const std::string &filename,
                       std::vector<bool> *blocks) const;
 
   // The numbers behind the last verification
   bool GetVerifyResult(Par2VerifyResult *result) const;
 
-  // The source file of that name, or 0 when the set does not describe one
+  // The source file of that name, or 0 when the set does not describe one or
+  // describes it without a verification packet
   Par2RepairerSourceFile *FindSourceFile(const std::string &filename) const;
 
   // The files a repair renamed out of the way
@@ -123,10 +125,12 @@ protected:
                        std::vector<char>      &matched,
                        u32                    &matchcount);
 
-  // Load packets from a PAR2 file, the files named after it, and the extra files
+  // Load packets from a PAR2 file, the files named after it, and the extra files.
+  // opened, when given, is cleared if the PAR2 file itself could not be opened.
   bool LoadPackets(const std::string &parfilename,
                    const std::vector<std::string> &extrafiles,
-                   bool reread = false);
+                   bool reread = false,
+                   bool *opened = 0);
   // Work out what the packets loaded so far describe
   Result PreparePackets(void);
 
@@ -147,8 +151,8 @@ protected:
   Result RepairFiles(const size_t memorylimit, const std::string &basepath,
                      bool verifyafter = true);
 
-  // Load packets from the specified file
-  bool LoadPacketsFromFile(const std::string &filename, bool reread = false);
+  // Load packets from the specified file, clearing opened if it could not be opened
+  bool LoadPacketsFromFile(const std::string &filename, bool reread = false, bool *opened = 0);
   // Finish loading a recovery packet
   bool LoadRecoveryPacket(DiskFile *diskfile, u64 offset, PACKET_HEADER &header);
   // Finish loading a file description packet
@@ -201,8 +205,9 @@ protected:
   // place as a target or complete file
   void DiscardScannedFile(DiskFile *diskfile);
 
-  // What the files scanned so far add up to, as a verify of the set says it
-  Result ScanOutcome(void);
+  // What the files scanned so far add up to, as a verify of the set says it,
+  // with the summary written out when report is set
+  Result ScanOutcome(const bool report = true);
 
   // Attempt to match the data in the DiskFile with the source file, reporting
   // the file to the observer for as long as the match takes

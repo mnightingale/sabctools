@@ -140,6 +140,19 @@ std::string DescriptionPacket::UrlEncodeChar(char c)
 
 
 
+// Write a warning, and the lines of detail after it, to serr when print is
+// set, and give the warning to the errorlog
+static void Warning(std::ostream &serr, const bool print, const char *prefix, const ErrorLog *errorlog,
+                    const WarningCode code, const std::string &message, const std::string &filename,
+                    const char *detail = "")
+{
+  if (print)
+    LockedStream(serr) << prefix << message << '\n' << detail << std::flush;
+
+  if (errorlog)
+    errorlog->Warn(code, message, filename);
+}
+
 // Converts the filename from that on disk to the version
 // in the Par file.  Par uses HTML-style slashes ('/' or
 // UNIX-style slashes) to denote directories.  This
@@ -150,20 +163,15 @@ std::string DescriptionPacket::UrlEncodeChar(char c)
 // If a user is just backing up files on their own system
 // and not sending them to users on another operating
 // system, we don't want to change the filenames.
-// Write a warning to serr when print is set, and give it to the errorlog
-static void Warning(std::ostream &serr, const bool print, const char *prefix, const ErrorLog *errorlog,
-                    const WarningCode code, const std::string &message, const std::string &filename)
-{
-  if (print)
-    serr << prefix << message << std::endl;
-
-  if (errorlog)
-    errorlog->Warn(code, message, filename);
-}
-
 std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel, std::string local_filename, const ErrorLog *errorlog)
 {
   std::string par2_encoded_filename;
+
+  // The name as the set will record it, which is what the warnings give
+  std::string recorded = local_filename;
+#ifdef _WIN32
+  std::replace(recorded.begin(), recorded.end(), '\\', '/');
+#endif
 
   std::string::iterator p = local_filename.begin();
   while (p != local_filename.end())
@@ -195,7 +203,7 @@ std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &so
       std::ostringstream message;
       message << "A filename contains the character '" << ch << "' which some systems do not allow in filenames.";
 
-      Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), local_filename);
+      Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), recorded);
     }
 
 #ifdef _WIN32
@@ -208,7 +216,7 @@ std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &so
       std::ostringstream message;
       message << "Found Windows-style slash '\\' in filename.  Windows systems may have trouble with it.";
 
-      Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), local_filename);
+      Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), recorded);
     }
 #endif
 
@@ -225,54 +233,38 @@ std::string DescriptionPacket::TranslateFilenameFromLocalToPar2(std::ostream &so
     std::ostringstream message;
     message << "The second character in the filename \"" << par2_encoded_filename << "\" is a colon (':').";
 
-    Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename);
-
-    if (noiselevel >= nlNormal)
-    {
-      serr << "       This may be interpreted by Windows systems as an absolute path." << std::endl;
-      serr << "       This file may be ignored by Par clients because absolute paths" << std::endl;
-      serr << "        are a way for an attacker to overwrite system files." << std::endl;
-    }
+    Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename,
+            "       This may be interpreted by Windows systems as an absolute path.\n"
+            "       This file may be ignored by Par clients because absolute paths\n"
+            "        are a way for an attacker to overwrite system files.\n");
   }
   if (!par2_encoded_filename.empty() && par2_encoded_filename.at(0) == '/')
   {
     std::ostringstream message;
     message << "The first character in the filename \"" << par2_encoded_filename << "\" is an HTML-slash ('/').";
 
-    Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename);
-
-    if (noiselevel >= nlNormal)
-    {
-      serr << "       This may be interpreted by UNIX systems as an absolute path." << std::endl;
-      serr << "       This file may be ignored by Par clients because absolute paths" << std::endl;
-      serr << "        are a way for an attacker to overwrite system files." << std::endl;
-    }
+    Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename,
+            "       This may be interpreted by UNIX systems as an absolute path.\n"
+            "       This file may be ignored by Par clients because absolute paths\n"
+            "        are a way for an attacker to overwrite system files.\n");
   }
   if (par2_encoded_filename.find("../") != std::string::npos)
   {
     std::ostringstream message;
     message << "The filename \"" << par2_encoded_filename << R"(" contains "..".)";
 
-    Warning(serr, noiselevel >= nlQuiet, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename);
-
-    if (noiselevel >= nlQuiet)
-    {
-      serr << "       This is a parent directory. This file may be ignored" << std::endl;
-      serr << "       by Par clients because parent directories are a way" << std::endl;
-      serr << "       for an attacker to overwrite system files." << std::endl;
-    }
+    Warning(serr, noiselevel >= nlQuiet, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename,
+            "       This is a parent directory. This file may be ignored\n"
+            "       by Par clients because parent directories are a way\n"
+            "       for an attacker to overwrite system files.\n");
   }
   if (par2_encoded_filename.length() > 255)
   {
     std::ostringstream message;
     message << "A filename is over 255 characters.  That may be too long";
 
-    Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename);
-
-    if (noiselevel >= nlNormal)
-    {
-      serr << "         for Windows systems to handle." << std::endl;
-    }
+    Warning(serr, noiselevel >= nlNormal, "WARNING: ", errorlog, wcFilenameUnsafe, message.str(), par2_encoded_filename,
+            "         for Windows systems to handle.\n");
   }
 
   return par2_encoded_filename;

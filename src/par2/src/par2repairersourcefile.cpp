@@ -73,8 +73,10 @@ void Par2RepairerSourceFile::SetVerificationPacket(VerificationPacket *_verifica
 
 void Par2RepairerSourceFile::ComputeTargetFileName(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel, const std::string &path, const ErrorLog *errorlog)
 {
-  // Get a version of the filename compatible with the OS
-  std::string filename = DescriptionPacket::TranslateFilenameFromPar2ToLocal(sout, serr, noiselevel, descriptionpacket->FileName(), errorlog);
+  // Get a version of the filename compatible with the OS, saying what was
+  // changed only the first time it is worked out
+  const bool first = targetfilename.empty();
+  std::string filename = DescriptionPacket::TranslateFilenameFromPar2ToLocal(sout, serr, first ? noiselevel : nlSilent, descriptionpacket->FileName(), first ? errorlog : 0);
 
   targetfilename = path + filename;
 }

@@ -35,27 +35,27 @@ import vendor_common
 
 REPO = "https://github.com/Parchive/par2cmdline.git"
 
-# The libpar2/* stack, which is where the library API lives, at the branch which
-# carries the API the glue uses, libpar2/streamless. Pinned to the commit
-# rather than the branch: these are topic branches being prepared for upstream, so
-# they are rebased, and a branch name would not name the same tree twice running.
-REF = "f5c16e2d47dbbba812d3f27467eb8fedf7711422"
+# The libpar2/* stack, which is where the library API lives, at its top,
+# libpar2/cli. Pinned to the commit rather than the branch: these are topic
+# branches being prepared for upstream, so they are rebased, and a branch name
+# would not name the same tree twice running.
+REF = "84b851d075743b228ca9e4efdef949b95cae29b6"
 
 DEST = os.path.join(vendor_common.ROOT, "src", "par2")
 
-# The library sources and the public header. Upstream ships no CMake, so nothing
-# of its build system is worth copying - our own CMakeLists.txt compiles these
-# directly, which it can because there is no per-ISA flag matrix to honour.
+# The library sources and the public header. Nothing of upstream's build system is
+# copied - our own CMakeLists.txt compiles these directly, which it can because
+# there is no per-ISA flag matrix to honour.
 COPY_TREES = ("src", "include")
-COPY_FILES = ("COPYING", "AUTHORS", "ChangeLog", "README.md", "config.h.in")
+COPY_FILES = ("COPYING", "AUTHORS", "ChangeLog", "README.md")
 
 
 def prune():
     """Drop upstream's unit tests and the command line tool.
 
     Only the library is wanted. par2cmdline.cpp is the tool's entry point, and
-    the *_test.cpp files are built by `make check` against a test framework we
-    do not vendor.
+    the *_test.cpp files are built by upstream's test suite, which we do not
+    vendor.
     """
     for name in os.listdir(os.path.join(DEST, "src")):
         if name.endswith("_test.cpp") or name in ("par2cmdline.cpp",):
@@ -74,8 +74,7 @@ def apply_patches():
 
 def write_vendor_notes(commit: str, ref: str):
     with open(os.path.join(DEST, "VENDOR.md"), "w", encoding="utf-8") as handle:
-        handle.write(
-            """# Vendored par2cmdline
+        handle.write("""# Vendored par2cmdline
 
 | | |
 |---|---|
@@ -85,11 +84,10 @@ def write_vendor_notes(commit: str, ref: str):
 | Vendored | {date} |
 
 This is [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) itself, on the
-`libpar2/*` topic branches that make par2 usable as a library. The pinned commit is on
-`libpar2/streamless`, the branch which carries the API the glue uses; the stack goes
-further, and the branches above it hold the CMake build and the command line tool. It is a
-topic branch rather than master, so it is rebased and the pin names a commit rather than
-the branch.
+`libpar2/*` topic branches that make par2 usable as a library. The pinned commit is the top
+of that stack, `libpar2/cli`, which carries the CMake build and the command line tool as
+well as the API the glue uses. It is a topic branch rather than master, so it is rebased
+and the pin names a commit rather than the branch.
 
 ## Why this rather than par2cmdline-turbo
 
@@ -103,8 +101,8 @@ handle and a `Par2Observer` callback interface, with the implementation behind a
 glue therefore depends on nothing but that header, which is the point - once these changes
 reach turbo, moving there is a re-vendor rather than a rewrite.
 
-The trade for now is that upstream has neither turbo's CMake nor its ParPar SIMD backend,
-so repair throughput is the scalar implementation.
+The trade for now is that upstream does not have turbo's ParPar SIMD backend, so repair
+throughput is the scalar implementation.
 
 ## Licensing
 
@@ -122,10 +120,10 @@ match, so a plain re-run reproduces the same tree.
 
 ## How it is built
 
-Upstream builds with autotools, which does not fit a Python extension build and does not
-cover MSVC. Our own `CMakeLists.txt` compiles the sources in `src/` into a static library
-instead. That is viable here precisely because there is no ParPar: no per-ISA flag matrix,
-no compiler probes, nothing upstream needs to own.
+Upstream builds with CMake, but our own `CMakeLists.txt` compiles the sources in `src/`
+into a static library rather than nesting upstream's project. That is viable here
+precisely because there is no ParPar: no per-ISA flag matrix, no compiler probes, nothing
+upstream needs to own.
 
 `src/par2.cc` calls only the public API in `include/par2/libpar2.h`. The headers under
 `src/` are upstream's internals and are not part of its compatibility promise.
@@ -134,8 +132,7 @@ no compiler probes, nothing upstream needs to own.
 
 None. The vendoring script fails loudly if a patch it carries stops matching, so this
 section is the one to check when adding one.
-""".format(repo=REPO, ref=ref, commit=commit, date=datetime.date.today().isoformat())
-        )
+""".format(repo=REPO, ref=ref, commit=commit, date=datetime.date.today().isoformat()))
 
 
 def main():
