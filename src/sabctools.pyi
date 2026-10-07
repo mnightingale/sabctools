@@ -179,6 +179,8 @@ class Par2Repairer:
         even when scanning the rest finds them intact.
 
         Call after load(), which is when block_size becomes known, and before verify().
+        A repair() which goes ahead forgets them, since it may rewrite the files they
+        describe.
         """
 
     def block_checksums(self, filename: str) -> Optional[List[int]]:

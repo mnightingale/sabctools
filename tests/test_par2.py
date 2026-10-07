@@ -339,6 +339,21 @@ class TestPar2KnownBlocks:
         assert scanned.verify() == sabctools.Par2Result.REPAIR_POSSIBLE
         assert scanned.missing_block_count > 0
 
+    def test_a_repair_forgets_what_was_vouched_for(self, par2set):
+        self.damage(par2set)
+
+        rep = repairer(par2set)
+        rep.load()
+        alpha = next(entry for entry in rep.files if entry["name"] == "alpha.bin")
+
+        # The damage is in the first half, so the second is vouched for truthfully
+        half = alpha["blocks"] // 2
+        rep.set_known_blocks({"alpha.bin": [False] * half + [True] * (alpha["blocks"] - half)})
+        assert rep.verify() == sabctools.Par2Result.REPAIR_POSSIBLE
+        assert rep.repair() == sabctools.Par2Result.SUCCESS
+        assert rep.quick_verified_files == 0
+        assert rep.verify() == sabctools.Par2Result.SUCCESS
+
     def test_a_second_call_retracts_what_the_first_said(self, par2set):
         self.damage(par2set)
 

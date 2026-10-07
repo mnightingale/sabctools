@@ -578,6 +578,10 @@ static PyObject* Par2Repairer_repair(Par2RepairerObject* self, PyObject* Py_UNUS
     if (!run_step([&] { return verifier->Repair(verifyafter); }, &result))
         return NULL;
 
+    /* A repair which went ahead has made par2 forget what set_known_blocks() vouched for */
+    if (result != par2::eLogicError && result != par2::eRepairNotPossible)
+        self->known->clear();
+
     if (result == par2::eCancelled)
         self->cancelled = true;
 
