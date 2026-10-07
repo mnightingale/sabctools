@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | Upstream | https://github.com/Parchive/par2cmdline.git |
-| Ref | `84b851d075743b228ca9e4efdef949b95cae29b6` |
-| Commit | `84b851d075743b228ca9e4efdef949b95cae29b6` |
+| Ref | `bb7412640e1042731bcb50893614f1f218b0b774` |
+| Commit | `bb7412640e1042731bcb50893614f1f218b0b774` |
 | Vendored | 2026-10-07 |
 
 This is [Parchive/par2cmdline](https://github.com/Parchive/par2cmdline) itself, on the

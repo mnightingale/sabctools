@@ -688,8 +688,8 @@ bool Par2Repairer::GetSetInfo(Par2SetInfo *info) const
 
   memcpy(info->setid.data(), setid.hash, sizeof(setid.hash));
   info->blocksize = blocksize;
-  info->datablocks = sourceblockcount;
-  info->recoveryblocks = (u32)recoverypacketmap.size();
+  info->datablockcount = sourceblockcount;
+  info->recoveryblockcount = (u32)recoverypacketmap.size();
   info->recoverablefilecount = mainpacket->RecoverableFileCount();
   info->otherfilecount = mainpacket->TotalFileCount() - mainpacket->RecoverableFileCount();
   info->datasize = totaldatasize;
@@ -1035,7 +1035,7 @@ bool Par2Repairer::LoadPacketsFromFile(const std::string &filename, bool reread,
   }
 
   if (observer)
-    observer->OnFile(filename);
+    observer->OnFile(phLoading, filename);
 
   // How many useable packets have we found
   u32 packets = 0;
@@ -1271,7 +1271,7 @@ bool Par2Repairer::LoadPacketsFromFile(const std::string &filename, bool reread,
   }
 
   if (observer)
-    observer->OnFileDone(filename, 0, 0);
+    observer->OnFileDone(phLoading, filename, 0, 0);
 
   return true;
 }
@@ -1984,8 +1984,8 @@ bool Par2Repairer::VerifySourceFiles(const std::string &basepath, std::vector<st
       {
         const std::string reported = ReportedName(sourcefile, name);
 
-        observer->OnFile(reported);
-        observer->OnFileDone(reported, 0, BlocksNeeded(sourcefile));
+        observer->OnFile(progress.GetPhase(), reported);
+        observer->OnFileDone(progress.GetPhase(), reported, 0, BlocksNeeded(sourcefile));
       }
 
       return;
@@ -2014,8 +2014,8 @@ bool Par2Repairer::VerifySourceFiles(const std::string &basepath, std::vector<st
       {
         const std::string reported = ReportedName(sourcefile, name);
 
-        observer->OnFile(reported);
-        observer->OnFileDone(reported, 0, BlocksNeeded(sourcefile));
+        observer->OnFile(progress.GetPhase(), reported);
+        observer->OnFileDone(progress.GetPhase(), reported, 0, BlocksNeeded(sourcefile));
       }
 
       finalresult = false;
@@ -2130,13 +2130,13 @@ bool Par2Repairer::VerifyDataFile(DiskFile *diskfile, Par2RepairerSourceFile *so
   const std::string name = ReportedName(sourcefile, localname);
 
   if (observer)
-    observer->OnFile(name);
+    observer->OnFile(progress.GetPhase(), name);
 
   u32 blocksfound = 0;
   const bool matched = MatchDataFile(diskfile, sourcefile, basepath, progress, renameonly, blocksfound);
 
   if (observer)
-    observer->OnFileDone(name, blocksfound, BlocksNeeded(sourcefile));
+    observer->OnFileDone(progress.GetPhase(), name, blocksfound, BlocksNeeded(sourcefile));
 
   return matched;
 }
@@ -2702,10 +2702,22 @@ bool Par2Repairer::ScanDataFile(DiskFile                *diskfile,    // [in]
                                               alignedmatch, alignedcount,
                                               hashfull, hash16k);
 
+  // Blocks vouched for are not read, and count as scanned all the same
+  if (vouched)
+  {
+    for (size_t block = 0; block < alignedmatch.size(); ++block)
+    {
+      if (alignedmatch[block])
+        progress.Add(std::min(blocksize, filesize - (u64)block * blocksize));
+    }
+  }
+
   // Being told that none of the blocks are usable is an answer in itself, so
   // the file is not searched after all
   if (vouched && alignedcount == 0)
   {
+    progress.Add(filesize);
+
     matchtype = eNoMatch;
     count = 0;
 

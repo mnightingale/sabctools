@@ -39,7 +39,7 @@ REPO = "https://github.com/Parchive/par2cmdline.git"
 # libpar2/cli. Pinned to the commit rather than the branch: these are topic
 # branches being prepared for upstream, so they are rebased, and a branch name
 # would not name the same tree twice running.
-REF = "84b851d075743b228ca9e4efdef949b95cae29b6"
+REF = "bb7412640e1042731bcb50893614f1f218b0b774"
 
 DEST = os.path.join(vendor_common.ROOT, "src", "par2")
 

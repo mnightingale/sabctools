@@ -117,6 +117,12 @@ public:
     PrintFraction(newval - amount, newval);
   }
 
+  // which step of the work this counts
+  Phase GetPhase(void) const
+  {
+    return phase;
+  }
+
   // print a line whilst progress is still running
   void PrintLine(const std::string &line)
   {

@@ -248,27 +248,6 @@ public:
     return recoverypacketmap.size() >= missingblockcount;
   }
 
-  // Work out again whether the data found by an earlier scan can be repaired
-  // with the recovery blocks available now
-  Result Reassess(void)
-  {
-    ClearLastError();
-
-    if (0 == mainpacket)
-    {
-      errorlog.Record(ecMainPacketMissing, "The PAR2 files do not describe a set");
-      return eInsufficientCriticalData;
-    }
-
-    if (prepared != eSuccess)
-    {
-      errorlog.Record(preparefailure.code, preparefailure.message, preparefailure.filename);
-      return prepared;
-    }
-
-    return ScanOutcome();
-  }
-
   Result Scan(const std::string &filename, const size_t memorylimit,
               const u32 _nthreads, const u32 _filethreads)
   {
@@ -594,6 +573,25 @@ static void ReportError(Par2Error &lasterror, Par2Observer *observer, const Erro
     observer->OnError(lasterror);
 }
 
+// Report the exception being handled as the failure of the call it stopped
+static Result Thrown(Par2Error &lasterror, Par2Observer *observer)
+{
+  try
+  {
+    throw;
+  }
+  catch (const std::bad_alloc &)
+  {
+    ReportError(lasterror, observer, ecOutOfMemory, "Memory ran out");
+    return eMemoryError;
+  }
+  catch (...)
+  {
+    ReportError(lasterror, observer, ecInternalError, "The work stopped on an exception");
+    return eLogicError;
+  }
+}
+
 // What the handle itself has to report, rather than the work it delegates
 void Par2Verifier::RecordLastError(const ErrorCode code, const std::string &message)
 {
@@ -642,6 +640,7 @@ void Par2Verifier::SetThreadCounts(const u32 _nthreads, const u32 _filethreads)
 }
 
 Result Par2Verifier::AddPar2File(const std::string &_parfilename)
+try
 {
   const std::string parfilename = DiskFile::GetCanonicalPathname(_parfilename);
 
@@ -685,7 +684,7 @@ Result Par2Verifier::AddPar2File(const std::string &_parfilename)
   }
 
   // Extra recovery data leaves what the scan found still true, so it is kept
-  // and Reassess can use it. A set of a different shape does not, even when the
+  // and a repair can use it. A set of a different shape does not, even when the
   // scan was cancelled. Files scanned before the set was known are replayed by
   // the same restart.
   if (setchanged && (state->scanned || !state->scannedfiles.empty()))
@@ -695,25 +694,9 @@ Result Par2Verifier::AddPar2File(const std::string &_parfilename)
 
   return result;
 }
-
-Result Par2Verifier::Reassess(void)
+catch (...)
 {
-  if (!state->verified)
-  {
-    RecordLastError(ecNotVerified, "Nothing has been verified yet");
-    return eLogicError;
-  }
-
-  if (state->repaired)
-  {
-    RecordLastError(ecNotVerified, "Nothing has been verified since the last repair");
-    return eLogicError;
-  }
-
-  const Result result = impl->Reassess();
-  TakeLastError(result);
-
-  return result;
+  return Thrown(state->lasterror, state->observer);
 }
 
 bool Par2Verifier::GetSetInfo(Par2SetInfo *info) const
@@ -745,14 +728,18 @@ bool Par2Verifier::GetFoundBlocks(const std::string &filename,
   return impl->GetFoundBlocks(filename, blocks);
 }
 
-bool Par2Verifier::GetBackupFiles(std::vector<std::string> *files) const
+std::vector<std::string> Par2Verifier::GetBackupFiles(void) const
 {
-  return impl->GetBackupFiles(files);
+  std::vector<std::string> files;
+  impl->GetBackupFiles(&files);
+  return files;
 }
 
-bool Par2Verifier::GetRenamedFiles(std::vector<std::pair<std::string, std::string> > *files) const
+std::vector<std::pair<std::string, std::string> > Par2Verifier::GetRenamedFiles(void) const
 {
-  return impl->GetRenamedFiles(files);
+  std::vector<std::pair<std::string, std::string> > files;
+  impl->GetRenamedFiles(&files);
+  return files;
 }
 
 bool Par2Verifier::GetVerifyResult(Par2VerifyResult *result) const
@@ -777,7 +764,13 @@ bool Par2Verifier::SetKnownBlocks(const std::string &filename,
   return true;
 }
 
+std::map<std::string, std::vector<bool> > Par2Verifier::GetKnownBlocks(void) const
+{
+  return state->knownblocks;
+}
+
 Result Par2Verifier::Verify(const std::vector<std::string> &extrafiles)
+try
 {
   // A full pass covers everything the individual scans did, so they are dropped
   // rather than replayed into it. Whatever was scanned before, by a pass that
@@ -802,8 +795,13 @@ Result Par2Verifier::Verify(const std::vector<std::string> &extrafiles)
 
   return result;
 }
+catch (...)
+{
+  return Thrown(state->lasterror, state->observer);
+}
 
 Result Par2Verifier::VerifyFile(const std::string &filename)
+try
 {
   // After a repair a new engine starts from nothing, and each file is scanned
   // again as it is fed in
@@ -832,8 +830,13 @@ Result Par2Verifier::VerifyFile(const std::string &filename)
 
   return result;
 }
+catch (...)
+{
+  return Thrown(state->lasterror, state->observer);
+}
 
 Result Par2Verifier::Repair(const bool verifyafter)
+try
 {
   if (!state->verified)
   {
@@ -871,6 +874,10 @@ Result Par2Verifier::Repair(const bool verifyafter)
   TakeLastError(result);
 
   return result;
+}
+catch (...)
+{
+  return Thrown(state->lasterror, state->observer);
 }
 
 void Par2Verifier::Cancel(void)
@@ -916,7 +923,9 @@ struct Par2Creator::State
   , observer(0)
   , sourcefiles()
   , blocksize(0)
+  , sourceblockcount(0)
   , recoveryblockcount(0)
+  , redundancy(0)
   , recoveryfilescheme(scVariable)
   , recoveryfilecount(0)
   , firstrecoveryblock(0)
@@ -937,7 +946,9 @@ struct Par2Creator::State
   Par2Observer *observer;
   std::vector<std::string> sourcefiles;
   u64 blocksize;
+  u32 sourceblockcount;
   u32 recoveryblockcount;
+  u32 redundancy;
   Scheme recoveryfilescheme;
   u32 recoveryfilecount;
   u32 firstrecoveryblock;
@@ -1000,24 +1011,33 @@ void Par2Creator::SetObserver(Par2Observer *_observer)
   impl->SetObserver(_observer);
 }
 
-void Par2Creator::AddSourceFile(const std::string &filename)
+void Par2Creator::SetSourceFiles(const std::vector<std::string> &filenames)
 {
-  state->sourcefiles.push_back(filename);
-}
-
-void Par2Creator::AddSourceFiles(const std::vector<std::string> &filenames)
-{
-  state->sourcefiles.insert(state->sourcefiles.end(), filenames.begin(), filenames.end());
+  state->sourcefiles = filenames;
 }
 
 void Par2Creator::SetBlockSize(const u64 _blocksize)
 {
   state->blocksize = _blocksize;
+  state->sourceblockcount = 0;
+}
+
+void Par2Creator::SetSourceBlockCount(const u32 blockcount)
+{
+  state->sourceblockcount = blockcount;
+  state->blocksize = 0;
 }
 
 void Par2Creator::SetRecoveryBlockCount(const u32 _recoveryblockcount)
 {
   state->recoveryblockcount = _recoveryblockcount;
+  state->redundancy = 0;
+}
+
+void Par2Creator::SetRedundancy(const u32 percent)
+{
+  state->redundancy = percent;
+  state->recoveryblockcount = 0;
 }
 
 void Par2Creator::SetRecoveryFileScheme(const Scheme scheme, const u32 _recoveryfilecount)
@@ -1043,6 +1063,7 @@ void Par2Creator::SetThreadCounts(const u32 _nthreads, const u32 _filethreads)
 }
 
 Result Par2Creator::Create(const std::string &parfilename)
+try
 {
   // Taken from the name of each set when none was given, before any file is
   // read
@@ -1078,6 +1099,35 @@ Result Par2Creator::Create(const std::string &parfilename)
     return eInvalidCommandLineArguments;
   }
 
+  // A block count and a redundancy come to a block size and a recovery block
+  // count for these files
+  u64 setblocksize = state->blocksize;
+  u32 setrecoveryblockcount = state->recoveryblockcount;
+  if (0 != state->sourceblockcount || 0 != state->redundancy)
+  {
+    std::vector<u64> filesizes;
+    for (const auto &file : files)
+      filesizes.push_back(DiskFile::GetFileSize(file));
+
+    if (0 != state->sourceblockcount
+        && !ComputeBlockSizeFromCount(state->serr, &setblocksize, state->sourceblockcount, filesizes))
+    {
+      ReportError(state->lasterror, state->observer, ecInvalidSetting,
+                  "The source block count cannot divide these files");
+
+      return eInvalidCommandLineArguments;
+    }
+
+    if (0 != state->redundancy && 0 != setblocksize)
+    {
+      u32 blockcount = 0;
+      for (const u64 filesize : filesizes)
+        blockcount += (u32)((filesize + setblocksize - 1) / setblocksize);
+
+      setrecoveryblockcount = ComputeRecoveryBlockCountFromRedundancy(blockcount, state->redundancy);
+    }
+  }
+
   Restart();
 
   const Result result = impl->Process(state->memorylimit,
@@ -1086,14 +1136,18 @@ Result Par2Creator::Create(const std::string &parfilename)
                                       state->filethreads,
                                       setname,
                                       files,
-                                      state->blocksize,
+                                      setblocksize,
                                       state->firstrecoveryblock,
                                       state->recoveryfilescheme,
                                       state->recoveryfilecount,
-                                      state->recoveryblockcount);
+                                      setrecoveryblockcount);
   TakeLastError(result);
 
   return result;
+}
+catch (...)
+{
+  return Thrown(state->lasterror, state->observer);
 }
 
 void Par2Creator::Cancel(void)
@@ -1297,6 +1351,113 @@ bool ComputeRecoveryFileCount(std::ostream &sout,
   }
 
   return true;
+}
+
+// Work out the block size which divides files of these sizes into blockcount
+// blocks, or as near to that as a multiple of 4 allows.
+bool ComputeBlockSizeFromCount(std::ostream &serr,
+			       u64 *blocksize,
+			       u32 blockcount,
+			       const std::vector<u64> &filesizes)
+{
+  if (blockcount < filesizes.size())
+  {
+    // The block count cannot be less than the number of files.
+
+    serr << "Block count (" << blockcount <<
+            ") cannot be smaller than the number of files(" << filesizes.size() << "). " << std::endl;
+    return false;
+  }
+  else if (blockcount == filesizes.size())
+  {
+    // If the block count is the same as the number of files, then the block
+    // size is the size of the largest file (rounded up to a multiple of 4).
+
+    u64 largestfilesize = 0;
+    for (std::vector<u64>::const_iterator i=filesizes.begin(); i!=filesizes.end(); i++)
+    {
+	u64 filesize = *i;
+	if (filesize > largestfilesize)
+	{
+	  largestfilesize = filesize;
+	}
+    }
+    *blocksize = (largestfilesize + 3) & ~3;
+  }
+  else
+  {
+    u64 totalsize = 0;
+    for (std::vector<u64>::const_iterator i=filesizes.begin(); i!=filesizes.end(); i++)
+    {
+      totalsize += (*i + 3) / 4;
+    }
+
+    if (blockcount > totalsize)
+    {
+      *blocksize = 4;
+    }
+    else
+    {
+      // Absolute lower bound and upper bound on the source block size that will
+      // result in the requested source block count.
+      u64 lowerBound = totalsize / blockcount;
+      u64 upperBound = (totalsize + blockcount - filesizes.size() - 1) / (blockcount - filesizes.size());
+
+      u64 count = 0;
+      u64 size;
+
+      do
+      {
+        size = (lowerBound + upperBound)/2;
+
+        count = 0;
+        for (std::vector<u64>::const_iterator i=filesizes.begin(); i!=filesizes.end(); i++)
+        {
+          count += ((*i+3)/4 + size-1) / size;
+        }
+        if (count > blockcount)
+        {
+          lowerBound = size+1;
+          if (lowerBound >= upperBound)
+          {
+            size = lowerBound;
+            count = 0;
+            for (std::vector<u64>::const_iterator i=filesizes.begin(); i!=filesizes.end(); i++)
+            {
+              count += ((*i+3)/4 + size-1) / size;
+            }
+          }
+        }
+        else
+        {
+          upperBound = size;
+        }
+      }
+      while (lowerBound < upperBound);
+
+      if (count > 32768)
+      {
+        serr << "Error calculating block size. cannot be higher than 32768." << std::endl;
+        return false;
+      }
+      else if (count == 0)
+      {
+        serr << "Error calculating block size. cannot be 0." << std::endl;
+        return false;
+      }
+
+      *blocksize = size*4;
+    }
+  }
+
+  return true;
+}
+
+// How many recovery blocks redundancy percent of sourceblockcount comes to,
+// and at least one.
+u32 ComputeRecoveryBlockCountFromRedundancy(u32 sourceblockcount, u32 redundancy)
+{
+  return std::max<u32>((sourceblockcount * redundancy + 50) / 100, 1);
 }
 
 } // namespace par2

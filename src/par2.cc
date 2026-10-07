@@ -22,7 +22,6 @@
 
 #include <map>
 #include <ostream>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,7 +37,8 @@
  *
  * The sequence is load() -> set_known_blocks() -> verify() -> repair(), and a
  * verifier stays usable afterwards: load_more() adds recovery blocks that arrived
- * late and reassesses without reading the data files again.
+ * late, and repair_possible then says whether they are enough without the data
+ * files being read again.
  */
 
 static PyObject* Par2Error = NULL;
@@ -69,9 +69,10 @@ public:
 
     void SetOwner(Par2RepairerObject* o) { owner = o; }
 
-    void OnFile(const std::string& filename) override;
+    void OnFile(par2::Phase phase, const std::string& filename) override;
     void OnProgress(par2::Phase phase, par2::u32 permille) override;
-    void OnFileDone(const std::string& filename, par2::u32 found, par2::u32 needed) override;
+    void OnFileDone(par2::Phase phase, const std::string& filename, par2::u32 found,
+                    par2::u32 needed) override;
     void OnError(const par2::Par2Error& error) override;
     void OnWarning(const par2::Par2Warning& warning) override;
 
@@ -96,9 +97,6 @@ typedef struct Par2RepairerObject {
     unsigned long long skip_leaway;
 
     bool skip_repaired_verification;
-    /* The names set_known_blocks() last vouched for, so a second call can retract
-       what the first said about a file the new mapping does not mention. */
-    std::set<std::string>* known;
 
     bool loaded;
     bool verified;
@@ -137,19 +135,6 @@ static void call_progress(Par2RepairerObject* self, const char* stage, const cha
     PyGILState_Release(gstate);
 }
 
-void SabObserver::OnFile(const std::string& filename) {
-    if (!owner)
-        return;
-
-    /* The rebuild reports only progress, so the first file after it means par2 has
-       moved on to reading back what it wrote. */
-    if (owner->stage == STAGE_REPAIRING)
-        owner->stage = STAGE_VERIFYING_REPAIR;
-
-    owner->last_progress = -1;
-    call_progress(owner, owner->stage, filename.c_str(), 0);
-}
-
 /* par2 says which step a count belongs to; the caller is told in its own terms. */
 static const char* stage_of(par2::Phase phase) {
     switch (phase) {
@@ -166,6 +151,12 @@ static const char* stage_of(par2::Phase phase) {
         default:
             return STAGE_REPAIRING;
     }
+}
+
+void SabObserver::OnFile(par2::Phase phase, const std::string& filename) {
+    if (!owner)
+        return;
+    call_progress(owner, stage_of(phase), filename.c_str(), 0);
 }
 
 void SabObserver::OnProgress(par2::Phase phase, par2::u32 permille) {
@@ -197,7 +188,8 @@ void SabObserver::OnProgress(par2::Phase phase, par2::u32 permille) {
  * data, which is how a caller learns that a set of joinable .001/.002 parts was
  * consumed. Both counts are zero for a par2 file, which has no blocks of its own.
  */
-void SabObserver::OnFileDone(const std::string& filename, par2::u32 found, par2::u32 needed) {
+void SabObserver::OnFileDone(par2::Phase, const std::string& filename, par2::u32 found,
+                             par2::u32 needed) {
     if (!owner || !owner->file_done_callback)
         return;
 
@@ -306,7 +298,6 @@ static PyObject* Par2Repairer_new(PyTypeObject* type, PyObject* args, PyObject* 
     self->skip_data = true;
     self->skip_leaway = 0;
     self->skip_repaired_verification = true;
-    self->known = NULL;
     self->loaded = false;
     self->verified = false;
     self->cancelled = false;
@@ -321,7 +312,6 @@ static void Par2Repairer_dealloc(Par2RepairerObject* self) {
     delete self->observer;
     delete self->parfile;
     delete self->extrafiles;
-    delete self->known;
     Py_XDECREF(self->progress_callback);
     Py_XDECREF(self->file_done_callback);
     Py_XDECREF(self->error_callback);
@@ -372,16 +362,13 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
     delete self->observer;
     delete self->parfile;
     delete self->extrafiles;
-    delete self->known;
     self->verifier = NULL;
     self->observer = NULL;
     self->parfile = NULL;
     self->extrafiles = NULL;
-    self->known = NULL;
 
     self->parfile = new std::string(parfile);
     self->extrafiles = new std::vector<std::string>(extras);
-    self->known = new std::set<std::string>();
     self->skip_data = skip_data != 0;
     self->skip_leaway = skip_leaway;
     self->skip_repaired_verification = skip_repaired_verification != 0;
@@ -571,16 +558,13 @@ static PyObject* Par2Repairer_repair(Par2RepairerObject* self, PyObject* Py_UNUS
      * way out is only defensible if the caller's own checksums were trusted on the
      * way in, so a set that got a real source scan gets its repair verified too.
      */
-    const bool verifyafter = !(self->skip_repaired_verification && !self->known->empty());
+    const bool verifyafter =
+        !(self->skip_repaired_verification && !self->verifier->GetKnownBlocks().empty());
 
     par2::Result result;
     par2::Par2Verifier* verifier = self->verifier;
     if (!run_step([&] { return verifier->Repair(verifyafter); }, &result))
         return NULL;
-
-    /* A repair which went ahead has made par2 forget what set_known_blocks() vouched for */
-    if (result != par2::eLogicError && result != par2::eRepairNotPossible)
-        self->known->clear();
 
     if (result == par2::eCancelled)
         self->cancelled = true;
@@ -592,9 +576,9 @@ static PyObject* Par2Repairer_repair(Par2RepairerObject* self, PyObject* Py_UNUS
  * Add recovery blocks from further par2 files to an already-loaded verifier.
  *
  * This is the point of keeping a verifier alive across a "not enough blocks, go and
- * fetch more" cycle: the expensive verification pass is not repeated. Reassess works
- * out whether what the last verify found can now be repaired, without reading the
- * data files again.
+ * fetch more" cycle: the expensive verification pass is not repeated. repair_possible
+ * then says whether what the last verify found can now be repaired, without reading
+ * the data files again.
  */
 static PyObject* Par2Repairer_load_more(Par2RepairerObject* self, PyObject* parfiles) {
     if (!ready_and_loaded(self, "load_more"))
@@ -635,16 +619,10 @@ static PyObject* Par2Repairer_load_more(Par2RepairerObject* self, PyObject* parf
         }
     }
 
-    if (self->verified) {
-        par2::Result reassessed;
-        if (!run_step([&] { return verifier->Reassess(); }, &reassessed))
-            return NULL;
-    }
-
     par2::Par2SetInfo info;
     if (!self->verifier->GetSetInfo(&info))
         return PyLong_FromUnsignedLong(0);
-    return PyLong_FromUnsignedLong(info.recoveryblocks);
+    return PyLong_FromUnsignedLong(info.recoveryblockcount);
 }
 
 /*
@@ -698,18 +676,16 @@ static PyObject* Par2Repairer_set_known_blocks(Par2RepairerObject* self, PyObjec
 
     /* An empty vector is how libpar2 forgets what was said about a file, so retract
        anything the previous call named and this one does not. */
-    for (std::set<std::string>::const_iterator it = self->known->begin();
-         it != self->known->end(); ++it) {
-        if (vouched.find(*it) == vouched.end())
-            self->verifier->SetKnownBlocks(*it, std::vector<bool>());
+    const std::map<std::string, std::vector<bool> > known = self->verifier->GetKnownBlocks();
+    for (std::map<std::string, std::vector<bool> >::const_iterator it = known.begin();
+         it != known.end(); ++it) {
+        if (vouched.find(it->first) == vouched.end())
+            self->verifier->SetKnownBlocks(it->first, std::vector<bool>());
     }
 
-    self->known->clear();
     for (std::map<std::string, std::vector<bool> >::const_iterator it = vouched.begin();
          it != vouched.end(); ++it) {
         self->verifier->SetKnownBlocks(it->first, it->second);
-        if (!it->second.empty())
-            self->known->insert(it->first);
     }
 
     Py_RETURN_NONE;
@@ -729,8 +705,8 @@ static PyMethodDef Par2Repairer_methods[] = {
      "missing still describes it."},
     {"load_more", (PyCFunction)Par2Repairer_load_more, METH_O,
      "load_more(parfiles) -> int\n\nAdd recovery blocks from further par2 files and return the\n"
-     "new recovery_block_count. Does not re-scan the data files: if verify() has run, it\n"
-     "only re-evaluates whether there are now enough blocks to repair."},
+     "new recovery_block_count. Does not re-scan the data files: once verify() has run,\n"
+     "repair_possible says whether there are now enough blocks to repair."},
     {"set_known_blocks", (PyCFunction)Par2Repairer_set_known_blocks, METH_O,
      "set_known_blocks(mapping)\n\nTake {filename: per-block truth values} as already\n"
      "verified. Those files are not read or hashed during verify(). Call after load()."},
@@ -778,14 +754,14 @@ static PyObject* get_available_block_count(Par2RepairerObject* self, void*) {
 
 static PyObject* get_source_block_count(Par2RepairerObject* self, void*) {
     par2::Par2SetInfo info;
-    return PyLong_FromUnsignedLong(set_info(self, &info) ? info.datablocks : 0);
+    return PyLong_FromUnsignedLong(set_info(self, &info) ? info.datablockcount : 0);
 }
 
 /* From the set rather than the verify result, which is empty until a scan has run.
    The two agree once one has. */
 static PyObject* get_recovery_block_count(Par2RepairerObject* self, void*) {
     par2::Par2SetInfo info;
-    return PyLong_FromUnsignedLong(set_info(self, &info) ? info.recoveryblocks : 0);
+    return PyLong_FromUnsignedLong(set_info(self, &info) ? info.recoveryblockcount : 0);
 }
 
 static PyObject* get_recoverable_file_count(Par2RepairerObject* self, void*) {
@@ -843,7 +819,7 @@ static PyObject* get_creator(Par2RepairerObject* self, void*) {
 }
 
 static PyObject* get_quick_verified_files(Par2RepairerObject* self, void*) {
-    return PyLong_FromSize_t(self->known ? self->known->size() : 0);
+    return PyLong_FromSize_t(self->verifier ? self->verifier->GetKnownBlocks().size() : 0);
 }
 
 static PyObject* get_cancelled(Par2RepairerObject* self, void*) {
@@ -875,9 +851,8 @@ static PyObject* get_renames(Par2RepairerObject* self, void*) {
     if (dict == NULL)
         return NULL;
 
-    std::vector<std::pair<std::string, std::string> > renamed;
-    if (!self->verifier->GetRenamedFiles(&renamed))
-        return dict;
+    const std::vector<std::pair<std::string, std::string> > renamed =
+        self->verifier->GetRenamedFiles();
 
     for (size_t i = 0; i < renamed.size(); i++) {
         PyObject* value = PyUnicode_FromString(renamed[i].second.c_str());
@@ -948,9 +923,7 @@ static PyObject* get_backup_files(Par2RepairerObject* self, void*) {
     if (self->verifier == NULL)
         Py_RETURN_NONE;
 
-    std::vector<std::string> backups;
-    if (!self->verifier->GetBackupFiles(&backups))
-        return PyList_New(0);
+    const std::vector<std::string> backups = self->verifier->GetBackupFiles();
 
     PyObject* list = PyList_New((Py_ssize_t)backups.size());
     if (list == NULL)

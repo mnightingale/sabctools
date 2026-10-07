@@ -21,6 +21,7 @@
 #define PAR2_LIBPAR2_H
 
 #include <array>
+#include <map>
 #include <memory>
 #include <ostream>
 #include <string>
@@ -58,7 +59,7 @@ typedef enum
 } NoiseLevel;
 
 
-// Return type of par2cmdline
+// What a par2 operation returns, which is also the tool's exit code
 typedef enum Result
 {
   eSuccess                     = 0,
@@ -72,7 +73,8 @@ typedef enum Result
                                      // to be able to repair them.
 
   eInvalidCommandLineArguments = 3,  // There was something wrong with the
-                                     // command line arguments
+                                     // command line arguments, or with a
+                                     // setting a create was given
 
   eInsufficientCriticalData    = 4,  // The PAR2 files did not contain sufficient
                                      // information about the data files to be able
@@ -104,7 +106,7 @@ typedef enum ErrorCode
   ecNone = 0,                   // Nothing failed
 
   // The application asked for something that cannot be honoured
-  ecNotVerified = 1,            // Repair or Reassess before anything was verified,
+  ecNotVerified = 1,            // A repair before anything was verified,
                                 // or a repair over a file never scanned
   ecInvalidSetting = 2,         // A setting a create was given cannot be used
 
@@ -170,7 +172,8 @@ typedef enum WarningCode
 
 
 // Which step of the work a progress report belongs to. Each step runs its own
-// count from 0 to 1000, and a step with nothing to do is not reported at all.
+// count up to 1000, from its first report above 0, and a step with nothing to
+// do is not reported at all.
 typedef enum Phase
 {
   phLoading = 0,         // Reading the packets of one PAR2 file, once for each file
@@ -201,8 +204,8 @@ struct Par2SetInfo
   std::array<u8, 16> setid{};   // The recovery set id, an MD5 in the order its
                                 // bytes are stored
   u64 blocksize{};              // Size of each block
-  u32 datablocks{};             // Number of blocks in the recovery set
-  u32 recoveryblocks{};         // Recovery blocks read so far, which each
+  u32 datablockcount{};         // Number of blocks in the recovery set
+  u32 recoveryblockcount{};     // Recovery blocks read so far, which each
                                 // AddPar2File may add to
   u32 recoverablefilecount{};   // Files that can be repaired
   u32 otherfilecount{};         // Files described but not recoverable
@@ -228,8 +231,9 @@ struct Par2FileInfo
                                 // identifies a file whose name is unknown
 };
 
-// filename is exactly what the set records, and is how the other calls name
-// the file. Nothing checks it, so it must not be trusted as a path: it may be
+// filename is exactly what the set records, byte for byte, and is how the
+// other calls name the file, so it need not be UTF-8 and they take it back
+// unchanged. Nothing checks it, so it must not be trusted as a path: it may be
 // absolute, climb out with "..", or hold characters this system will not take.
 // localfilename is the one to open or write, since an absolute path or one
 // climbing out with ".." is defused before it is reported.
@@ -241,7 +245,8 @@ struct Par2FileInfo
 //
 // localfilename is the basepath followed by the defused form of filename,
 // absolute, and available as soon as the packets describing the file have been
-// read.
+// read. The library hands it to the system as it stands, which on Windows
+// means as UTF-8.
 
 
 // What a verify found, and what it would take to repair it
@@ -265,6 +270,10 @@ struct Par2VerifyResult
 // they must not throw.
 // They are not affected by the NoiseLevel, which only controls what is written
 // to the output stream.
+//
+// OnProgress is called with a lock held which the other threads reporting
+// progress may wait on, so it should return quickly. A callback may call
+// Cancel on the handle it is reporting for, and nothing else of that handle.
 class Par2Observer
 {
 public:
@@ -272,12 +281,17 @@ public:
 
   // The recovery set has been identified. A Create only knows this once it has
   // read every source file, so it arrives near the end rather than the start.
+  //
+  // A verifier reports it again each time AddPar2File reads more of the set.
   virtual void OnSetInfo(const Par2SetInfo &info) {}
 
   // Work has started on a file: one the set describes, or a PAR2 file being
-  // read. Each is followed by an OnFileDone.
+  // read. Each is followed by an OnFileDone with the same phase, which is the
+  // step of the work the file is part of, as OnProgress reports it. The first
+  // file of a step can arrive before the step's first progress.
   //
-  // filename is the name the set records, which is the same on every system.
+  // filename is the name the set records, byte for byte, so it is the same on
+  // every system and need not be UTF-8.
   // Nothing checks it, so it must not be trusted as a path.
   // A file the set does not name - a PAR2 file, or an extra file offered to a
   // verify - is named as it is on this one, and keeps that name for both
@@ -285,10 +299,10 @@ public:
   //
   // Several files are read at once, so a Create's pairs interleave, and the
   // order they arrive in is not the order the set ends up recording them in.
-  virtual void OnFile(const std::string &filename) {}
+  virtual void OnFile(Phase phase, const std::string &filename) {}
 
   // Progress through one step of the work, in thousandths, running upwards and
-  // starting again at 0 for each step. phase says which step it is, so an
+  // starting again for each step. phase says which step it is, so an
   // application can name what it is waiting for and can tell a fresh run from
   // a count going backwards.
   //
@@ -308,7 +322,8 @@ public:
 
   // This file has been checked. blocksfound of blocksneeded were usable, both
   // zero for a PAR2 file, which has no blocks of its own to account for.
-  virtual void OnFileDone(const std::string &filename,
+  virtual void OnFileDone(Phase phase,
+                          const std::string &filename,
                           u32 blocksfound,
                           u32 blocksneeded) {}
 
@@ -338,6 +353,12 @@ public:
 //
 // Verify and Repair are also available as the par2repair function below, which
 // does the whole job in one call.
+//
+// The calls which return a Result report a failure through it rather than
+// throwing, whatever the work or the implementations the application supplies
+// throw: running out of memory is eMemoryError with ecOutOfMemory, and
+// anything else is eLogicError with ecInternalError. Constructing one, and the
+// calls which copy out what it holds, can still throw std::bad_alloc.
 class Par2Verifier
 {
 public:
@@ -453,6 +474,10 @@ public:
   // everything said here, since the files it describes may be rewritten.
   bool SetKnownBlocks(const std::string &filename, const std::vector<bool> &blocks);
 
+  // What SetKnownBlocks has been told and not since forgotten, by the name it
+  // was given.
+  std::map<std::string, std::vector<bool> > GetKnownBlocks(void) const;
+
   // Memory in bytes that the work may use for its buffers, the -m option, which
   // the command line takes in megabytes. Zero selects the default, an eighth of
   // the physical memory, and no less than 256MB on a machine with more.
@@ -479,6 +504,10 @@ public:
   //
   // May be called more than once; each call is a fresh pass. Repair works on
   // the results of the Verify that preceded it, so call them in that order.
+  //
+  // A Verify or VerifyFile after a Repair, and an AddPar2File which changes the
+  // shape of a set already scanned, read the PAR2 files added so far again, so
+  // they must still be where they were.
   Result Verify(const std::vector<std::string> &extrafiles = {});
 
   // Scan one file that has become available, matching it against the set the
@@ -504,10 +533,13 @@ public:
   // eInsufficientCriticalData, and the file is scanned once one arrives.
   Result VerifyFile(const std::string &filename);
 
-  // The numbers behind the last Verify or Reassess. A repair is possible when
-  // recoveryblockcount is at least missingblockcount, and needs
-  // missingblockcount - recoveryblockcount more blocks when it is not.
-  // False until something has been verified.
+  // The numbers behind the last Verify, except that recoveryblockcount counts
+  // every recovery block added so far, from PAR2 files added since included. A
+  // repair is possible when recoveryblockcount is at least missingblockcount,
+  // and needs missingblockcount - recoveryblockcount more blocks when it is not,
+  // so once another volume has been added this says whether a repair has become
+  // possible without the data files being read again. False until something
+  // has been verified.
   bool GetVerifyResult(Par2VerifyResult *result) const;
 
   // The damaged files a repair renamed out of the way, which is what par2's
@@ -520,7 +552,7 @@ public:
   //
   // Emptied by the next Verify, and by an AddPar2File which changes the shape
   // of the set.
-  bool GetBackupFiles(std::vector<std::string> *files) const;
+  std::vector<std::string> GetBackupFiles(void) const;
 
   // The files a verify found under a name other than the one the set records,
   // as the name each was found under paired with the name it belongs under.
@@ -528,22 +560,7 @@ public:
   //
   // Reads the same before and after Repair, and is emptied by the next Verify.
   // Both names are absolute.
-  bool GetRenamedFiles(std::vector<std::pair<std::string, std::string> > *files) const;
-
-  // Work out again whether what the last Verify found can be repaired with
-  // the recovery blocks available now, without reading the data files again.
-  // Use it after adding more PAR2 files to a set already verified:
-  //
-  //   Verify(...)        -> eRepairNotPossible, too few recovery blocks
-  //   AddPar2File(...)   -> another volume file arrives
-  //   Reassess()         -> eRepairPossible
-  //   Repair(...)
-  //
-  // Returns the same values as Verify, or eLogicError with ecNotVerified if
-  // nothing has been verified yet or since the last Repair. Adding a file which
-  // changes the shape of the set discards the earlier results, and Verify has
-  // to be called again.
-  Result Reassess(void);
+  std::vector<std::pair<std::string, std::string> > GetRenamedFiles(void) const;
 
   // Rebuild whatever Verify found to be missing or damaged.
   //
@@ -565,10 +582,9 @@ public:
   // Why the last call failed, refining the Result it returned. See ErrorCode
   // for which Results carry one.
   //
-  // Describes only the last AddPar2File, Verify, VerifyFile, Reassess or
-  // Repair, and the first thing that went wrong during it. An observer's
-  // OnError sees every one of them as it happens, which is what a parallel scan
-  // needs.
+  // Describes only the last AddPar2File, Verify, VerifyFile or Repair, and the
+  // first thing that went wrong during it. An observer's OnError sees every
+  // one of them as it happens, which is what a parallel scan needs.
   bool GetLastError(Par2Error *error) const;
 
   // Ask the work in progress to stop, from any thread. Verify or Repair then
@@ -601,6 +617,9 @@ private:
 // would write is already there, it fails with eFileIOError. A cancel, or a
 // failure before the set is complete, deletes the recovery files that create
 // had made, and nothing else.
+//
+// Create reports a failure through the Result it returns rather than throwing,
+// as the calls of Par2Verifier do.
 class Par2Creator
 {
 public:
@@ -629,17 +648,25 @@ public:
   // The observer must outlive this object.
   void SetObserver(Par2Observer *observer);
 
-  // The files the set will describe and be able to recover. Adding one reads
-  // nothing: anything wrong with it is reported by Create.
-  void AddSourceFile(const std::string &filename);
-  void AddSourceFiles(const std::vector<std::string> &filenames);
+  // The files the set will describe and be able to recover, in place of any
+  // given before. Setting them reads nothing: anything wrong with one is
+  // reported by Create.
+  void SetSourceFiles(const std::vector<std::string> &filenames);
 
-  // The size of each block, which must be a multiple of 4. Required.
+  // The size of each block, which must be a multiple of 4, or how many blocks
+  // the files should come to, the -s and -b options. Whichever was set last is
+  // used, and one of them is required. A count is turned into the block size
+  // which divides the files into that many blocks, or as near as a multiple
+  // of 4 allows, and must be at least the number of files.
   void SetBlockSize(const u64 blocksize);
+  void SetSourceBlockCount(const u32 blockcount);
 
-  // How many recovery blocks to compute. Zero creates a set which describes
-  // the files without being able to repair any of them.
+  // How many recovery blocks to compute, or what percentage of the source
+  // blocks they should come to, the -c and -r options. Whichever was set last
+  // is used. Zero blocks creates a set which describes the files without being
+  // able to repair any of them, and a percentage comes to at least one block.
   void SetRecoveryBlockCount(const u32 recoveryblockcount);
+  void SetRedundancy(const u32 percent);
 
   // How those blocks are spread over the recovery files. recoveryfilecount is
   // read by scVariable and scUniform, where zero lets the library choose, and

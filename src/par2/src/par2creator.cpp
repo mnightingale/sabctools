@@ -287,8 +287,8 @@ Result Par2SetCreator::HashSourceFiles(void)
     Par2SetInfo info;
     memcpy(info.setid.data(), mainpacket->SetId().hash, sizeof(mainpacket->SetId().hash));
     info.blocksize = blocksize;
-    info.datablocks = sourceblockcount;
-    info.recoveryblocks = recoveryblockcount;
+    info.datablockcount = sourceblockcount;
+    info.recoveryblockcount = recoveryblockcount;
     info.recoverablefilecount = sourcefilecount;
     info.otherfilecount = 0;
     info.datasize = totaldatasize;
@@ -559,7 +559,7 @@ bool Par2SetCreator::OpenSourceFiles(void)
 #endif
 
     if (observer)
-      observer->OnFile(reported);
+      observer->OnFile(progress.GetPhase(), reported);
 
     // Open the source file and compute its Hashes and CRCs.
     if (!sourcefile->Open(noiselevel, sout, serr, extrafile, blocksize, deferhashcomputation, basepath, progress, backends, &cancelled, &errorlog))
@@ -572,14 +572,14 @@ bool Par2SetCreator::OpenSourceFiles(void)
         errorlog.RecordIfNone(ecFileReadFailed, "Could not read the source file", extrafile);
 
       if (observer)
-        observer->OnFileDone(reported, 0, needed);
+        observer->OnFileDone(progress.GetPhase(), reported, 0, needed);
 
       return;
     }
 
     // Every block of a file just read is there by definition
     if (observer)
-      observer->OnFileDone(reported, sourcefile->BlockCount(), sourcefile->BlockCount());
+      observer->OnFileDone(progress.GetPhase(), reported, sourcefile->BlockCount(), sourcefile->BlockCount());
 
     // Record the file verification and file description packets
     // in the critical packet list.

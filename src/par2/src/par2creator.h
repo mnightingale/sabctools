@@ -230,6 +230,17 @@ bool ComputeRecoveryFileCount(std::ostream &sout,
 			      u64 largestfilesize,
 			      u64 blocksize);
 
+// Work out the block size which divides files of these sizes into blockcount
+// blocks, or as near to that as a multiple of 4 allows.
+bool ComputeBlockSizeFromCount(std::ostream &serr,
+			       u64 *blocksize,
+			       u32 blockcount,
+			       const std::vector<u64> &filesizes);
+
+// How many recovery blocks redundancy percent of sourceblockcount comes to,
+// and at least one.
+u32 ComputeRecoveryBlockCountFromRedundancy(u32 sourceblockcount, u32 redundancy);
+
 } // namespace par2
 
 #endif // __PAR2CREATOR_H__

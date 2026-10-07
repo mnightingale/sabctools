@@ -159,7 +159,7 @@ class Par2Repairer:
     def load_more(self, parfiles: Sequence[str]) -> int:
         """Add recovery blocks from further par2 files; returns recovery_block_count.
 
-        Does not re-scan the data files. If verify() has run, it only re-evaluates
+        Does not re-scan the data files. Once verify() has run, repair_possible says
         whether there are now enough blocks to repair, which is what makes "fetch more
         blocks and retry" cheap. Requires load() first, and raises Par2Error if a
         named file does not exist.
