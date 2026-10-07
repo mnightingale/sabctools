@@ -169,6 +169,11 @@ class TestPar2SetChecksums:
         rep.load()
         assert rep.block_checksums("not-in-the-set.bin") is None
 
+    def test_a_name_which_is_not_utf8_is_passed_through(self, par2set):
+        rep = repairer(par2set)
+        rep.load()
+        assert rep.block_checksums("caf\udce9.bin") is None
+
     def test_block_checksums_before_load_is_rejected(self, par2set):
         rep = repairer(par2set)
         with pytest.raises(RuntimeError):

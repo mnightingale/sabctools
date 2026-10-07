@@ -107,7 +107,12 @@ class Par2File(TypedDict):
     """One file of a par2 set, as reported by Par2Repairer.files."""
 
     name: str
-    """Name recorded in the par2 set"""
+    """Name recorded in the par2 set.
+
+    The set's own bytes, which need not be UTF-8: bytes which are not come through
+    as lone surrogates, as os.fsdecode() gives them, and the calls which take a name
+    accept it back as it is.
+    """
     target: str
     """Absolute path the file belongs at on this system"""
     size: int

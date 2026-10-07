@@ -53,6 +53,26 @@ static PyObject* enum_value(PyObject* type, int value) {
     return PyObject_CallFunction(type, "i", value);
 }
 
+/* A name is the bytes par2 holds, which need not be UTF-8. Bytes which are not
+   become lone surrogates, as os.fsdecode() gives them, and go back unchanged. */
+static PyObject* name_to_python(const std::string& name) {
+    return PyUnicode_DecodeUTF8(name.data(), (Py_ssize_t)name.size(), "surrogateescape");
+}
+
+static bool name_from_python(PyObject* object, std::string* name) {
+    PyObject* bytes = PyUnicode_AsEncodedString(object, "utf-8", "surrogateescape");
+    if (bytes == NULL)
+        return false;
+    name->assign(PyBytes_AS_STRING(bytes), (size_t)PyBytes_GET_SIZE(bytes));
+    Py_DECREF(bytes);
+    return true;
+}
+
+/* name_from_python for PyArg_ParseTupleAndKeywords's O& */
+static int name_converter(PyObject* object, void* name) {
+    return name_from_python(object, (std::string*)name) ? 1 : 0;
+}
+
 static const char* const STAGE_LOADING = "loading";
 static const char* const STAGE_VERIFYING = "verifying";
 static const char* const STAGE_CONSTRUCTING = "constructing";
@@ -117,15 +137,15 @@ typedef struct Par2RepairerObject {
  * printed rather than propagated: there is no way to unwind through par2's C++
  * frames, and swallowing it silently would be worse.
  */
-static void call_progress(Par2RepairerObject* self, const char* stage, const char* filename,
-                          int progress) {
+static void call_progress(Par2RepairerObject* self, const char* stage,
+                          const std::string& filename, int progress) {
     if (!self || !self->progress_callback)
         return;
 
     PyGILState_STATE gstate = PyGILState_Ensure();
 
-    PyObject* result = PyObject_CallFunction(self->progress_callback, "ssi", stage,
-                                             filename ? filename : "", progress);
+    PyObject* result = PyObject_CallFunction(self->progress_callback, "sNi", stage,
+                                             name_to_python(filename), progress);
     if (result == NULL) {
         PyErr_WriteUnraisable(self->progress_callback);
     } else {
@@ -156,7 +176,7 @@ static const char* stage_of(par2::Phase phase) {
 void SabObserver::OnFile(par2::Phase phase, const std::string& filename) {
     if (!owner)
         return;
-    call_progress(owner, stage_of(phase), filename.c_str(), 0);
+    call_progress(owner, stage_of(phase), filename, 0);
 }
 
 void SabObserver::OnProgress(par2::Phase phase, par2::u32 permille) {
@@ -178,7 +198,7 @@ void SabObserver::OnProgress(par2::Phase phase, par2::u32 permille) {
         return;
     owner->last_progress = percent;
 
-    call_progress(owner, owner->stage, NULL, percent);
+    call_progress(owner, owner->stage, std::string(), percent);
 }
 
 /*
@@ -194,8 +214,9 @@ void SabObserver::OnFileDone(par2::Phase, const std::string& filename, par2::u32
         return;
 
     PyGILState_STATE gstate = PyGILState_Ensure();
-    PyObject* result = PyObject_CallFunction(owner->file_done_callback, "sII", filename.c_str(),
-                                             (unsigned int)found, (unsigned int)needed);
+    PyObject* result = PyObject_CallFunction(owner->file_done_callback, "NII",
+                                             name_to_python(filename), (unsigned int)found,
+                                             (unsigned int)needed);
     if (result == NULL) {
         PyErr_WriteUnraisable(owner->file_done_callback);
     } else {
@@ -215,8 +236,8 @@ static void call_report(PyObject* callback, PyObject* type, int code,
 
     PyGILState_STATE gstate = PyGILState_Ensure();
 
-    PyObject* result = PyObject_CallFunction(callback, "Nss", enum_value(type, code),
-                                             message.c_str(), filename.c_str());
+    PyObject* result = PyObject_CallFunction(callback, "NsN", enum_value(type, code),
+                                             message.c_str(), name_to_python(filename));
     if (result == NULL) {
         PyErr_WriteUnraisable(callback);
     } else {
@@ -325,9 +346,9 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
                                    "skip_data",    "skip_leaway",
                                    "skip_repaired_verification", NULL};
 
-    const char* parfile = NULL;
+    std::string parfile;
     PyObject* extrafiles = NULL;
-    const char* basepath = NULL;
+    std::string basepath;
     unsigned long long memory_limit = 0;
     unsigned int threads = 0;
     unsigned int file_threads = 0;
@@ -335,8 +356,9 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
     unsigned long long skip_leaway = 0;
     int skip_repaired_verification = 1;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|OsKIIpKp", (char**)kwlist, &parfile,
-                                     &extrafiles, &basepath, &memory_limit, &threads,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O&|OO&KIIpKp", (char**)kwlist,
+                                     name_converter, &parfile, &extrafiles, name_converter,
+                                     &basepath, &memory_limit, &threads,
                                      &file_threads, &skip_data, &skip_leaway,
                                      &skip_repaired_verification))
         return -1;
@@ -348,8 +370,8 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
             return -1;
         Py_ssize_t count = PySequence_Fast_GET_SIZE(seq);
         for (Py_ssize_t i = 0; i < count; i++) {
-            const char* path = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
-            if (path == NULL) {
+            std::string path;
+            if (!name_from_python(PySequence_Fast_GET_ITEM(seq, i), &path)) {
                 Py_DECREF(seq);
                 return -1;
             }
@@ -385,7 +407,7 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
      * An empty basepath is taken from the first par2 file added, which is what the
      * tool does; a memory limit of zero lets par2 size itself from physical memory.
      */
-    self->verifier = new par2::Par2Verifier(basepath ? basepath : "");
+    self->verifier = new par2::Par2Verifier(basepath);
     self->verifier->SetMemoryLimit((size_t)memory_limit);
     self->verifier->SetThreadCounts(threads, file_threads);
     self->verifier->SetDataSkipping(self->skip_data, (par2::u64)self->skip_leaway);
@@ -475,8 +497,8 @@ static PyObject* Par2Repairer_verify_file(Par2RepairerObject* self, PyObject* ar
     if (!ready(self))
         return NULL;
 
-    const char* filename = PyUnicode_AsUTF8(arg);
-    if (filename == NULL)
+    std::string path;
+    if (!name_from_python(arg, &path))
         return NULL;
 
     self->stage = STAGE_VERIFYING;
@@ -484,7 +506,6 @@ static PyObject* Par2Repairer_verify_file(Par2RepairerObject* self, PyObject* ar
 
     par2::Result result;
     par2::Par2Verifier* verifier = self->verifier;
-    const std::string path = filename;
     if (!run_step([&] { return verifier->VerifyFile(path); }, &result))
         return NULL;
 
@@ -506,8 +527,8 @@ static PyObject* Par2Repairer_block_checksums(Par2RepairerObject* self, PyObject
     if (!ready_and_loaded(self, "block_checksums"))
         return NULL;
 
-    const char* filename = PyUnicode_AsUTF8(arg);
-    if (filename == NULL)
+    std::string filename;
+    if (!name_from_python(arg, &filename))
         return NULL;
 
     std::vector<par2::u32> crcs;
@@ -591,8 +612,8 @@ static PyObject* Par2Repairer_load_more(Par2RepairerObject* self, PyObject* parf
     std::vector<std::string> paths;
     Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
     for (Py_ssize_t i = 0; i < count; i++) {
-        const char* path = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(sequence, i));
-        if (path == NULL) {
+        std::string path;
+        if (!name_from_python(PySequence_Fast_GET_ITEM(sequence, i), &path)) {
             Py_DECREF(sequence);
             return NULL;
         }
@@ -650,8 +671,8 @@ static PyObject* Par2Repairer_set_known_blocks(Par2RepairerObject* self, PyObjec
     PyObject *key, *value;
     Py_ssize_t position = 0;
     while (PyDict_Next(mapping, &position, &key, &value)) {
-        const char* filename = PyUnicode_AsUTF8(key);
-        if (filename == NULL)
+        std::string filename;
+        if (!name_from_python(key, &filename))
             return NULL;
 
         PyObject* sequence = PySequence_Fast(value, "block values must be a sequence");
@@ -855,16 +876,15 @@ static PyObject* get_renames(Par2RepairerObject* self, void*) {
         self->verifier->GetRenamedFiles();
 
     for (size_t i = 0; i < renamed.size(); i++) {
-        PyObject* value = PyUnicode_FromString(renamed[i].second.c_str());
-        if (value == NULL) {
+        PyObject* key = name_to_python(renamed[i].first);
+        PyObject* value = name_to_python(renamed[i].second);
+        if (key == NULL || value == NULL || PyDict_SetItem(dict, key, value) < 0) {
+            Py_XDECREF(key);
+            Py_XDECREF(value);
             Py_DECREF(dict);
             return NULL;
         }
-        if (PyDict_SetItemString(dict, renamed[i].first.c_str(), value) < 0) {
-            Py_DECREF(value);
-            Py_DECREF(dict);
-            return NULL;
-        }
+        Py_DECREF(key);
         Py_DECREF(value);
     }
     return dict;
@@ -894,9 +914,9 @@ static PyObject* get_files(Par2RepairerObject* self, void*) {
         return list;
 
     for (size_t i = 0; i < files.size(); i++) {
-        PyObject* entry = Py_BuildValue("{s:s, s:s, s:K, s:I, s:y#}",
-                                        "name", files[i].filename.c_str(),
-                                        "target", files[i].localfilename.c_str(),
+        PyObject* entry = Py_BuildValue("{s:N, s:N, s:K, s:I, s:y#}",
+                                        "name", name_to_python(files[i].filename),
+                                        "target", name_to_python(files[i].localfilename),
                                         "size", (unsigned long long)files[i].filesize,
                                         "blocks", files[i].blockcount,
                                         "hash16k", (const char*)files[i].hash16k.data(), (Py_ssize_t)16);
@@ -930,7 +950,7 @@ static PyObject* get_backup_files(Par2RepairerObject* self, void*) {
         return NULL;
 
     for (size_t i = 0; i < backups.size(); i++) {
-        PyObject* name = PyUnicode_FromString(backups[i].c_str());
+        PyObject* name = name_to_python(backups[i]);
         if (name == NULL) {
             Py_DECREF(list);
             return NULL;
@@ -953,10 +973,10 @@ static PyObject* get_last_error(Par2RepairerObject* self, void*) {
     if (!self->verifier->GetLastError(&error))
         Py_RETURN_NONE;
 
-    return Py_BuildValue("{s:N, s:s, s:s}",
+    return Py_BuildValue("{s:N, s:s, s:N}",
                          "code", enum_value(Par2ErrorCodeType, (int)error.code),
                          "message", error.message.c_str(),
-                         "filename", error.filename.c_str());
+                         "filename", name_to_python(error.filename));
 }
 
 static PyObject* get_callback(PyObject* callback) {
