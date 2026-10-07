@@ -101,7 +101,7 @@ class Par2LastError(TypedDict):
     message: str
     """One line, without a trailing newline. May be empty."""
     filename: str
-    """The file it concerns, empty where it concerns none"""
+    """The absolute path of the file it concerns, empty where it concerns none"""
 
 class Par2File(TypedDict):
     """One file of a par2 set, as reported by Par2Repairer.files."""
