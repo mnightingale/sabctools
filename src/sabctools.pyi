@@ -251,8 +251,8 @@ class Par2Repairer:
     progress_callback: Optional[Callable[[str, str, int], None]]
     """Called as (stage, filename, percent).
 
-    `stage` is one of "loading", "verifying", "constructing", "solving", "repairing",
-    "verifying_repair", each of which counts from 0 again. `filename` is set when a new
+    `stage` is one of "loading", "verifying", "repairing", "verifying_repair", each of
+    which counts from 0 again. `filename` is set when a new
     file is opened and empty on percentage updates; `percent` is 0-100. Invoked from
     par2's worker threads, so it must be quick and must not call back into the repairer
     other than cancel() and the properties describing the set: recoverable_file_count,

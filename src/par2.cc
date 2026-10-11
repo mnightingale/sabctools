@@ -17,6 +17,7 @@
  */
 
 #include "par2.h"
+#include "par2_parpar.h"
 
 #include <par2/libpar2.h>
 
@@ -75,8 +76,6 @@ static int name_converter(PyObject* object, void* name) {
 
 static const char* const STAGE_LOADING = "loading";
 static const char* const STAGE_VERIFYING = "verifying";
-static const char* const STAGE_CONSTRUCTING = "constructing";
-static const char* const STAGE_SOLVING = "solving";
 static const char* const STAGE_REPAIRING = "repairing";
 static const char* const STAGE_VERIFYING_REPAIR = "verifying_repair";
 
@@ -170,10 +169,6 @@ static const char* stage_of(par2::Phase phase) {
             return STAGE_LOADING;
         case par2::phScanning:
             return STAGE_VERIFYING;
-        case par2::phConstructing:
-            return STAGE_CONSTRUCTING;
-        case par2::phSolving:
-            return STAGE_SOLVING;
         case par2::phVerifyingRepair:
             return STAGE_VERIFYING_REPAIR;
         default:
@@ -454,7 +449,7 @@ static int Par2Repairer_init(Par2RepairerObject* self, PyObject* args, PyObject*
      * An empty basepath is taken from the first par2 file added, which is what the
      * tool does; a memory limit of zero lets par2 size itself from physical memory.
      */
-    self->verifier = new par2::Par2Verifier(basepath);
+    self->verifier = new par2::Par2Verifier(basepath, ParParBackends());
     self->verifier->SetMemoryLimit((size_t)memory_limit);
     self->verifier->SetThreadCounts(threads, file_threads);
     self->verifier->SetDataSkipping(self->skip_data, (par2::u64)self->skip_leaway);
