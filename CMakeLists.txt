@@ -55,12 +55,11 @@ message(STATUS "sabctools version: ${SABCTOOLS_VERSION}")
 # ---------------------------------------------------------------------------
 # Vendored dependencies
 # ---------------------------------------------------------------------------
-# par2cmdline-turbo and rapidyenc are built by their own upstream CMake, as
-# nested projects rather than add_subdirectory(): each sets global compile
-# options and its own C++ standard, and par2 has to stay at C++17 while the
-# extension itself builds at C++20. Keeping them at arm's length also keeps
-# their per-ISA flag matrices and probes entirely upstream's problem, so
-# re-vendoring picks up new kernels with no change here.
+# ParPar and rapidyenc are built as nested projects rather than
+# add_subdirectory(): each sets global compile options and its own C++
+# standard, and the extension itself builds at C++20. rapidyenc's is its
+# upstream CMake, so its per-ISA flag matrix and probes stay upstream's problem;
+# ParPar ships none, so cmake/parpar/ holds ours.
 #
 # ExternalProject inherits this project's generator, so the sub-build targets
 # the same toolchain the extension does - and on Windows it inherits the
@@ -269,6 +268,16 @@ set_target_properties(libpar2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Only the static library is wanted; the shared one and the CLI tools would be
 # built for nothing. Its archive lands in a subdirectory of its own, set by a
 # target property upstream that an output-directory variable cannot override.
+# ParPar ships no CMake, so cmake/parpar/ holds ours. It is still built as a
+# nested project, so that a universal2 build gets one per architecture.
+add_vendored_project(
+    NAME parpar
+    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/parpar"
+    SUBDIR ""
+    LIBRARIES parpar
+    CMAKE_ARGS "-DPARPAR_DIR=${CMAKE_CURRENT_SOURCE_DIR}/src/parpar"
+)
+
 add_vendored_project(
     NAME rapidyenc
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/rapidyenc"
@@ -317,15 +326,18 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 #  - C++17, matching upstream's CMAKE_CXX_STANDARD. Under C++20 libc++'s
 #    ~vector() is constexpr and gets eagerly instantiated, which gfmat_inv.h's
 #    std::vector<Galois16RecMatrixWorker> of an incomplete type does not survive.
-add_library(par2_glue OBJECT src/par2.cc)
+add_library(par2_glue OBJECT src/par2.cc src/par2_parpar.cc)
 
 set_target_properties(par2_glue PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 # Only the public header, which is self-contained. Nothing here needs par2's
 # internal headers, its config.h or any macro that has to agree with how the
 # library was compiled - which is the whole point of moving to libpar2.h.
-target_include_directories(par2_glue PRIVATE src)
+target_include_directories(par2_glue PRIVATE src src/parpar)
 target_link_libraries(par2_glue PRIVATE par2::par2 Python::Module)
+
+# ParPar's headers change with these, so they have to match its build
+target_compile_definitions(par2_glue PRIVATE PARPAR_ENABLE_HASHER_MD5CRC PARPAR_INVERT_SUPPORT PARPAR_SLIM_GF16)
 
 if(MSVC)
     # /EHsc because the glue catches par2's exceptions and the defaults omit it;
@@ -355,7 +367,7 @@ python_add_library(sabctools MODULE WITH_SOABI
     $<TARGET_OBJECTS:par2_glue>
 )
 
-add_dependencies(sabctools rapidyenc_built)
+add_dependencies(sabctools parpar_built rapidyenc_built)
 
 target_include_directories(sabctools PRIVATE src)
 target_compile_options(sabctools PRIVATE ${SABCTOOLS_FLAGS})
@@ -369,6 +381,7 @@ endif()
 # demanded to its left, and it is our own objects that demand them.
 target_link_libraries(sabctools PRIVATE
     par2::par2
+    ${parpar_ARCHIVES}
     ${rapidyenc_ARCHIVES}
     ${CMAKE_DL_LIBS}  # dlopen, for the unlocked SSL reads
 )

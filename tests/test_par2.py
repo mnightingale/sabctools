@@ -682,8 +682,7 @@ class TestPar2Progress:
         rep.verify()
         rep.repair()
 
-        # par2 says which step each count belongs to, so the stages arrive in the
-        # order it works in, each counting from zero again
+        # The stages arrive in the order par2 works in, each counting from zero again
         order = []
         for stage, _, _ in events:
             if not order or order[-1] != stage:
@@ -691,8 +690,6 @@ class TestPar2Progress:
         assert order == [
             "loading",
             "verifying",
-            "constructing",
-            "solving",
             "repairing",
             "verifying_repair",
         ]
