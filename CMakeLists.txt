@@ -14,7 +14,7 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
-cmake_minimum_required(VERSION 3.15...4.0)
+cmake_minimum_required(VERSION 3.16...4.0)
 project(sabctools LANGUAGES CXX)
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
@@ -55,12 +55,12 @@ message(STATUS "sabctools version: ${SABCTOOLS_VERSION}")
 # ---------------------------------------------------------------------------
 # Vendored dependencies
 # ---------------------------------------------------------------------------
-# rapidyenc is built by its own upstream CMake, as a nested project rather than
-# add_subdirectory(): it sets global compile options and its own C++ standard.
-# Keeping it at arm's length also keeps its per-ISA flag matrix and probes
-# entirely upstream's problem, so re-vendoring picks up new kernels with no
-# change here. The machinery below takes a project name for that reason - a
-# second vendored tree should need no new code, only another call.
+# par2cmdline-turbo and rapidyenc are built by their own upstream CMake, as
+# nested projects rather than add_subdirectory(): each sets global compile
+# options and its own C++ standard, and par2 has to stay at C++17 while the
+# extension itself builds at C++20. Keeping them at arm's length also keeps
+# their per-ISA flag matrices and probes entirely upstream's problem, so
+# re-vendoring picks up new kernels with no change here.
 #
 # ExternalProject inherits this project's generator, so the sub-build targets
 # the same toolchain the extension does - and on Windows it inherits the
@@ -93,9 +93,10 @@ if(IS_MULTI_CONFIG)
     set(CONFIG_SUBDIR "Release/")
 endif()
 
-# Build one vendored CMake project and set <NAME>_ARCHIVES in the caller's scope:
-# the static libraries produced, in the order given. Also leaves a target named
-# <NAME>_built to depend on.
+# Build one vendored CMake project and set, in the caller's scope:
+#   <NAME>_ARCHIVES    the static libraries produced, in the order given
+#   <NAME>_BINARY_DIR  a build directory to pick generated headers out of
+# Also leaves a target named <NAME>_built to depend on.
 #
 #   NAME        logical name, and the build directory under the binary dir
 #   SOURCE_DIR  the vendored tree
@@ -133,10 +134,16 @@ function(add_vendored_project)
     foreach(arch IN LISTS slices)
         _vendored_build(
             "${V_NAME}" "${V_SOURCE_DIR}" "${V_SUBDIR}" "${V_LIBRARIES}"
-            "${common_args}" "${arch}" archives target
+            "${common_args}" "${arch}" archives target binary_dir
         )
         list(APPEND slice_targets ${target})
         list(APPEND slice_archives ${archives})
+        # par2 generates a config.h; it only records host and OS traits, which
+        # are identical across slices, so the first one will do.
+        if(NOT ${V_NAME}_BINARY_DIR)
+            set(${V_NAME}_BINARY_DIR "${binary_dir}" PARENT_SCOPE)
+            set(${V_NAME}_BINARY_DIR "${binary_dir}")
+        endif()
     endforeach()
 
     if(NOT slices)
@@ -144,9 +151,10 @@ function(add_vendored_project)
         # already inherited from the parent by ExternalProject.
         _vendored_build(
             "${V_NAME}" "${V_SOURCE_DIR}" "${V_SUBDIR}" "${V_LIBRARIES}"
-            "${common_args}" "" archives target
+            "${common_args}" "" archives target binary_dir
         )
         set(${V_NAME}_ARCHIVES ${archives} PARENT_SCOPE)
+        set(${V_NAME}_BINARY_DIR "${binary_dir}" PARENT_SCOPE)
         add_custom_target(${V_NAME}_built DEPENDS ${target})
         return()
     endif()
@@ -189,7 +197,7 @@ endfunction()
 
 # One ExternalProject. arch is "" for a plain build, or a single architecture.
 # Sets out_archives and out_target in the caller's scope.
-function(_vendored_build name source_dir subdir libraries cmake_args arch out_archives out_target)
+function(_vendored_build name source_dir subdir libraries cmake_args arch out_archives out_target out_binary_dir)
     set(target "${name}")
     set(extra_args "")
     if(arch)
@@ -244,7 +252,19 @@ function(_vendored_build name source_dir subdir libraries cmake_args arch out_ar
 
     set(${out_archives} ${archives} PARENT_SCOPE)
     set(${out_target} ${target} PARENT_SCOPE)
+    set(${out_binary_dir} "${binary_dir}" PARENT_SCOPE)
 endfunction()
+
+# par2 is built by its own CMake, as a part of this build rather than a nested
+# project: it probes nothing per instruction set, so a universal2 build needs no
+# slicing. Not being the top-level project, it leaves its tool, tests and install
+# rules off, and EXCLUDE_FROM_ALL builds only the library the glue links.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+add_subdirectory(src/par2 EXCLUDE_FROM_ALL)
+
+# These static libraries end up inside a shared object
+set_target_properties(libpar2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Only the static library is wanted; the shared one and the CLI tools would be
 # built for nothing. Its archive lands in a subdirectory of its own, set by a
@@ -290,6 +310,38 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 # ---------------------------------------------------------------------------
+# The par2 glue
+# ---------------------------------------------------------------------------
+# A target of its own because it needs two things the rest must not have:
+#  - exceptions, because it catches par2's
+#  - C++17, matching upstream's CMAKE_CXX_STANDARD. Under C++20 libc++'s
+#    ~vector() is constexpr and gets eagerly instantiated, which gfmat_inv.h's
+#    std::vector<Galois16RecMatrixWorker> of an incomplete type does not survive.
+add_library(par2_glue OBJECT src/par2.cc)
+
+set_target_properties(par2_glue PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+# Only the public header, which is self-contained. Nothing here needs par2's
+# internal headers, its config.h or any macro that has to agree with how the
+# library was compiled - which is the whole point of moving to libpar2.h.
+target_include_directories(par2_glue PRIVATE src)
+target_link_libraries(par2_glue PRIVATE par2::par2 Python::Module)
+
+if(MSVC)
+    # /EHsc because the glue catches par2's exceptions and the defaults omit it;
+    # /utf-8 to match how the par2 libraries were compiled.
+    target_compile_options(par2_glue PRIVATE /O2 /GS- /Gy /Oy /Oi /utf-8 /EHsc)
+else()
+    target_compile_options(par2_glue PRIVATE
+        -Wno-unused-function -Wno-unused-parameter
+        -fomit-frame-pointer -fno-rtti -O3 -fwrapv -pthread
+    )
+endif()
+
+# A universal2 slice of the glue still compiles for every architecture at once,
+# which is fine - it contains no ISA-specific code.
+
+# ---------------------------------------------------------------------------
 # The extension
 # ---------------------------------------------------------------------------
 python_add_library(sabctools MODULE WITH_SOABI
@@ -300,6 +352,7 @@ python_add_library(sabctools MODULE WITH_SOABI
     src/filewriter.cc
     src/utils.cc
     src/unlocked_ssl.cc
+    $<TARGET_OBJECTS:par2_glue>
 )
 
 add_dependencies(sabctools rapidyenc_built)
@@ -315,6 +368,7 @@ endif()
 # The vendored archives go last: a static library only satisfies symbols already
 # demanded to its left, and it is our own objects that demand them.
 target_link_libraries(sabctools PRIVATE
+    par2::par2
     ${rapidyenc_ARCHIVES}
     ${CMAKE_DL_LIBS}  # dlopen, for the unlocked SSL reads
 )
