@@ -1,0 +1,1430 @@
+//  This file is part of par2cmdline (a PAR 2.0 compatible file verification and
+//  repair tool). See http://parchive.sourceforge.net for details of PAR 2.0.
+//
+//  Copyright (c) 2003 Peter Brian Clements
+//  Copyright (c) 2019 Michael D. Nahas
+//
+//  par2cmdline is free software; you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation; either version 2 of the License, or
+//  (at your option) any later version.
+//
+//  par2cmdline is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program; if not, write to the Free Software
+//  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+
+#include "libpar2internal.h"
+
+// iostream is included here, so that cout and cerr are not used elsewhere.
+#include<iostream>
+#include<algorithm>
+#include "commandline.h"
+#include "foreach_parallel.h"
+#include <fstream>  //ADDED for @FILELIST FUNCTIONALY
+
+#ifdef _MSC_VER
+#ifdef _DEBUG
+#undef THIS_FILE
+static char THIS_FILE[]=__FILE__;
+#define new DEBUG_NEW
+#endif
+#else
+#include <unistd.h>
+#endif
+
+
+namespace par2
+{
+
+CommandLine::CommandLine(void)
+: CommandLine(std::cout, std::cerr)
+{
+}
+
+CommandLine::CommandLine(std::ostream &_sout, std::ostream &_serr)
+: sout(_sout)
+, serr(_serr)
+, filesize_cache()
+, version(verUnknown)
+, noiselevel(nlUnknown)
+, memorylimit(0)
+, basepath()
+, nthreads(0) // 0 means use default number
+, filethreads( _FILE_THREADS ) // default from header file
+, parfilename()
+, rawfilenames()
+, extrafiles()
+, operation(opNone)
+, purgefiles(false)
+, renameonly(false)
+, skipdata(false)
+, skipleaway(0)
+, fullhash(false)
+, inplacerepair(false)
+, blockcount(0)
+, blocksize(0)
+, firstblock(0)
+, recoveryfilescheme(scUnknown)
+, recoveryfilecount(0)
+, recoveryblockcount(0)
+, sourceblockcount(0)
+, largestfilesize(0)
+, recoveryblockcountset(false)
+, redundancy(0)
+, redundancysize(0)
+, redundancyset(false)
+, recursive(false)
+, followlinks(false)
+{
+}
+
+void CommandLine::showversion(void)
+{
+  std::string version = PACKAGE " version " VERSION;
+  sout << version << std::endl;
+}
+
+void CommandLine::banner(void)
+{
+  sout << "Copyright (C) 2003-2015 Peter Brian Clements.\n"
+    "Copyright (C) 2011-2012 Marcel Partap.\n"
+    "Copyright (C) 2012-2026 Ike Devolder.\n"
+    "Copyright (C) 2014-2017 Jussi Kansanen.\n"
+    "Copyright (C) 2019 Michael Nahas.\n"
+    "\n"
+    "par2cmdline comes with ABSOLUTELY NO WARRANTY.\n"
+    "\n"
+    "This is free software, and you are welcome to redistribute it and/or modify\n"
+    "it under the terms of the GNU General Public License as published by the\n"
+    "Free Software Foundation; either version 2 of the License, or (at your\n"
+    "option) any later version. See COPYING for details.\n"
+    << std::endl;
+}
+
+void CommandLine::usage(void)
+{
+  sout <<
+    "Usage:\n"
+    "  par2 -h  : show this help\n"
+    "  par2 -V  : show version\n"
+    "  par2 -VV : show version and copyright\n"
+    "\n"
+    "  par2 c(reate) [options] <PAR2 file> [files] : Create PAR2 files\n"
+    "  par2 v(erify) [options] <PAR2 file> [files] : Verify files using PAR2 file\n"
+    "  par2 r(epair) [options] <PAR2 file> [files] : Repair files using PAR2 files\n"
+    "\n"
+    "You may also leave out the \"c\", \"v\", and \"r\" commands by using \"par2create\",\n"
+    "\"par2verify\", or \"par2repair\" instead.\n"
+    "\n"
+    "Options: (all uses)\n"
+    "  -a<file> : Set the main PAR2 archive name\n"
+    "  -B<path> : Set the basepath to use as reference for the datafiles\n"
+    "  -v [-v]  : Be more verbose\n"
+    "  -q [-q]  : Be more quiet (-q -q gives silence)\n"
+    "  -m<n>    : Memory (in MB) to use (default is half of total physical memory)\n";
+  sout <<
+    "  -t<n>    : Number of threads used for main processing (" << default_threads() << " detected)\n"
+    "  -T<n>    : Number of files hashed in parallel\n"
+    "             (" << _FILE_THREADS << " are the default)\n";
+  sout <<
+    "  --       : Treat all following arguments as filenames\n"
+    "Options: (verify or repair)\n"
+    "  -p       : Purge backup files and par files on successful recovery or\n"
+    "             when no recovery is needed\n"
+    "  -O       : Rename-only mode (skip files that are not perfect matches,\n"
+    "             useful for quickly fixing renamed files)\n"
+    "  -N       : Data skipping (find badly mispositioned data blocks)\n"
+    "  -S<n>    : Skip leaway (distance +/- from expected block position, default 64)\n"
+    "  --full-hash : Also check the hash of the whole of each file\n"
+    "  -i       : Repair damaged files in place, without a backup (repair only,\n"
+    "             not with -N)\n"
+    "Options: (create)\n"
+    "  -b<n>    : Set the Block-Count (default 2000)\n"
+    "  -s<n>    : Set the Block-Size (don't use both -b and -s)\n"
+    "  -r<n>    : Level of redundancy (%, default 5%)\n"
+    "  -r<c><n> : Redundancy target size, <c>=g(iga),m(ega),k(ilo) bytes\n"
+    "  -c<n>    : Recovery Block-Count (don't use both -r and -c)\n"
+    "  -f<n>    : First Recovery-Block-Number (default 0)\n"
+    "  -u       : Uniform recovery file sizes (default is variable)\n"
+    "  -l       : Limit size of recovery files (don't use both -u and -l)\n"
+    "  -n<n>    : Number of recovery files (max 31) (don't use both -n and -l)\n"
+    "  -R       : Recurse into subdirectories\n"
+    "             (Be aware of wildcard shell expansion)\n"
+    "  -L       : Follow symlinks to files when scanning for source files\n"
+    "             (Use at your own risk: symlink targets may lie outside the\n"
+    "             basepath. Symlinks to directories are not followed.\n"
+    "             POSIX systems only)\n"
+    "   @       : Process a listing of files specified in text (file) input \n"
+    "             (eg. @filelist.txt, or bare @ to read from stdin) \n"
+    "\n";
+  sout <<
+    "Example:\n"
+    "   par2 repair *.par2\n"
+    "\n";
+}
+
+bool CommandLine::Parse(int argc, const char * const *argv)
+{
+  if (!ReadArgs(argc, argv))
+    return false;
+
+  if (operation != opNone) {  // user didn't do "par --help", etc.
+    if (!CheckValuesAndSetDefaults())
+      return false;
+  }
+
+  if (operation == opCreate) {
+    if (!ComputeBlockSize())
+      return false;
+
+    sourceblockcount = 0;
+    largestfilesize = 0;
+    for (std::vector<std::string>::const_iterator i=extrafiles.begin(); i!=extrafiles.end(); i++)
+    {
+      u64 filesize = filesize_cache.get(*i);
+      sourceblockcount += (u32) ((filesize + blocksize-1) / blocksize);
+      if (filesize > largestfilesize)
+      {
+	largestfilesize = filesize;
+      }
+    }
+
+    if (sourceblockcount > 32768)
+    {
+      serr << "Too many source blocks (" << sourceblockcount << " > 32768)." << std::endl;
+      return false;
+    }
+
+    if (!ComputeRecoveryBlockCount(serr,
+				   &recoveryblockcount,
+				   sourceblockcount,
+				   blocksize,
+				   firstblock,
+				   recoveryfilescheme,
+				   recoveryfilecount,
+				   recoveryblockcountset,
+				   redundancy,
+				   redundancysize,
+				   largestfilesize))
+    {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool CommandLine::ReadArgs(int argc, const char * const *argv)
+{
+  if (argc<1)
+  {
+    return false;
+  }
+
+  // Split the program name into path and filename
+  std::string path, name;
+  DiskFile::SplitFilename(argv[0], path, name);
+  argc--;
+  argv++;
+
+  if (argc>0)
+  {
+    if (argv[0][0] == '-')
+    {
+      if (argv[0] == std::string("-h") || argv[0] == std::string("--help"))
+      {
+	usage();
+	return true;
+      }
+      else if (argv[0] == std::string("-V") || argv[0] == std::string("--version"))
+      {
+	showversion();
+	return true;
+      }
+      else if (argv[0] == std::string("-VV"))
+      {
+	showversion();
+	sout << '\n';
+	banner();
+	return true;
+      }
+    }
+  }
+
+  // Strip ".exe" from the end
+  if (name.size() > 4 && 0 == stricmp(".exe", name.substr(name.length()-4).c_str()))
+  {
+    name = name.substr(0, name.length()-4);
+  }
+
+  // Check the resulting program name
+  if (0 == stricmp("par2create", name.c_str()))
+  {
+    operation = opCreate;
+  }
+  else if (0 == stricmp("par2verify", name.c_str()))
+  {
+    operation = opVerify;
+  }
+  else if (0 == stricmp("par2repair", name.c_str()))
+  {
+    operation = opRepair;
+  }
+
+  // Have we determined what operation we want?
+  if (operation == opNone)
+  {
+    if (argc<2)
+    {
+      serr << "Not enough command line arguments." << std::endl;
+      return false;
+    }
+
+    switch (tolower(argv[0][0]))
+    {
+    case 'c':
+      if (argv[0][1] == 0 || 0 == stricmp(argv[0], "create"))
+        operation = opCreate;
+      break;
+    case 'v':
+      if (argv[0][1] == 0 || 0 == stricmp(argv[0], "verify"))
+        operation = opVerify;
+      break;
+    case 'r':
+      if (argv[0][1] == 0 || 0 == stricmp(argv[0], "repair"))
+        operation = opRepair;
+      break;
+    }
+
+    if (operation == opNone)
+    {
+      serr << "Invalid operation specified: " << argv[0] << std::endl;
+      return false;
+    }
+    argc--;
+    argv++;
+  }
+
+  bool options = true;
+  basepath = "";
+
+  while (argc>0)
+  {
+    if (argv[0][0])
+    {
+    //MODIFIED FOR @FILELIST FUNCTIONALITY
+      if (options && argv[0][0] != '-' && argv[0][0] != '@')
+        options = false;
+    //MODIFIED FOR @FILELIST FUNCTIONALITY
+      if (options && argv[0][0] == '-')
+      {
+        switch (argv[0][1])
+        {
+        case 'a':
+          {
+            std::string str = argv[0];
+            bool setparfile = false;
+            if (str == "-a")
+            {
+              setparfile = SetParFilename(argv[1]);
+              argc--;
+              argv++;
+            }
+            else
+            {
+              setparfile = SetParFilename(str.substr(2));
+            }
+
+            if (! setparfile)
+            {
+              serr << "failed to set the main par file" << std::endl;
+              return false;
+            }
+          }
+          break;
+        case 'b':  // Set the block count
+          {
+            if (operation != opCreate)
+            {
+              serr << "Cannot specify block count unless creating." << std::endl;
+              return false;
+            }
+            if (blockcount > 0)
+            {
+              serr << "Cannot specify block count twice." << std::endl;
+              return false;
+            }
+            else if (blocksize > 0)
+            {
+              serr << "Cannot specify both block count and block size." << std::endl;
+              return false;
+            }
+
+            const char *p = &argv[0][2];
+            while (blockcount <= 3276 && *p && isdigit(*p))
+            {
+              blockcount = blockcount * 10 + (*p - '0');
+              p++;
+            }
+            if (0 == blockcount || blockcount > 32768 || *p)
+            {
+              serr << "Invalid block count option: " << argv[0] << std::endl;
+              return false;
+            }
+          }
+          break;
+
+        case 's':  // Set the block size
+          {
+            if (operation != opCreate)
+            {
+              serr << "Cannot specify block size unless creating." << std::endl;
+              return false;
+            }
+            if (blocksize > 0)
+            {
+              serr << "Cannot specify block size twice." << std::endl;
+              return false;
+            }
+            else if (blockcount > 0)
+            {
+              serr << "Cannot specify both block count and block size." << std::endl;
+              return false;
+            }
+
+            const char *p = &argv[0][2];
+            while (blocksize <= 429496729 && *p && isdigit(*p))
+            {
+              blocksize = blocksize * 10 + (*p - '0');
+              p++;
+            }
+            if (*p || blocksize == 0)
+            {
+              serr << "Invalid block size option: " << argv[0] << std::endl;
+              return false;
+            }
+            if (blocksize & 3)
+            {
+              serr << "Block size must be a multiple of 4." << std::endl;
+              return false;
+            }
+          }
+          break;
+
+        case 't':  // Set amount of threads
+          {
+            nthreads = 0;
+            const char *p = &argv[0][2];
+
+            while (*p && isdigit(*p))
+            {
+              nthreads = nthreads * 10 + (*p - '0');
+              p++;
+            }
+
+            if (!nthreads)
+            {
+              serr << "Invalid thread option: " << argv[0] << std::endl;
+              return false;
+            }
+
+            if (nthreads > MAX_THREAD_COUNT)
+              nthreads = MAX_THREAD_COUNT;
+          }
+          break;
+
+        case 'T':  // Set amount of file threads
+          {
+            filethreads = 0;
+            const char *p = &argv[0][2];
+
+            while (*p && isdigit(*p))
+            {
+              filethreads = filethreads * 10 + (*p - '0');
+              p++;
+            }
+
+            if (!filethreads)
+            {
+              serr << "Invalid file-thread option: " << argv[0] << std::endl;
+              return false;
+            }
+          }
+          break;
+
+        case 'r':  // Set the amount of redundancy required
+          {
+            if (operation != opCreate)
+            {
+              serr << "Cannot specify redundancy unless creating." << std::endl;
+              return false;
+            }
+            if (redundancyset)
+            {
+              serr << "Cannot specify redundancy twice." << std::endl;
+              return false;
+            }
+            else if (recoveryblockcountset)
+            {
+              serr << "Cannot specify both redundancy and recovery block count." << std::endl;
+              return false;
+            }
+
+            if (argv[0][2] == 'k'
+                || argv[0][2] == 'm'
+                || argv[0][2] == 'g'
+            )
+            {
+              const char *p = &argv[0][3];
+              while (*p && isdigit(*p))
+              {
+                redundancysize = redundancysize * 10 + (*p - '0');
+                p++;
+              }
+              switch (argv[0][2])
+              {
+                case 'g':
+                  redundancysize = redundancysize * 1024;
+                case 'm':
+                  redundancysize = redundancysize * 1024;
+                case 'k':
+                  redundancysize = redundancysize * 1024;
+                  break;
+              }
+            }
+            else
+            {
+              const char *p = &argv[0][2];
+              while (*p && isdigit(*p))
+              {
+                redundancy = redundancy * 10 + (*p - '0');
+                p++;
+              }
+              if (*p)
+              {
+                serr << "Invalid redundancy option: " << argv[0] << std::endl;
+                return false;
+              }
+              if (redundancy == 0 && recoveryfilecount > 0)
+              {
+                serr << "Cannot set redundancy to 0 and file count > 0" << std::endl;
+                return false;
+              }
+	      if (redundancy > 100)
+	      {
+	        serr << "WARNING: Creating recovery file(s) with " << redundancy << "% redundancy." << std::endl;
+	      }
+            }
+            redundancyset = true;
+          }
+          break;
+
+        case 'c': // Set the number of recovery blocks to create
+          {
+            if (operation != opCreate)
+            {
+              serr << "Cannot specify recovery block count unless creating." << std::endl;
+              return false;
+            }
+            if (recoveryblockcountset)
+            {
+              serr << "Cannot specify recovery block count twice." << std::endl;
+              return false;
+            }
+            else if (redundancyset)
+            {
+              serr << "Cannot specify both recovery block count and redundancy." << std::endl;
+              return false;
+            }
+
+            const char *p = &argv[0][2];
+            while (recoveryblockcount <= 32768 && *p && isdigit(*p))
+            {
+              recoveryblockcount = recoveryblockcount * 10 + (*p - '0');
+              p++;
+            }
+            if (recoveryblockcount > 32768 || *p)
+            {
+              serr << "Invalid recoveryblockcount option: " << argv[0] << std::endl;
+              return false;
+            }
+            if (recoveryblockcount == 0 && recoveryfilecount > 0)
+            {
+              serr << "Cannot set recoveryblockcount to 0 and file count > 0" << std::endl;
+              return false;
+            }
+            recoveryblockcountset = true;
+          }
+          break;
+
+        case 'f':  // Specify the First block recovery number
+          {
+            if (operation != opCreate)
+            {
+              serr << "Cannot specify first block number unless creating." << std::endl;
+              return false;
+            }
+            if (firstblock > 0)
+            {
+              serr << "Cannot specify first block twice." << std::endl;
+              return false;
+            }
+
+            const char *p = &argv[0][2];
+            while (firstblock <= 3276 && *p && isdigit(*p))
+            {
+              firstblock = firstblock * 10 + (*p - '0');
+              p++;
+            }
+            if (firstblock > 32768 || *p)
+            {
+              serr << "Invalid first block option: " << argv[0] << std::endl;
+              return false;
+            }
+          }
+          break;
+
+        case 'u':  // Specify uniformly sized recovery files
+          {
+            if (operation != opCreate)
+            {
+              serr << "Cannot specify uniform files unless creating." << std::endl;
+              return false;
+            }
+            if (argv[0][2])
+            {
+              serr << "Invalid option: " << argv[0] << std::endl;
+              return false;
+            }
+            if (recoveryfilescheme != scUnknown && recoveryfilescheme != scUniform)
+            {
+              serr << "Cannot specify two recovery file size schemes." << std::endl;
+              return false;
+            }
+
+            recoveryfilescheme = scUniform;
+          }
+          break;
+
+        case 'l':  // Limit the size of the recovery files
+          {
+            if (operation != opCreate)
+            {
+              serr << "Cannot specify limit files unless creating." << std::endl;
+              return false;
+            }
+            if (argv[0][2])
+            {
+              serr << "Invalid option: " << argv[0] << std::endl;
+              return false;
+            }
+            if (recoveryfilescheme != scUnknown)
+            {
+              serr << "Cannot specify two recovery file size schemes." << std::endl;
+              return false;
+            }
+            if (recoveryfilecount > 0)
+            {
+              serr << "Cannot specify limited size and number of files at the same time." << std::endl;
+              return false;
+            }
+
+            recoveryfilescheme = scLimited;
+          }
+          break;
+
+        case 'n':  // Specify the number of recovery files
+          {
+            if (operation != opCreate)
+            {
+              serr << "Cannot specify recovery file count unless creating." << std::endl;
+              return false;
+            }
+            if (recoveryfilecount > 0)
+            {
+              serr << "Cannot specify recovery file count twice." << std::endl;
+              return false;
+            }
+            // (Removed "Cannot set file count when redundancy is set to 0.")
+            if (recoveryblockcountset && recoveryblockcount == 0)
+            {
+              serr << "Cannot set file count when recovery block count is set to 0." << std::endl;
+              return false;
+            }
+            if (recoveryfilescheme == scLimited)
+            {
+              serr << "Cannot specify limited size and number of files at the same time." << std::endl;
+              return false;
+            }
+
+            const char *p = &argv[0][2];
+            while (*p && isdigit(*p))
+            {
+              recoveryfilecount = recoveryfilecount * 10 + (*p - '0');
+              p++;
+            }
+            if (recoveryfilecount == 0 || *p)
+            {
+              serr << "Invalid recovery file count option: " << argv[0] << std::endl;
+              return false;
+            }
+
+            // cap the maximum number of recovery files
+            // because the number of recovery blocks will be
+            // (2 ^ recoveryfilecount) - 1
+            // the number 32 will overflow the u32 resulting in 1
+            if (recoveryfilecount > 31)
+            {
+              serr << "Invalid recovery file count option: " << recoveryfilecount << std::endl;
+              serr << "  the maximum allowed recovery file count is 31" << std::endl;
+
+              return false;
+            }
+
+            // When number of recovery files is used, set the recoveryfilescheme
+            // to uniform, since variable will not always be able to fill all
+            // the files
+            recoveryfilescheme = scUniform;
+          }
+          break;
+
+        case 'm':  // Specify how much memory to use for output buffers
+          {
+            if (memorylimit > 0)
+            {
+              serr << "Cannot specify memory limit twice." << std::endl;
+              return false;
+            }
+
+            const char *p = &argv[0][2];
+            while (*p && isdigit(*p))
+            {
+              memorylimit = memorylimit * 10 + (*p - '0');
+              p++;
+            }
+            if (memorylimit == 0 || *p)
+            {
+              serr << "Invalid memory limit option: " << argv[0] << std::endl;
+              return false;
+            }
+          }
+          break;
+
+        case 'v':
+          {
+            switch (noiselevel)
+            {
+            case nlUnknown:
+              {
+                if (argv[0][2] == 'v')
+                  noiselevel = nlDebug;
+                else
+                  noiselevel = nlNoisy;
+              }
+              break;
+            case nlNoisy:
+            case nlDebug:
+              noiselevel = nlDebug;
+              break;
+            default:
+              serr << "Cannot use both -v and -q." << std::endl;
+              return false;
+              break;
+            }
+          }
+          break;
+
+        case 'q':
+          {
+            switch (noiselevel)
+            {
+            case nlUnknown:
+              {
+                if (argv[0][2] == 'q')
+                  noiselevel = nlSilent;
+                else
+                  noiselevel = nlQuiet;
+              }
+              break;
+            case nlQuiet:
+            case nlSilent:
+              noiselevel = nlSilent;
+              break;
+            default:
+              serr << "Cannot use both -v and -q." << std::endl;
+              return false;
+              break;
+            }
+          }
+          break;
+
+        case 'p':
+          {
+            if (operation != opRepair && operation != opVerify)
+            {
+              serr << "Cannot specify purge unless repairing or verifying." << std::endl;
+              return false;
+            }
+            purgefiles = true;
+          }
+          break;
+
+        case 'O':
+          {
+            if (operation != opRepair && operation != opVerify)
+            {
+              serr << "Cannot specify rename-only unless repairing or verifying." << std::endl;
+              return false;
+            }
+            renameonly = true;
+          }
+          break;
+
+        case 'i':
+          {
+            if (operation != opRepair)
+            {
+              serr << "Cannot specify in-place unless repairing." << std::endl;
+              return false;
+            }
+            inplacerepair = true;
+          }
+          break;
+
+        case 'h':
+          {
+            usage();
+            return false;
+          }
+	  // "break;" not needed.
+
+        case 'R':
+          {
+            if (operation == opCreate)
+            {
+              recursive = true;
+            }
+            else
+            {
+              serr << "Cannot specific Recursive unless creating." << std::endl;
+              return false;
+            }
+          }
+          break;
+
+        case 'L':
+          {
+            if (operation == opCreate)
+            {
+              followlinks = true;
+            }
+            else
+            {
+              serr << "Cannot specify -L (follow symlinks) unless creating." << std::endl;
+              return false;
+            }
+          }
+          break;
+
+        case 'N':
+          {
+            if (operation == opCreate)
+            {
+              serr << "Cannot specify Data Skipping unless reparing or verifying." << std::endl;
+              return false;
+            }
+            skipdata = true;
+          }
+          break;
+
+        case 'S':  // Set the skip leaway
+          {
+            if (operation == opCreate)
+            {
+              serr << "Cannot specify skip leaway when creating." << std::endl;
+              return false;
+            }
+            if (!skipdata)
+            {
+              serr << "Cannot specify skip leaway and no skipping." << std::endl;
+              return false;
+            }
+
+            const char *p = &argv[0][2];
+            while (skipleaway <= 429496729 && *p && isdigit(*p))
+            {
+              skipleaway = skipleaway * 10 + (*p - '0');
+              p++;
+            }
+            if (*p || skipleaway == 0)
+            {
+              serr << "Invalid skipleaway option: " << argv[0] << std::endl;
+              return false;
+            }
+          }
+          break;
+
+        case 'B': // Set the basepath manually
+          {
+            std::string str = argv[0];
+            if (str == "-B")
+            {
+              basepath = DiskFile::GetCanonicalPathname(argv[1]);
+              argc--;
+              argv++;
+            }
+            else
+            {
+              basepath = DiskFile::GetCanonicalPathname(str.substr(2));
+            }
+          }
+          break;
+
+        case '-':
+          {
+            if (argv[0] == std::string("--full-hash")) {
+              if (operation == opCreate)
+              {
+                serr << "Cannot specify a full hash check unless repairing or verifying." << std::endl;
+                return false;
+              }
+              fullhash = true;
+              break;
+            }
+
+	    if (argv[0] != std::string("--")) {
+              serr << "Unknown option: " << argv[0] << std::endl;
+	      serr << "  (Options must appear after create, repair or verify.)" << std::endl;
+	      serr << "  (Run \"" << path << name << " --help\" for supported options.)" << std::endl;
+              return false;
+            }
+
+            argc--;
+            argv++;
+            options = false;
+            continue;
+          }
+          break;
+        default:
+          {
+            serr << "Invalid option specified: " << argv[0] << std::endl;
+            return false;
+          }
+        }
+      }
+//START SECTION FOR ADDING @FILELIST FUNCTIONALITY
+      else if (argv[0][0] == '@') // Handle list files
+      {
+        std::istream* input = nullptr;
+        std::ifstream listfile;
+
+        // 1. Check if the '@' is followed by a filename
+        if (argv[0][1] == '\0')
+        {
+          // Bare '@' - read filelist from stdin
+          input = &std::cin;
+        }
+        else
+        {
+          listfile.open(&argv[0][1]);
+          if (!listfile.is_open())
+          {
+            serr << "Could not open list file: " << &argv[0][1] << std::endl;
+            return false;
+          }
+          input = &listfile;
+        }
+
+        std::string line;
+        while (std::getline(*input, line))
+        {
+          // 2. Trim whitespace or skip whitespace-only lines
+          // This finds the first non-whitespace character
+          size_t first = line.find_first_not_of(" \t\r\n");
+          if (first == std::string::npos)
+            continue; // Line is empty or only whitespace
+
+          // 3. Removed the 'parfilename.length() == 0' block.
+          // All files in the list are now treated as source files.
+
+          std::string lpath, lname;
+          DiskFile::SplitFilename(line, lpath, lname);
+          std::unique_ptr< std::list<std::string> > filenames(
+            DiskFile::FindFiles(lpath, lname, recursive, followlinks)
+          );
+
+          if (filenames)
+          {
+            for (auto const& fn : *filenames)
+            {
+              rawfilenames.push_back(DiskFile::GetCanonicalPathname(fn));
+            }
+          }
+        }
+      }  //END SECTION FOR ADDING @filelist FUNCTIONALITY
+
+      else if (parfilename.length() == 0)
+      {
+        std::string filename = argv[0];
+        bool setparfile = SetParFilename(filename);
+        if (! setparfile)
+        {
+          serr << "failed to set the main par file" << std::endl;
+          return false;
+        }
+      }
+      else
+      {
+
+        std::string path;
+        std::string name;
+        DiskFile::SplitFilename(argv[0], path, name);
+        std::unique_ptr< std::list<std::string> > filenames(
+          DiskFile::FindFiles(path, name, recursive, followlinks)
+        );
+
+        if (filenames)
+        {
+          for (auto const& fn : *filenames)
+          {
+            rawfilenames.push_back(DiskFile::GetCanonicalPathname(fn));
+          }
+        }
+      }
+    }
+
+    argc--;
+    argv++;
+  }
+
+  return true;
+}
+
+
+bool CommandLine::CheckValuesAndSetDefaults() {
+  if (parfilename.length() == 0)
+  {
+    serr << "You must specify a Recovery file." << std::endl;
+    return false;
+  }
+
+
+  // Default noise level
+  if (noiselevel == nlUnknown)
+  {
+    noiselevel = nlNormal;
+  }
+
+  // Default memorylimit of 256MB
+  if (memorylimit == 0)
+  {
+    if (noiselevel >= nlDebug)
+    {
+      u64 TotalPhysicalMemory = GetTotalPhysicalMemory();
+
+      if (TotalPhysicalMemory == 0)
+        sout << "[DEBUG] could not detect physical memory" << std::endl;
+      else
+        sout << "[DEBUG] detected physical memory: " << TotalPhysicalMemory << " bytes" << std::endl;
+    }
+
+    memorylimit = DefaultMemoryLimit() / 1048576;
+  }
+
+  // limit to 1GB on 32-bit platforms to avoid exhausing the addressable memory space
+  if (sizeof(uintptr_t) < 8 && memorylimit > 1024)
+    memorylimit = 1024;
+
+  // convert to megabytes
+  memorylimit *= 1048576;
+
+  if (noiselevel >= nlDebug)
+  {
+    sout << "[DEBUG] memorylimit: " << memorylimit << " bytes" << std::endl;
+  }
+
+
+  // Default basepath  (uses parfilename)
+  if ("" == basepath)
+  {
+    if (noiselevel >= nlDebug)
+    {
+      sout << "[DEBUG] parfilename: " << parfilename << std::endl;
+    }
+
+    basepath = BasePathFor(parfilename);
+  }
+
+  basepath = WithSeparator(basepath);
+
+  if (noiselevel >= nlDebug)
+  {
+    sout << "[DEBUG] basepath: " << basepath << std::endl;
+  }
+
+
+  // parfilename is checked earlier, because it is used by basepath.
+
+
+  // check extrafiles
+  std::list<std::string>::iterator rawfilenames_fn;
+  for (rawfilenames_fn = rawfilenames.begin(); rawfilenames_fn != rawfilenames.end(); ++rawfilenames_fn)
+  {
+    std::string filename = *rawfilenames_fn;
+
+    // Originally, all specified files were supposed to exist, or the program
+    // would stop with an error message. This was not practical, for example in
+    // a directory with files appearing and disappearing (an active download directory).
+    // So the new rule is: when a specified file doesn't exist, it is silently skipped.
+    if (!DiskFile::FileExists(filename))
+    {
+      sout << "Ignoring non-existent source file: " << filename << std::endl;
+    }
+    // skip files outside basepath
+    else if (filename.compare(0, basepath.size(), basepath) != 0)
+    {
+      sout << "Ignoring out of basepath source file: " << filename << std::endl;
+    }
+    else
+    {
+      u64 filesize = filesize_cache.get(filename);
+
+      // Ignore all 0 byte files
+      if (filesize == 0)
+      {
+        sout << "Skipping 0 byte file: " << filename << std::endl;
+      }
+      else if (extrafiles.end() != std::find(extrafiles.begin(), extrafiles.end(), filename))
+      {
+        sout << "Skipping duplicate filename: " << filename << std::endl;
+      }
+      else
+      {
+        extrafiles.push_back(filename);
+      }
+    } //end file exists
+  }
+
+
+  // operation should always be set, but let's be thorough.
+  if (operation == opNone) {
+    serr << "ERROR: No operation was specified (create, repair, or verify)" << std::endl;
+    return false;
+  }
+
+
+  if (operation != opCreate) {
+    // skipdata is bool and either value is valid.
+
+    // Default skip leaway
+    if (skipdata && skipleaway == 0)
+    {
+      // Expect to find blocks within +/- 64 bytes of the expected
+      // position relative to the last block that was found.
+      skipleaway = DEFAULT_SKIP_LEAWAY;
+    }
+
+    if (inplacerepair && skipdata)
+    {
+      serr << "Cannot specify in-place repair and data skipping together." << std::endl;
+      return false;
+    }
+  }
+
+  // If we a creating, check the other parameters
+  if (operation == opCreate)
+  {
+    // If we are creating, the source files must be given.
+    if (extrafiles.size() == 0)
+    {
+      // Does the par filename include the ".par2" on the end?
+      if (parfilename.length() > 5 && 0 == stricmp(parfilename.substr(parfilename.length()-5, 5).c_str(), ".par2"))
+      {
+        // Yes it does.
+        serr << "You must specify a list of files when creating." << std::endl;
+        return false;
+      }
+      else
+      {
+        // No it does not.
+
+        // In that case check to see if the file exists, and if it does
+        // assume that you wish to create par2 files for it.
+
+        u64 filesize = 0;
+        if (DiskFile::FileExists(parfilename) &&
+            (filesize = DiskFile::GetFileSize(parfilename)) > 0)
+        {
+          extrafiles.push_back(parfilename);
+        }
+        else
+        {
+          // The file does not exist or it is empty.
+
+          serr << "You must specify a list of files when creating." << std::endl;
+          return false;
+        }
+      }
+    }
+
+    // Strip the ".par2" from the end of the filename of the main PAR2 file.
+    parfilename = SetNameFor(parfilename);
+
+    if (DiskFile::FileExists(parfilename + ".par2"))
+    {
+      serr << "Par2 file already exists: " << parfilename << std::endl;
+      return false;
+    }
+
+    // If neither block count nor block size is specified, derive a default
+    // block size from total source data, targeting ~2000 blocks (as previous
+    // default). This replaces the old hard-coded blockcount=2000 which failed
+    // when file count exceeded 2000, and avoids inflated block sizes when file
+    // sizes vary widely. The minimum is clamped so that the total source block
+    // count stays within the PAR2 limit of 32768.
+    if (blockcount == 0 && blocksize == 0)
+    {
+        u64 totalsize = 0;
+        for (auto &f : extrafiles)
+            totalsize += filesize_cache.get(f);
+
+        blocksize = (totalsize + 1999) / 2000; // 2000 = target (previous default)
+        blocksize = std::max(blocksize, (u64)4);
+        blocksize = (blocksize + 3) & ~3;
+
+        u64 minblocksize = (totalsize + 32767) / 32768; // 32768 = maximum PAR2
+        minblocksize = std::max(minblocksize, (u64)4);
+        minblocksize = (minblocksize + 3) & ~3;
+
+        if (blocksize < minblocksize)
+            blocksize = minblocksize;
+    }
+
+    // If no recovery file size scheme is specified then use Variable
+    if (recoveryfilescheme == scUnknown)
+    {
+      recoveryfilescheme = scVariable;
+    }
+
+    // Assume a redundancy of 5% if neither redundancy or recoveryblockcount were set.
+    if (!redundancyset && !recoveryblockcountset)
+    {
+      redundancy = 5;
+      redundancyset = true;
+    }
+  }
+
+
+  return true;
+}
+
+
+bool CommandLine::ComputeBlockSize() {
+
+  if (blocksize == 0) {
+    // compute value from blockcount
+    std::vector<u64> filesizes;
+    for (std::vector<std::string>::const_iterator i=extrafiles.begin(); i!=extrafiles.end(); i++)
+    {
+      filesizes.push_back(filesize_cache.get(*i));
+    }
+
+    std::string error;
+    if (!ComputeBlockSizeFromCount(&error, &blocksize, blockcount, filesizes))
+    {
+      serr << error << std::endl;
+      return false;
+    }
+  }
+
+  return true;
+}
+
+
+// Determine how many recovery blocks to create based on the source block
+// count and the requested level of redundancy.
+bool CommandLine::ComputeRecoveryBlockCount(std::ostream &serr,
+					    u32 *recoveryblockcount,
+					    u32 sourceblockcount,
+					    u64 blocksize,
+					    u32 firstblock,
+					    Scheme recoveryfilescheme,
+					    u32 recoveryfilecount,
+					    bool recoveryblockcountset,
+					    u32 redundancy,
+					    u64 redundancysize,
+					    u64 largestfilesize)
+{
+  if (recoveryblockcountset) {
+    // no need to assign value.
+    // pass through, so that value can be checked below.
+  }
+  else if (redundancy > 0)
+  {
+    // count is the number of input blocks
+
+    // Determine recoveryblockcount
+    *recoveryblockcount = ComputeRecoveryBlockCountFromRedundancy(sourceblockcount, redundancy);
+  }
+  else if (redundancysize > 0)
+  {
+    const u64 overhead_per_recovery_file = sourceblockcount * (u64) 21;
+    const u64 recovery_packet_size = blocksize + (u64) 70;
+    if (recoveryfilecount == 0)
+    {
+      u32 estimatedFileCount = 15;
+      u64 overhead = estimatedFileCount * overhead_per_recovery_file;
+      u32 estimatedrecoveryblockcount;
+      if (overhead > redundancysize)
+      {
+        estimatedrecoveryblockcount = 1;  // at least 1
+      }
+      else
+      {
+	estimatedrecoveryblockcount = (u32)((redundancysize - overhead) / recovery_packet_size);
+      }
+
+      // recoveryfilecount assigned below.
+      std::string error;
+      bool success = ComputeRecoveryFileCount(&error,
+					      &recoveryfilecount,
+					      recoveryfilescheme,
+					      estimatedrecoveryblockcount,
+					      largestfilesize,
+					      blocksize);
+      if (!success) {
+	serr << error << std::endl;
+	return false;
+      }
+    }
+
+    const u64 overhead = recoveryfilecount * overhead_per_recovery_file;
+    if (overhead > redundancysize)
+    {
+      *recoveryblockcount = 1;  // at least 1
+    }
+    else
+    {
+      *recoveryblockcount = (u32)((redundancysize - overhead) / recovery_packet_size);
+    }
+  }
+  else
+  {
+    serr << "Redundancy and Redundancysize not set." << std::endl;
+    return false;
+  }
+
+  if (*recoveryblockcount > 65536)
+  {
+    serr << "Too many recovery blocks requested." << std::endl;
+    return false;
+  }
+
+  // Check that the last recovery block number would not be too large
+  if (firstblock + *recoveryblockcount >= 65536)
+  {
+    serr << "First recovery block number is too high." << std::endl;
+    return false;
+  }
+
+  return true;
+}
+
+
+
+
+
+bool CommandLine::SetParFilename(std::string filename)
+{
+  bool result = false;
+
+#ifndef _WIN32
+  std::string::size_type where;
+
+  if ((where = filename.find_first_of('*')) != std::string::npos ||
+      (where = filename.find_first_of('?')) != std::string::npos)
+  {
+    serr << "par2 file must not have a wildcard in it." << std::endl;
+    return result;
+  }
+#endif
+
+  // If we are verifying or repairing, the PAR2 file must
+  // already exist
+  if (operation != opCreate)
+  {
+    // Find the last '.' in the filename
+    std::string::size_type where = filename.find_last_of('.');
+    if (where != std::string::npos)
+    {
+      // Get what follows the last '.'
+      std::string tail = filename.substr(where+1);
+
+      if (0 == stricmp(tail.c_str(), "par2"))
+      {
+        parfilename = filename;
+        version = verPar2;
+      }
+      else if (0 == stricmp(tail.c_str(), "par") ||
+               (tail.size() == 3 &&
+               tolower(tail[0]) == 'p' &&
+               isdigit(tail[1]) &&
+               isdigit(tail[2])))
+      {
+        parfilename = filename;
+        version = verPar1;
+      }
+
+      if (DiskFile::FileExists(filename)) {
+        result = true;
+      }
+    }
+
+    // If we haven't figured out which version of PAR file we
+    // are using from the file extension, then presumable the
+    // files filename was actually the name of a data file.
+    if (version == verUnknown)
+    {
+      // Check for the existence of a PAR2 of PAR file.
+      if (DiskFile::FileExists(filename + ".par2"))
+      {
+        version = verPar2;
+        parfilename = filename + ".par2";
+        result = true;
+      }
+      else if (DiskFile::FileExists(filename + ".PAR2"))
+      {
+        version = verPar2;
+        parfilename = filename + ".PAR2";
+        result = true;
+      }
+      else if (DiskFile::FileExists(filename + ".par"))
+      {
+        version = verPar1;
+        parfilename = filename + ".par";
+        result = true;
+      }
+      else if (DiskFile::FileExists(filename + ".PAR"))
+      {
+        version = verPar1;
+        parfilename = filename + ".PAR";
+        result = true;
+      }
+    }
+  }
+  else
+  {
+    parfilename = DiskFile::GetCanonicalPathname(filename);
+    version = verPar2;
+    result = true;
+  }
+
+  return result;
+}
+
+} // namespace par2
