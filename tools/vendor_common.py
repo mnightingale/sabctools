@@ -42,17 +42,25 @@ def fetch(repo: str, ref: str, into: str) -> str:
 
     # A shallow fetch of an exact object works on GitHub and is by far the cheapest,
     # but not every host allows it; fall back to fetching everything.
+    named = True
     try:
         run(["git", "-C", into, "fetch", "--quiet", "--depth", "1", "origin", ref])
     except subprocess.CalledProcessError:
         print("==> Shallow fetch rejected, retrying with full history")
+        named = False
         run(["git", "-C", into, "fetch", "--quiet", "origin"])
         run(["git", "-C", into, "fetch", "--quiet", "--tags", "origin"])
 
-    try:
+    # FETCH_HEAD names what was asked for only when it was fetched by name. A full
+    # fetch leaves it pointing at whichever branch came last, and checking that out
+    # succeeds, so the ref has to be named again here or the wrong tree is vendored.
+    if named:
         run(["git", "-C", into, "checkout", "--quiet", "FETCH_HEAD"])
-    except subprocess.CalledProcessError:
-        run(["git", "-C", into, "checkout", "--quiet", ref])
+    else:
+        try:
+            run(["git", "-C", into, "checkout", "--quiet", ref])
+        except subprocess.CalledProcessError:
+            run(["git", "-C", into, "checkout", "--quiet", "origin/" + ref])
 
     return subprocess.run(
         ["git", "-C", into, "rev-parse", "HEAD"], check=True, capture_output=True, text=True

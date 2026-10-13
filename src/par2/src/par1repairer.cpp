@@ -1,0 +1,1515 @@
+//  This file is part of par2cmdline (a PAR 2.0 compatible file verification and
+//  repair tool). See http://parchive.sourceforge.net for details of PAR 2.0.
+//
+//  Copyright (c) 2003 Peter Brian Clements
+//  Copyright (c) 2019 Michael D. Nahas
+//
+//  par2cmdline is free software; you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation; either version 2 of the License, or
+//  (at your option) any later version.
+//
+//  par2cmdline is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program; if not, write to the Free Software
+//  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+
+#include "libpar2internal.h"
+
+namespace par2
+{
+
+#ifdef _MSC_VER
+#ifdef _DEBUG
+#undef THIS_FILE
+static char THIS_FILE[]=__FILE__;
+#define new DEBUG_NEW
+#endif
+#endif
+
+static u32 smartpar11 = 0x03000101;
+
+
+Par1Repairer::Par1Repairer(std::ostream &sout, std::ostream &serr, const NoiseLevel noiselevel, Par2Observer *observer)
+: sout(sout)
+, serr(serr)
+, noiselevel(noiselevel)
+, observer(observer)
+, errorlog()
+, searchpath()
+, diskfilemap()
+, recoveryblocks()
+, filelist(0)
+, filelistsize(0)
+, blocksize(0)
+, chunksize(0)
+, sourcefiles()
+, extrafiles()
+, completefilecount(0)
+, renamedfilecount(0)
+, damagedfilecount(0)
+, missingfilecount(0)
+, verifylist()
+, backuplist()
+, parlist()
+, inputblocks()
+, outputblocks()
+, rs()
+, inputbuffersize(0)
+, inputbuffer(0)
+, outputbufferalignment(0)
+, outputbuffersize(0)
+, outputbuffer(0)
+, ignore16kfilehash(false)
+{
+  errorlog.SetObserver(observer);
+}
+
+// Test whether filename has a .PAR / .par / .pNN extension.
+bool Par1Repairer::IsParFilename(const std::string &filename)
+{
+  std::string::size_type where = filename.find_last_of('.');
+  if (where == std::string::npos)
+    return false;
+
+  std::string tail = filename.substr(where + 1);
+  if (tail.size() < 3)
+    return false;
+
+  if (tail[0] != 'P' && tail[0] != 'p')
+    return false;
+
+  return ((tail[1] == 'A' || tail[1] == 'a') && (tail[2] == 'R' || tail[2] == 'r'))
+      || (isdigit(static_cast<unsigned char>(tail[1])) && isdigit(static_cast<unsigned char>(tail[2])));
+}
+
+Par1Repairer::~Par1Repairer(void)
+{
+  delete [] (u8*)inputbuffer;
+  delete [] (u8*)outputbuffer;
+
+  std::map<u32,DataBlock*>::iterator i = recoveryblocks.begin();
+  while (i != recoveryblocks.end())
+  {
+    DataBlock *datablock = i->second;
+    delete datablock;
+
+    ++i;
+  }
+
+  std::vector<Par1RepairerSourceFile*>::iterator sourceiterator = sourcefiles.begin();
+  while (sourceiterator != sourcefiles.end())
+  {
+    Par1RepairerSourceFile *sourcefile = *sourceiterator;
+    delete sourcefile;
+    ++sourceiterator;
+  }
+
+  sourceiterator = extrafiles.begin();
+  while (sourceiterator != extrafiles.end())
+  {
+    Par1RepairerSourceFile *sourcefile = *sourceiterator;
+    delete sourcefile;
+    ++sourceiterator;
+  }
+
+  delete [] filelist;
+}
+
+Result Par1Repairer::Process(const size_t memorylimit,
+			     // basepath is not used by Par1
+			     const u32 nthreads,
+			     // filethreads is not used by Par1
+			     std::string parfilename,
+			     const std::vector<std::string> &extrafiles,
+			     const bool dorepair,   // derived from operation
+			     const bool purgefiles
+			     // skipdata is not used by Par1
+			     // skipleaway is not used by Par1
+			     )
+{
+  // Determine the searchpath from the location of the main PAR file
+  std::string name;
+  DiskFile::SplitFilename(parfilename, searchpath, name);
+
+  // Load the main PAR file
+  if (!LoadRecoveryFile(searchpath + name))
+    return eLogicError;
+
+  // Load other PAR files related to the main PAR file
+  if (!LoadOtherRecoveryFiles(parfilename))
+    return eLogicError;
+
+  // Load any extra PAR files specified on the command line
+  if (!LoadExtraRecoveryFiles(extrafiles))
+    return eLogicError;
+
+  if (noiselevel > nlQuiet)
+    sout << "\nVerifying source files:\n" << std::endl;
+
+  // Check for the existence of and verify each of the source files
+  if (!VerifySourceFiles())
+    return eFileIOError;
+
+  if (completefilecount<sourcefiles.size())
+  {
+    if (noiselevel > nlQuiet)
+      sout << "\nScanning extra files:\n" << std::endl;
+
+    // Check any other files specified on the command line to see if they are
+    // actually copies of the source files that have the wrong filename
+    if (!VerifyExtraFiles(extrafiles))
+      return eLogicError;
+  }
+
+  // Find out how much data we have found
+  UpdateVerificationResults();
+
+  if (noiselevel > nlSilent)
+    sout << '\n';
+
+  // Check the verification results and report the details
+  if (!CheckVerificationResults())
+    return eRepairNotPossible;
+
+  // Are any of the files incomplete
+  if (completefilecount<sourcefiles.size())
+  {
+    // Do we want to carry out a repair
+    if (dorepair)
+    {
+      if (noiselevel > nlSilent)
+        sout << '\n';
+
+      // Rename any damaged or missnamed target files.
+      if (!RenameTargetFiles())
+        return eFileIOError;
+
+      // Are we still missing any files
+      if (completefilecount<sourcefiles.size())
+      {
+        // Work out which files are being repaired, create them, and allocate
+        // target DataBlocks to them, and remember them for later verification.
+        if (!CreateTargetFiles())
+          return eFileIOError;
+
+        // Work out which data blocks are available, which need to be recreated,
+        // and compute the appropriate Reed Solomon matrix.
+        const Result computed = ComputeRSmatrix();
+        if (computed != eSuccess)
+        {
+          // Delete all of the partly reconstructed files
+          DeleteIncompleteTargetFiles();
+          return computed;
+        }
+
+        // Allocate memory buffers for reading and writing data to disk.
+        if (!AllocateBuffers(memorylimit))
+        {
+          // Delete all of the partly reconstructed files
+          DeleteIncompleteTargetFiles();
+          return eMemoryError;
+        }
+        if (noiselevel > nlSilent)
+          sout << '\n';
+
+        // Set the total amount of data to be processed.
+        ProgressMeter<u64> progress(blocksize * sourcefiles.size() * verifylist.size(), phProcessing, observer);
+
+        // Start at an offset of 0 within a block.
+        u64 blockoffset = 0;
+        while (blockoffset < blocksize) // Continue until the end of the block.
+        {
+          // Work out how much data to process this time.
+          size_t blocklength = (size_t)std::min((u64)chunksize, blocksize-blockoffset);
+
+          // Read source data, process it through the RS matrix and write it to disk.
+          if (!ProcessData(blockoffset, blocklength, progress))
+          {
+            // Delete all of the partly reconstructed files
+            DeleteIncompleteTargetFiles();
+            return eFileIOError;
+          }
+
+          // Advance to the need offset within each block
+          blockoffset += blocklength;
+        }
+
+        if (noiselevel > nlSilent)
+          sout << "\nVerifying repaired files:\n" << std::endl;
+
+        // Verify that all of the reconstructed target files are now correct
+        if (!VerifyTargetFiles())
+        {
+          // Delete all of the partly reconstructed files
+          DeleteIncompleteTargetFiles();
+          return eFileIOError;
+        }
+      }
+
+      // Are all of the target files now complete?
+      if (completefilecount<sourcefiles.size())
+      {
+        serr << "Repair Failed." << std::endl;
+        return eRepairFailed;
+      }
+      else
+      {
+        if (noiselevel > nlSilent)
+          sout << "\nRepair complete." << std::endl;
+      }
+    }
+    else
+    {
+      return eRepairPossible;
+    }
+  }
+
+  if (purgefiles == true)
+  {
+    RemoveBackupFiles();
+    RemoveParFiles();
+  }
+
+  return eSuccess;
+}
+
+bool Par1Repairer::LoadRecoveryFile(std::string filename)
+{
+  // Skip the file if it has already been processed
+  if (diskfilemap.Find(filename) != 0)
+  {
+    return true;
+  }
+
+  DiskFile *diskfile = new DiskFile(&errorlog);
+
+  // Open the file
+  if (!diskfile->Open(filename))
+  {
+    // If we could not open the file, ignore the error and
+    // proceed to the next file
+    delete diskfile;
+    return true;
+  }
+
+  if (noiselevel > nlSilent)
+  {
+    std::string path;
+    std::string name;
+    DiskFile::SplitFilename(filename, path, name);
+    sout << "Loading \"" << name << "\"." << std::endl;
+  }
+
+  parlist.push_back(filename);
+
+  bool havevolume = false;
+  u32 volumenumber = 0;
+
+  // How big is the file
+  u64 filesize = diskfile->FileSize();
+  if (filesize >= sizeof(PAR1FILEHEADER))
+  {
+    // Allocate a buffer to read data into
+    size_t buffersize = (size_t)std::min((u64)1048576, filesize);
+    u8 *buffer = new u8[buffersize];
+
+    do
+    {
+      PAR1FILEHEADER fileheader;
+      if (!diskfile->Read(0, &fileheader, sizeof(fileheader)))
+        break;
+
+      // Is this really a PAR file?
+      if (fileheader.magic != par1_magic)
+        break;
+
+      // Is the version number correct?
+      if (fileheader.fileversion != 0x00010000)
+        break;
+
+      ignore16kfilehash = (fileheader.programversion == smartpar11);
+
+      // Prepare to carry out MD5 Hash check of the Control Hash
+      MD5Context context;
+      u64 offset = offsetof(PAR1FILEHEADER, sethash);
+
+      // Process until the end of the file is reached
+      while (offset < filesize)
+      {
+        // How much data should we read?
+        size_t want = (size_t)std::min((u64)buffersize, filesize-offset);
+        if (!diskfile->Read(offset, buffer, want))
+          break;
+
+        context.Update(buffer, want);
+
+        offset += want;
+      }
+
+      // Did we read the whole file
+      if (offset < filesize)
+        break;
+
+      // Compute the hash value
+      MD5Hash hash;
+      context.Final(hash);
+
+      // Is it correct?
+      if (hash != fileheader.controlhash)
+        break;
+
+      // Check that the volume number is ok
+      if (fileheader.volumenumber >= 256)
+        break;
+
+      // Are there any files?
+      if (fileheader.numberoffiles == 0 ||
+          fileheader.filelistoffset < sizeof(PAR1FILEHEADER) ||
+          fileheader.filelistsize == 0)
+        break;
+
+      // Verify that the file list and data offsets are ok
+      if ((fileheader.filelistoffset + fileheader.filelistsize > filesize)
+          ||
+          (fileheader.datasize && (fileheader.dataoffset < sizeof(fileheader) || fileheader.dataoffset + fileheader.datasize > filesize))
+          ||
+          (fileheader.datasize && ((fileheader.filelistoffset <= fileheader.dataoffset && fileheader.dataoffset < fileheader.filelistoffset+fileheader.filelistsize) || (fileheader.dataoffset <= fileheader.filelistoffset && fileheader.filelistoffset < fileheader.dataoffset + fileheader.datasize))))
+        break;
+
+      // Check the size of the file list
+      if (fileheader.filelistsize > 200000)
+        break;
+
+      // If we already have a copy of the file list, make sure this one has the same size
+      if (filelist != 0 && filelistsize != fileheader.filelistsize)
+        break;
+
+      // Allocate a buffer to hold a copy of the file list
+      unsigned char *temp = new unsigned char[(size_t)fileheader.filelistsize];
+
+      // Read the file list into the buffer
+      if (!diskfile->Read(fileheader.filelistoffset, temp, (size_t)fileheader.filelistsize))
+      {
+        delete [] temp;
+        break;
+      }
+
+      // If we already have a copy of the file list, make sure this copy is identical
+      if (filelist != 0)
+      {
+        bool match = (0 == memcmp(filelist, temp, filelistsize));
+        delete [] temp;
+
+        if (!match)
+          break;
+      }
+      else
+      {
+        // Prepare to scan the file list
+        unsigned char *current = temp;
+        size_t remaining = (size_t)fileheader.filelistsize;
+        unsigned int fileindex = 0;
+
+        // Allocate a buffer to copy each file entry into so that
+        // all fields will be correctly aligned in memory.
+        PAR1FILEENTRY *fileentry = (PAR1FILEENTRY*)new u64[(remaining + sizeof(u64)-1)/sizeof(u64)];
+
+        // Process until we run out of files or data
+        while (remaining > 0 && fileindex < fileheader.numberoffiles)
+        {
+          // Check that there is enough data remaining to read the fixed portion
+          if (remaining < sizeof(PAR1FILEENTRY))
+            break;
+
+          // Copy fixed portion of file entry
+          memcpy((void*)fileentry, (void*)current, sizeof(PAR1FILEENTRY));
+
+          // Is the entry's declared size consistent with the remaining data
+          if (remaining < fileentry->entrysize)
+            break;
+
+          // Check the length of the filename
+          if (fileentry->entrysize <= sizeof(PAR1FILEENTRY))
+            break;
+
+          // Check the file size
+          if (blocksize < fileentry->filesize)
+            blocksize = fileentry->filesize;
+
+          // Copy whole of file entry
+          memcpy((void*)fileentry, (void*)current, (size_t)(u64)fileentry->entrysize);
+
+          // Create source file and add it to the appropriate list
+          Par1RepairerSourceFile *sourcefile = new Par1RepairerSourceFile(&errorlog, fileentry, searchpath);
+          if (fileentry->status & INPARITYVOLUME)
+          {
+            sourcefiles.push_back(sourcefile);
+          }
+          else
+          {
+            extrafiles.push_back(sourcefile);
+          }
+
+          remaining -= (size_t)fileentry->entrysize;
+          current += (size_t)fileentry->entrysize;
+
+          fileindex++;
+        }
+
+        delete [] (u64*)fileentry;
+
+        // Did we find the correct number of files
+        if (fileindex < fileheader.numberoffiles)
+        {
+          std::vector<Par1RepairerSourceFile*>::iterator i = sourcefiles.begin();
+          while (i != sourcefiles.end())
+          {
+            Par1RepairerSourceFile *sourcefile = *i;
+            delete sourcefile;
+            ++i;
+          }
+          sourcefiles.clear();
+
+          i = extrafiles.begin();
+          while (i != extrafiles.end())
+          {
+            Par1RepairerSourceFile *sourcefile = *i;
+            delete sourcefile;
+            ++i;
+          }
+          extrafiles.clear();
+
+          delete [] temp;
+          break;
+        }
+
+        filelist = temp;
+        filelistsize = (u32)fileheader.filelistsize;
+      }
+
+      // Is this a recovery volume?
+      if (fileheader.volumenumber > 0)
+      {
+        // Make sure there is data and that it is the correct size
+        if (fileheader.dataoffset == 0 || fileheader.datasize != blocksize)
+          break;
+
+        // What volume number is this?
+        volumenumber = (u32)(fileheader.volumenumber - 1);
+
+        // Do we already have this volume?
+        if (recoveryblocks.find(volumenumber) == recoveryblocks.end())
+        {
+          // Create a data block
+          DataBlock *datablock = new DataBlock;
+          datablock->SetLength(blocksize);
+          datablock->SetLocation(diskfile, fileheader.dataoffset);
+
+          // Store it in the map
+          recoveryblocks.insert(std::pair<u32, DataBlock*>(volumenumber, datablock));
+
+          havevolume = true;
+        }
+      }
+    } while (false);
+
+    delete [] buffer;
+  }
+
+  // We have finished with the file for now
+  diskfile->Close();
+
+  if (noiselevel > nlQuiet)
+  {
+    if (havevolume)
+    {
+      sout << "Loaded recovery volume " << volumenumber << std::endl;
+    }
+    else
+    {
+      sout << "No new recovery volumes found" << std::endl;
+    }
+  }
+
+  // Remember that the file was processed
+  bool success = diskfilemap.Insert(diskfile);
+  assert(success);
+  (void)success;
+
+  return true;
+}
+
+bool Par1Repairer::LoadOtherRecoveryFiles(std::string filename)
+{
+  // Split the original PAR filename into path and name parts
+  std::string path;
+  std::string name;
+  DiskFile::SplitFilename(filename, path, name);
+
+  // Find the file extension
+  std::string::size_type where = name.find_last_of('.');
+  if (where != std::string::npos)
+  {
+    // remove it
+    name = name.substr(0, where);
+  }
+
+  // Search for additional PAR files
+  std::string wildcard = name + ".???";
+  std::unique_ptr< std::list<std::string> > files(
+				      DiskFile::FindFiles(path, wildcard, false)
+				      );
+
+  for (std::list<std::string>::const_iterator s=files->begin(); s!=files->end(); ++s)
+  {
+    std::string filename = *s;
+
+    // Find the file extension
+    where = filename.find_last_of('.');
+    if (where != std::string::npos && IsParFilename(filename))
+    {
+      LoadRecoveryFile(filename);
+    }
+  }
+
+  //delete files;  This is taken care of by unique_ptr<>.
+
+  return true;
+}
+
+// Load packets from any other PAR files whose names are given on the command line
+bool Par1Repairer::LoadExtraRecoveryFiles(const std::vector<std::string> &extrafiles)
+{
+  for (std::vector<std::string>::const_iterator i=extrafiles.begin(); i!=extrafiles.end(); i++)
+  {
+    std::string filename = *i;
+
+    // Find the file extension
+    std::string::size_type where = filename.find_last_of('.');
+    if (where != std::string::npos && IsParFilename(filename))
+    {
+      LoadRecoveryFile(filename);
+    }
+  }
+
+  return true;
+}
+
+// Attempt to verify all of the source files
+bool Par1Repairer::VerifySourceFiles(void)
+{
+  bool finalresult = true;
+
+  std::vector<Par1RepairerSourceFile*>::iterator sourceiterator = sourcefiles.begin();
+  while (sourceiterator != sourcefiles.end())
+  {
+    Par1RepairerSourceFile *sourcefile = *sourceiterator;
+
+    std::string filename = sourcefile->FileName();
+
+    // Check to see if we have already used this file
+    if (diskfilemap.Find(filename) != 0)
+    {
+      std::string path;
+      std::string name;
+      DiskFile::SplitRelativeFilename(filename, path, name);
+
+      // The file has already been used!
+      serr << "Source file " << name << " is a duplicate." << std::endl;
+
+      finalresult = false;
+    }
+    else
+    {
+      DiskFile *diskfile = new DiskFile(&errorlog);
+
+      // Does the target file exist
+      if (diskfile->Open(filename))
+      {
+        // Yes. Record that fact.
+        sourcefile->SetTargetExists(true);
+
+        // Remember that the DiskFile is the target file
+        sourcefile->SetTargetFile(diskfile);
+
+        // Remember that we have processed this file
+        bool success = diskfilemap.Insert(diskfile);
+        assert(success);
+        (void)success;
+
+        // Do the actual verification
+        if (!VerifyDataFile(diskfile, sourcefile))
+          finalresult = false;
+
+        // We have finished with the file for now
+        diskfile->Close();
+
+        // Find out how much data we have found
+        UpdateVerificationResults();
+      }
+      else
+      {
+        // The file does not exist.
+        delete diskfile;
+
+        if (noiselevel > nlSilent)
+        {
+          std::string path;
+          std::string name;
+          DiskFile::SplitFilename(filename, path, name);
+
+          sout << "Target: \"" << name << "\" - missing." << std::endl;
+        }
+      }
+    }
+
+    ++sourceiterator;
+  }
+
+  return finalresult;
+}
+
+// Scan any extra files specified on the command line
+bool Par1Repairer::VerifyExtraFiles(const std::vector<std::string> &extrafiles)
+{
+  for (std::vector<std::string>::const_iterator i=extrafiles.begin();
+       i!=extrafiles.end() && completefilecount<sourcefiles.size();
+       ++i)
+  {
+    std::string filename = *i;
+
+    bool skip = false;
+
+    // Find the file extension
+    std::string::size_type where = filename.find_last_of('.');
+    if (where != std::string::npos && IsParFilename(filename))
+    {
+      skip = true;
+    }
+
+    if (!skip)
+    {
+      filename = DiskFile::GetCanonicalPathname(filename);
+
+      // Has this file already been dealt with
+      if (diskfilemap.Find(filename) == 0)
+      {
+        DiskFile *diskfile = new DiskFile(&errorlog);
+
+        // Does the file exist
+        if (!diskfile->Open(filename))
+        {
+          delete diskfile;
+          continue;
+        }
+
+        // Remember that we have processed this file
+        bool success = diskfilemap.Insert(diskfile);
+        assert(success);
+        (void)success;
+
+        // Do the actual verification
+        VerifyDataFile(diskfile, 0);
+        // Ignore errors
+
+        // We have finished with the file for now
+        diskfile->Close();
+
+        // Find out how much data we have found
+        UpdateVerificationResults();
+      }
+    }
+  }
+
+  return true;
+}
+
+
+bool Par1Repairer::VerifyDataFile(DiskFile *diskfile, Par1RepairerSourceFile *sourcefile)
+{
+  Par1RepairerSourceFile *match = 0;
+
+  std::string path;
+  std::string name;
+  DiskFile::SplitFilename(diskfile->FileName(), path, name);
+
+  // How big is the file we are checking
+  u64 filesize = diskfile->FileSize();
+
+  if (filesize == 0)
+  {
+    if (noiselevel > nlSilent)
+    {
+      sout << "Target: \"" << name << "\" - empty." << std::endl;
+    }
+    return true;
+  }
+
+  // Search for the first file that is the correct size
+  std::vector<Par1RepairerSourceFile*>::iterator sourceiterator = sourcefiles.begin();
+  while (sourceiterator != sourcefiles.end() &&
+         filesize != (*sourceiterator)->FileSize())
+  {
+    ++sourceiterator;
+  }
+
+  // Are there any files that are the correct size?
+  if (sourceiterator != sourcefiles.end())
+  {
+    // Allocate a buffer to compute the file hash
+    size_t buffersize = (size_t)std::min((u64)1048576, filesize);
+    char *buffer = new char[buffersize];
+
+    // Read the first 16k of the file
+    size_t want = (size_t)std::min((u64)16384, filesize);
+    if (!diskfile->Read(0, buffer, want))
+    {
+      delete [] buffer;
+      return false;
+    }
+
+    // Compute the MD5 hash of the first 16k
+    MD5Context contextfull;
+    contextfull.Update(buffer, want);
+    MD5Context context16k = contextfull;
+    MD5Hash hash16k;
+    context16k.Final(hash16k);
+
+    if (!ignore16kfilehash)
+    {
+      // Search for the first file that has the correct 16k hash
+      while (sourceiterator != sourcefiles.end() &&
+            (filesize != (*sourceiterator)->FileSize() ||
+              hash16k != (*sourceiterator)->Hash16k()))
+      {
+        ++sourceiterator;
+      }
+    }
+
+    // Are there any files with the correct 16k hash?
+    if (sourceiterator != sourcefiles.end())
+    {
+      // Compute the MD5 hash of the whole file
+      if (filesize > 16384)
+      {
+        u64 offset = 16384;
+        ProgressMeter<u64> progress(filesize, phScanning, observer);
+        while (offset < filesize)
+        {
+          want = (size_t)std::min((u64)buffersize, filesize-offset);
+
+          if (!diskfile->Read(offset, buffer, want))
+          {
+            delete [] buffer;
+            return false;
+          }
+
+          contextfull.Update(buffer, want);
+
+          offset += want;
+
+          if (noiselevel > nlQuiet)
+            progress.Update(offset);
+        }
+      }
+
+      MD5Hash hashfull;
+      contextfull.Final(hashfull);
+
+      // Search for the first file that has the correct full hash
+      while (sourceiterator != sourcefiles.end() &&
+            (filesize != (*sourceiterator)->FileSize() ||
+              (!ignore16kfilehash && hash16k != (*sourceiterator)->Hash16k()) ||
+              hashfull != (*sourceiterator)->HashFull()))
+      {
+        ++sourceiterator;
+      }
+
+      // Are there any files with the correct full hash?
+      if (sourceiterator != sourcefiles.end())
+      {
+        // If a source file was originally specified, check to see if it is a match
+        if (sourcefile != 0 &&
+            sourcefile->FileSize() == filesize &&
+            (ignore16kfilehash || sourcefile->Hash16k() == hash16k) &&
+            sourcefile->HashFull() == hashfull)
+        {
+          match = sourcefile;
+        }
+        else
+        {
+          // Search for a file which matches and has not already been matched
+          while (sourceiterator != sourcefiles.end() &&
+                (filesize != (*sourceiterator)->FileSize() ||
+                  (!ignore16kfilehash && hash16k != (*sourceiterator)->Hash16k()) ||
+                  hashfull != (*sourceiterator)->HashFull() ||
+                  (*sourceiterator)->GetCompleteFile() != 0))
+          {
+            ++sourceiterator;
+          }
+
+          // Did we find a match
+          if (sourceiterator != sourcefiles.end())
+          {
+            match = *sourceiterator;
+          }
+        }
+      }
+    }
+
+    delete [] buffer;
+  }
+
+  // Did we find a match
+  if (match != 0)
+  {
+    match->SetCompleteFile(diskfile);
+
+    if (noiselevel > nlSilent)
+    {
+      // Was the match the file we were originally looking for
+      if (match == sourcefile)
+      {
+        sout << "Target: \"" << name << "\" - found." << std::endl;
+      }
+      // Were we looking for a specific file
+      else if (sourcefile != 0)
+      {
+        std::string targetname;
+        DiskFile::SplitFilename(sourcefile->FileName(), path, targetname);
+
+        sout << "Target: \""
+              << name
+              << "\" - is a match for \""
+              << targetname
+              << "\"."
+              << std::endl;
+      }
+      // We were not looking for a specific file
+      else
+      {
+        std::string targetname;
+        DiskFile::SplitFilename(match->FileName(), path, targetname);
+
+        sout << "File: \""
+              << name
+              << "\" - is a match for \""
+              << targetname
+              << "\"."
+              << std::endl;
+      }
+    }
+  }
+  else
+  {
+    if (noiselevel > nlSilent)
+      sout << "File: \""
+            << name
+            << "\" - no data found."
+            << std::endl;
+  }
+
+  return true;
+}
+
+void Par1Repairer::UpdateVerificationResults(void)
+{
+  completefilecount = 0;
+  renamedfilecount = 0;
+  damagedfilecount = 0;
+  missingfilecount = 0;
+
+  std::vector<Par1RepairerSourceFile*>::iterator sf = sourcefiles.begin();
+
+  // Check the recoverable files
+  while (sf != sourcefiles.end())
+  {
+    Par1RepairerSourceFile *sourcefile = *sf;
+
+    // Was a perfect match for the file found
+    if (sourcefile->GetCompleteFile() != 0)
+    {
+      // Is it the target file or a different one
+      if (sourcefile->GetCompleteFile() == sourcefile->GetTargetFile())
+      {
+        completefilecount++;
+      }
+      else
+      {
+        renamedfilecount++;
+      }
+    }
+    else
+    {
+      // Does the target file exist
+      if (sourcefile->GetTargetExists())
+      {
+        damagedfilecount++;
+      }
+      else
+      {
+        missingfilecount++;
+      }
+    }
+
+    ++sf;
+  }
+}
+
+bool Par1Repairer::CheckVerificationResults(void)
+{
+  // Is repair needed
+  if (completefilecount < sourcefiles.size() ||
+      renamedfilecount > 0 ||
+      damagedfilecount > 0 ||
+      missingfilecount > 0)
+  {
+    if (noiselevel > nlSilent)
+      sout << "Repair is required." << std::endl;
+    if (noiselevel > nlQuiet)
+    {
+      if (renamedfilecount > 0) sout << renamedfilecount << " file(s) have the wrong name." << std::endl;
+      if (missingfilecount > 0) sout << missingfilecount << " file(s) are missing." << std::endl;
+      if (damagedfilecount > 0) sout << damagedfilecount << " file(s) exist but are damaged." << std::endl;
+      if (completefilecount > 0) sout << completefilecount << " file(s) are ok." << std::endl;
+    }
+
+    // Is repair possible
+    if (recoveryblocks.size() >= damagedfilecount+missingfilecount)
+    {
+      if (noiselevel > nlSilent)
+        sout << "Repair is possible." << std::endl;
+
+      if (noiselevel > nlQuiet)
+      {
+        if (recoveryblocks.size() > damagedfilecount+missingfilecount)
+          sout << "You have an excess of "
+               << (u32)recoveryblocks.size() - (damagedfilecount+missingfilecount)
+               << " recovery files." << std::endl;
+
+        if (damagedfilecount+missingfilecount > 0)
+          sout << damagedfilecount+missingfilecount
+               << " recovery files will be used to repair." << std::endl;
+        else if (recoveryblocks.size())
+          sout << "None of the recovery files will be used for the repair." << std::endl;
+      }
+
+      return true;
+    }
+    else
+    {
+      if (noiselevel > nlSilent)
+      {
+        sout << "Repair is not possible.\n"
+             "You need " << damagedfilecount+missingfilecount - recoveryblocks.size()
+             << " more recovery files to be able to repair." << std::endl;
+      }
+
+      return false;
+    }
+  }
+  else
+  {
+    if (noiselevel > nlSilent)
+      sout << "All files are correct, repair is not required." << std::endl;
+
+    return true;
+  }
+
+  return true;
+}
+
+bool Par1Repairer::RenameTargetFiles(void)
+{
+  std::vector<Par1RepairerSourceFile*>::iterator sf = sourcefiles.begin();
+
+  // Rename any damaged target files
+  while (sf != sourcefiles.end())
+  {
+    Par1RepairerSourceFile *sourcefile = *sf;
+
+    // If the target file exists but is not a complete version of the file
+    if (sourcefile->GetTargetExists() &&
+        sourcefile->GetTargetFile() != sourcefile->GetCompleteFile())
+    {
+      DiskFile *targetfile = sourcefile->GetTargetFile();
+
+      // Rename it
+      diskfilemap.Remove(targetfile);
+
+      if (!targetfile->Rename())
+        return false;
+
+      backuplist.push_back(targetfile);
+
+      bool success = diskfilemap.Insert(targetfile);
+      assert(success);
+      (void)success;
+
+      // We no longer have a target file
+      sourcefile->SetTargetExists(false);
+      sourcefile->SetTargetFile(0);
+    }
+
+    ++sf;
+  }
+
+  sf = sourcefiles.begin();
+
+  // Rename any missnamed but complete versions of the files
+  while (sf != sourcefiles.end())
+  {
+    Par1RepairerSourceFile *sourcefile = *sf;
+
+    // If there is no targetfile and there is a complete version
+    if (sourcefile->GetTargetFile() == 0 &&
+        sourcefile->GetCompleteFile() != 0)
+    {
+      DiskFile *targetfile = sourcefile->GetCompleteFile();
+
+      // Rename it
+      diskfilemap.Remove(targetfile);
+      if (!targetfile->Rename(sourcefile->FileName()))
+        return false;
+      bool success = diskfilemap.Insert(targetfile);
+      assert(success);
+      (void)success;
+
+      // This file is now the target file
+      sourcefile->SetTargetExists(true);
+      sourcefile->SetTargetFile(targetfile);
+
+      // We have one more complete file
+      completefilecount++;
+    }
+
+    ++sf;
+  }
+
+  return true;
+}
+
+// Work out which files are being repaired, create them, and allocate
+// target DataBlocks to them, and remember them for later verification.
+bool Par1Repairer::CreateTargetFiles(void)
+{
+  std::vector<Par1RepairerSourceFile*>::iterator sf = sourcefiles.begin();
+
+  // Create any missing target files
+  while (sf != sourcefiles.end())
+  {
+    Par1RepairerSourceFile *sourcefile = *sf;
+
+    // If the file does not exist
+    if (!sourcefile->GetTargetExists())
+    {
+      DiskFile *targetfile = new DiskFile(&errorlog);
+      std::string filename = sourcefile->FileName();
+      u64 filesize = sourcefile->FileSize();
+
+      // Create the target file
+      if (!targetfile->Create(filename, filesize))
+      {
+        delete targetfile;
+        return false;
+      }
+
+      // This file is now the target file
+      sourcefile->SetTargetExists(true);
+      sourcefile->SetTargetFile(targetfile);
+
+      // Remember this file
+      bool success = diskfilemap.Insert(targetfile);
+      assert(success);
+      (void)success;
+
+      sourcefile->SetTargetBlock(targetfile);
+
+      // Add the file to the list of those that will need to be verified
+      // once the repair has completed.
+      verifylist.push_back(sourcefile);
+    }
+
+    ++sf;
+  }
+
+  return true;
+}
+
+// Work out which data blocks are available, which need to be recreated,
+// and compute the appropriate Reed Solomon matrix.
+Result Par1Repairer::ComputeRSmatrix(void)
+{
+  inputblocks.resize(sourcefiles.size()); // The DataBlocks that will read from disk
+  outputblocks.resize(verifylist.size()); // Those DataBlocks that will re recalculated
+
+  std::vector<DataBlock*>::iterator inputblock  = inputblocks.begin();
+  std::vector<DataBlock*>::iterator outputblock = outputblocks.begin();
+
+  // Build an array listing which source data blocks are present and which are missing
+  std::vector<bool> present;
+  present.resize(sourcefiles.size());
+
+  std::vector<Par1RepairerSourceFile*>::iterator sourceiterator = sourcefiles.begin();
+  std::vector<bool>::iterator              pres = present.begin();
+
+  // Iterate through all source files
+  while (sourceiterator != sourcefiles.end())
+  {
+    Par1RepairerSourceFile *sourcefile = *sourceiterator;
+    DataBlock *sourceblock = sourcefile->SourceBlock();
+    DataBlock *targetblock = sourcefile->TargetBlock();
+
+    // Was this block found
+    if (sourceblock->IsSet())
+    {
+      // Open the file the block was found in.
+      if (!sourceblock->Open())
+      {
+        return eFileIOError;
+      }
+
+      // Record that the block was found
+      *pres = true;
+
+      // Add the block to the list of those which will be read
+      // as input (and which might also need to be copied).
+      *inputblock = sourceblock;
+      ++inputblock;
+    }
+    else
+    {
+      // Record that the block was missing
+      *pres = false;
+
+      // Add the block to the list of those to be written
+      *outputblock = targetblock;
+      ++outputblock;
+    }
+
+    ++sourceiterator;
+    ++pres;
+  }
+
+  // Set the number of source blocks and which of them are present
+  if (!rs.SetInput(present))
+  {
+    return eLogicError;
+  }
+
+  // If we need to, compute and solve the RS matrix
+  if (verifylist.empty())
+  {
+    return eSuccess;
+  }
+
+  // Every recovery block loaded is offered, those beyond the number missing
+  // standing in for any which cannot rebuild what is missing
+  for (std::map<u32, DataBlock*>::const_iterator recoveryiterator = recoveryblocks.begin();
+       recoveryiterator != recoveryblocks.end();
+       ++recoveryiterator)
+  {
+    if (!rs.SetOutput(true, (u16)recoveryiterator->first))
+    {
+      return eLogicError;
+    }
+  }
+
+  if (!rs.Compute(observer, noiselevel >= nlDebug ? vbDebug : vbNone))
+  {
+    serr << "The recovery blocks loaded cannot rebuild this combination of missing blocks." << std::endl;
+    return eRepairNotPossible;
+  }
+
+  // Add the recovery blocks used to the list of blocks that will be read
+  for (u16 exponent : rs.UsedExponents())
+  {
+    std::map<u32, DataBlock*>::const_iterator recoveryiterator = recoveryblocks.find(exponent);
+    if (recoveryiterator == recoveryblocks.end() || inputblock == inputblocks.end())
+    {
+      return eLogicError;
+    }
+
+    DataBlock *recoveryblock = recoveryiterator->second;
+
+    // Make sure the file is open
+    if (!recoveryblock->Open())
+    {
+      return eFileIOError;
+    }
+
+    *inputblock = recoveryblock;
+    ++inputblock;
+  }
+
+  return eSuccess;
+}
+
+// Allocate memory buffers for reading and writing data to disk.
+bool Par1Repairer::AllocateBuffers(size_t memorylimit)
+{
+  // Would single pass processing use too much memory
+  if (blocksize * verifylist.size() > memorylimit)
+  {
+    // Pick a size that is small enough
+    chunksize = ~3 & (memorylimit / verifylist.size());
+  }
+  else
+  {
+    chunksize = (size_t)blocksize;
+  }
+
+  // Allocate the two buffers
+  inputbuffersize = (size_t)chunksize;
+  inputbuffer = new u8[inputbuffersize];
+  outputbufferalignment = (inputbuffersize + sizeof(u32)-1) & ~(sizeof(u32)-1);
+  outputbuffersize = outputbufferalignment * verifylist.size();
+  outputbuffer = new u8[outputbuffersize];
+
+  if (inputbuffer == NULL || outputbuffer == NULL)
+  {
+    serr << "Could not allocate buffer memory." << std::endl;
+    return false;
+  }
+
+  return true;
+}
+
+// Read source data, process it through the RS matrix and write it to disk.
+bool Par1Repairer::ProcessData(u64 blockoffset, size_t blocklength, ProgressMeter<u64> &progress)
+{
+  u64 totalwritten = 0;
+  // Clear the output buffer
+  memset(outputbuffer, 0, outputbuffersize);
+
+  std::vector<DataBlock*>::iterator inputblock = inputblocks.begin();
+  u32                          inputindex = 0;
+
+  // Are there any blocks which need to be reconstructed
+  if (!verifylist.empty())
+  {
+    // For each input block
+    while (inputblock != inputblocks.end())
+    {
+      // Read data from the current input block
+      if (!(*inputblock)->ReadData(blockoffset, blocklength, inputbuffer))
+        return false;
+
+      // For each output block
+      for (u32 outputindex=0; outputindex<verifylist.size(); outputindex++)
+      {
+        // Select the appropriate part of the output buffer
+        void *outbuf = &outputbuffer[outputbufferalignment * outputindex];
+
+        // Process the data
+        rs.Process(blocklength, inputindex, inputbuffer, outputindex, outbuf);
+
+        if (noiselevel > nlQuiet)
+          progress.Add(blocklength);
+      }
+
+      ++inputblock;
+      ++inputindex;
+    }
+  }
+
+  if (noiselevel > nlQuiet)
+    sout << "Writing recovered data\r";
+
+  // For each output block that has been recomputed
+  std::vector<DataBlock*>::iterator outputblock = outputblocks.begin();
+  for (u32 outputindex=0; outputindex<verifylist.size();outputindex++)
+  {
+    // Select the appropriate part of the output buffer
+    char *outbuf = &((char*)outputbuffer)[outputbufferalignment * outputindex];
+
+    // Write the data to the target file
+    size_t wrote;
+    if (!(*outputblock)->WriteData(blockoffset, blocklength, outbuf, wrote))
+      return false;
+    totalwritten += wrote;
+
+    ++outputblock;
+  }
+
+  if (noiselevel > nlQuiet)
+    sout << "Wrote " << totalwritten << " bytes to disk" << std::endl;
+
+  return true;
+}
+
+// Verify that all of the reconstructed target files are now correct
+bool Par1Repairer::VerifyTargetFiles(void)
+{
+  bool finalresult = true;
+
+  // Verify the target files in alphabetical order
+//  std::sort(verifylist.begin(), verifylist.end(), SortSourceFilesByFileName);
+
+  // Iterate through each file in the verification list
+  for (std::list<Par1RepairerSourceFile*>::iterator sf = verifylist.begin();
+       sf != verifylist.end();
+       ++sf)
+  {
+    Par1RepairerSourceFile *sourcefile = *sf;
+    DiskFile *targetfile = sourcefile->GetTargetFile();
+
+    // Close the file
+    if (targetfile->IsOpen())
+      targetfile->Close();
+
+    // Say we don't have a complete version of the file
+    sourcefile->SetCompleteFile(0);
+
+    // Re-open the target file
+    if (!targetfile->Open())
+    {
+      finalresult = false;
+      continue;
+    }
+
+    // Verify the file again
+    if (!VerifyDataFile(targetfile, sourcefile))
+      finalresult = false;
+
+    // Close the file again
+    targetfile->Close();
+
+    // Find out how much data we have found
+    UpdateVerificationResults();
+  }
+
+  return finalresult;
+}
+
+// Delete all of the partly reconstructed files
+bool Par1Repairer::DeleteIncompleteTargetFiles(void)
+{
+  std::list<Par1RepairerSourceFile*>::iterator sf = verifylist.begin();
+
+  // Iterate through each file in the verification list
+  while (sf != verifylist.end())
+  {
+    Par1RepairerSourceFile *sourcefile = *sf;
+    if (sourcefile->GetTargetExists())
+    {
+      DiskFile *targetfile = sourcefile->GetTargetFile();
+
+      // Close and delete the file
+      if (targetfile->IsOpen())
+        targetfile->Close();
+      targetfile->Delete();
+
+      // Forget the file
+      diskfilemap.Remove(targetfile);
+
+      delete targetfile;
+
+      // There is no target file
+      sourcefile->SetTargetExists(false);
+      sourcefile->SetTargetFile(0);
+    }
+
+    ++sf;
+  }
+
+  return true;
+}
+
+bool Par1Repairer::RemoveBackupFiles(void)
+{
+  std::vector<DiskFile*>::iterator bf = backuplist.begin();
+
+  if (noiselevel > nlSilent
+      && bf != backuplist.end())
+  {
+    sout << "\nPurge backup files." << std::endl;
+  }
+
+  // Iterate through each file in the backuplist
+  while (bf != backuplist.end())
+  {
+    if (noiselevel > nlSilent)
+    {
+      std::string name;
+      std::string path;
+      DiskFile::SplitFilename((*bf)->FileName(), path, name);
+      sout << "Remove \"" << name << "\"." << std::endl;
+    }
+
+    if ((*bf)->IsOpen())
+      (*bf)->Close();
+    (*bf)->Delete();
+
+    ++bf;
+  }
+
+  return true;
+}
+
+bool Par1Repairer::RemoveParFiles(void)
+{
+  if (noiselevel > nlSilent
+      && !parlist.empty())
+  {
+      sout << "\nPurge par files." << std::endl;
+  }
+
+  for (std::list<std::string>::const_iterator s=parlist.begin(); s!=parlist.end(); ++s)
+  {
+    DiskFile *diskfile = new DiskFile(&errorlog);
+
+    if (diskfile->Open(*s))
+    {
+      if (noiselevel > nlSilent)
+      {
+        std::string name;
+        std::string path;
+        DiskFile::SplitFilename((*s), path, name);
+        sout << "Remove \"" << name << "\"." << std::endl;
+      }
+
+      if (diskfile->IsOpen())
+        diskfile->Close();
+      diskfile->Delete();
+    }
+
+    delete diskfile;
+  }
+
+  return true;
+}
+
+
+Result par1repair(std::ostream &sout,
+		  std::ostream &serr,
+		  const NoiseLevel noiselevel,
+		  const size_t memorylimit,
+		  // basepath is not used by Par1
+		  const u32 nthreads,
+		  // filethreads is not used by Par1
+		  const std::string &parfilename,
+		  const std::vector<std::string> &extrafiles,
+		  const bool dorepair,   // derived from operation
+		  const bool purgefiles,
+		  // skipdata is not used by Par1
+		  // skipleaway is not used by Par1
+		  Par2Observer *observer
+		  )
+{
+  Par1Repairer repairer(sout, serr, noiselevel, observer);
+  Result result = repairer.Process(MemoryLimit(memorylimit),
+				   nthreads,
+				   parfilename,
+				   extrafiles,
+				   dorepair,
+				   purgefiles);
+  return result;
+}
+
+} // namespace par2
