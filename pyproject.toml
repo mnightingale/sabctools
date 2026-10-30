@@ -78,11 +78,11 @@ archs = ["native"]
 
 [tool.cibuildwheel.macos]
 archs = ["universal2"]
-build = "cp314-*"
+build = "cp315-*"
 
 [tool.cibuildwheel.windows]
 archs = ["native"]
-build = "cp314-*"
+build = "cp315-*"
 # Skip wheel repair: SABnzbd already bundles the required runtime DLLs
 repair-wheel-command = ""
 
