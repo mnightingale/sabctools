@@ -39,6 +39,30 @@ def write_stats(reset: bool = False) -> WriteStats:
     writes into intervals with none lost or counted twice.
     """
 
+class WriteBehindStats(TypedDict):
+    enabled: bool
+    threads: int
+    buffers: int
+    free: int
+    queued: int
+    waits: int
+    """Times a decoder found the pool empty and waited for a buffer"""
+    wait_nanos: int
+
+def set_write_behind(threads: int, buffers: int = 0) -> None:
+    """Hand streamed article data to background writer threads instead of writing inline.
+
+    buffers staging buffers of 256 KiB are allocated once and shared by every Decoder.
+    A decoder that finds none free waits for a write to finish. threads=0 turns it off
+    for buffers taken from then on. Once started, the thread and buffer counts cannot
+    change.
+
+    A failed write-behind write cannot be reported on the response it came from, which
+    has already completed. It is recorded on the FileWriter: later responses to that
+    file report sink_failed, and FileWriter.flush() raises it.
+    """
+
+def write_behind_stats(reset: bool = False) -> WriteBehindStats: ...
 def bytearray_malloc(size: int) -> bytearray: ...
 def rarfile_rar3_s2k(pwd, salt) -> tuple[bytes, bytes]: ...
 
@@ -162,6 +186,9 @@ class FileWriter:
         and changes nothing; elsewhere it is only visible afterwards, so the length is
         left set and allocated in full.
         """
+
+    def flush(self) -> None:
+        """Wait for queued write-behind writes to this file, raising the first that failed."""
 
     def close(self) -> None:
         """Close the file. Idempotent, and waits for any writes still in flight."""

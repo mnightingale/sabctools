@@ -17,6 +17,7 @@
  */
 
 #include "filewriter.h"
+#include "writebehind.h"
 
 #include <errno.h>
 // memset, for zeroing the OVERLAPPED on Windows
@@ -53,6 +54,9 @@ static PyObject *FileWriter_new(PyTypeObject *type, PyObject *Py_UNUSED(args), P
     // The mutex is a real C++ object inside a C struct, so it has to be constructed
     // and destroyed by hand
     new (&self->lock) std::shared_mutex();
+    new (&self->pending) std::atomic<long>(0);
+    new (&self->async_error) std::atomic<unsigned long>(0);
+    new (&self->async_closed) std::atomic<bool>(false);
     return (PyObject *)self;
 }
 
@@ -148,6 +152,11 @@ static int FileWriter_init(FileWriter *self, PyObject *args, PyObject *kwargs) {
 }
 
 static void FileWriter_dealloc(FileWriter *self) {
+    if (self->pending.load(std::memory_order_acquire)) {
+        Py_BEGIN_ALLOW_THREADS
+        writebehind_drain(self);
+        Py_END_ALLOW_THREADS
+    }
     filewriter_close_handle(self);
     Py_CLEAR(self->path);
     self->lock.~shared_mutex();
@@ -377,11 +386,34 @@ static PyObject *FileWriter_preallocate(FileWriter *self, PyObject *arg) {
  */
 static PyObject *FileWriter_close(FileWriter *self, PyObject *Py_UNUSED(ignored)) {
     Py_BEGIN_ALLOW_THREADS
+    writebehind_drain(self);
     {
         std::unique_lock<std::shared_mutex> guard(self->lock);
         filewriter_close_handle(self);
     }
     Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
+/*
+ * Wait for every write-behind write to this file, then raise the first that failed.
+ *
+ * The failure stays recorded, so every later flush() raises it again.
+ */
+static PyObject *FileWriter_flush(FileWriter *self, PyObject *Py_UNUSED(ignored)) {
+    Py_BEGIN_ALLOW_THREADS
+    writebehind_drain(self);
+    Py_END_ALLOW_THREADS
+
+    unsigned long error_code = self->async_error.load(std::memory_order_relaxed);
+    if (error_code) {
+        filewriter_raise(self, false, error_code);
+        return NULL;
+    }
+    if (self->async_closed.load(std::memory_order_relaxed)) {
+        filewriter_raise(self, true, 0);
+        return NULL;
+    }
     Py_RETURN_NONE;
 }
 
@@ -514,6 +546,8 @@ static PyMethodDef FileWriter_methods[] = {
      PyDoc_STR("preallocate(length)\n\nSet the file length, marking it sparse first where required.")},
     {"close", (PyCFunction)FileWriter_close, METH_NOARGS,
      PyDoc_STR("close()\n\nClose the file. Idempotent, and waits for writes in flight.")},
+    {"flush", (PyCFunction)FileWriter_flush, METH_NOARGS,
+     PyDoc_STR("flush()\n\nWait for queued write-behind writes, raising the first that failed.")},
     {"__enter__", (PyCFunction)FileWriter_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)FileWriter_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}

@@ -71,6 +71,11 @@ typedef struct {
     PyObject *path;
     // Guards handle against close(), not the writes against each other
     std::shared_mutex lock;
+    // Write-behind writes queued or in progress for this file
+    std::atomic<long> pending;
+    // First failure of a write-behind write, held until flush() raises it
+    std::atomic<unsigned long> async_error;
+    std::atomic<bool> async_closed;
 } FileWriter;
 
 bool filewriter_init(PyObject *);

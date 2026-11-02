@@ -22,6 +22,7 @@
 #include "crc32.h"
 #include "sparse.h"
 #include "filewriter.h"
+#include "writebehind.h"
 #include "utils.h"
 
 /* Function and exception declarations */
@@ -82,6 +83,18 @@ static PyMethodDef sabctools_methods[] = {
         (PyCFunction)(void (*)(void))filewriter_write_stats,
         METH_VARARGS | METH_KEYWORDS,
         "write_stats(reset=False)"
+    },
+    {
+        "set_write_behind",
+        (PyCFunction)(void (*)(void))writebehind_configure,
+        METH_VARARGS | METH_KEYWORDS,
+        "set_write_behind(threads, buffers=0)"
+    },
+    {
+        "write_behind_stats",
+        (PyCFunction)(void (*)(void))writebehind_stats,
+        METH_VARARGS | METH_KEYWORDS,
+        "write_behind_stats(reset=False)"
     },
     {
         "bytearray_malloc",
