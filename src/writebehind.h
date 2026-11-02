@@ -24,11 +24,12 @@
 #include "filewriter.h"
 
 /*
- * A fixed pool of staging buffers and the threads that write them out.
+ * A bounded pool of staging buffers and the threads that write them out.
  *
  * A decoder streaming to a sink takes a buffer from the pool, fills it, and submits
- * it; a writer thread performs the positional write and returns the buffer. When the
- * pool is empty, taking a buffer blocks until a write completes.
+ * it; a writer thread performs the positional write and returns the buffer. Buffers
+ * are allocated on first use up to the limit. When all of them are in use, taking a
+ * buffer blocks until a write completes.
  *
  * None of these touch the Python API. writebehind_acquire and writebehind_drain may
  * block, so callers release the GIL around them.
@@ -39,7 +40,7 @@ bool writebehind_enabled();
 /* Size of every pooled buffer */
 Py_ssize_t writebehind_buffer_size();
 
-/* A free buffer, or NULL if none is free and wait is false */
+/* A free buffer, or NULL if out of memory, or if none is free and wait is false */
 char *writebehind_acquire(bool wait);
 
 void writebehind_release(char *buffer);
@@ -53,5 +54,8 @@ void writebehind_drain(FileWriter *writer);
 PyObject *writebehind_configure(PyObject *, PyObject *, PyObject *);
 
 PyObject *writebehind_stats(PyObject *, PyObject *, PyObject *);
+
+/* Free every idle buffer, and each in-use buffer as it is returned, until the next acquire */
+PyObject *writebehind_trim(PyObject *, PyObject *);
 
 #endif // SABCTOOLS_WRITEBEHIND_H
