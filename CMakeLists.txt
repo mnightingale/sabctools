@@ -408,6 +408,7 @@ python_add_library(sabctools MODULE WITH_SOABI
     src/crc32.cc
     src/sparse.cc
     src/filewriter.cc
+    src/writebehind.cc
     src/utils.cc
     src/unlocked_ssl.cc
     $<TARGET_OBJECTS:par2_glue>
