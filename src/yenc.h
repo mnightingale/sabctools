@@ -176,6 +176,8 @@ typedef struct {
 	char* staging;
 	Py_ssize_t staging_size;
 	Py_ssize_t staging_used;
+	// staging came from the write-behind pool and goes back to it
+	bool staging_pooled;
 } Decoder;
 
 #endif //SABCTOOLS_YENC_H

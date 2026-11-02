@@ -18,6 +18,7 @@
 
 #include "yenc.h"
 #include "filewriter.h"
+#include "writebehind.h"
 #include "unlocked_ssl.h"
 
 #include "rapidyenc/rapidyenc.h"
@@ -629,6 +630,36 @@ static PyObject* NNTPResponse_get_format(NNTPResponse* self, void *closure)
  * - Releases GIL during decoding for parallel processing
  */
 /*
+ * Give the decoder a staging buffer if it has none: from the write-behind pool when
+ * that is enabled, blocking with the GIL released until one is free, else its own.
+ */
+static bool Decoder_ensure_staging(Decoder *owner) {
+    if (owner->staging) return true;
+
+    if (writebehind_enabled()) {
+        char *buffer = writebehind_acquire(false);
+        if (!buffer) {
+            Py_BEGIN_ALLOW_THREADS;
+            buffer = writebehind_acquire(true);
+            Py_END_ALLOW_THREADS;
+        }
+        owner->staging = buffer;
+        owner->staging_size = writebehind_buffer_size();
+        owner->staging_pooled = true;
+    } else {
+        owner->staging = static_cast<char*>(malloc(YENC_STAGING_SIZE));
+        if (!owner->staging) {
+            PyErr_NoMemory();
+            return false;
+        }
+        owner->staging_size = YENC_STAGING_SIZE;
+        owner->staging_pooled = false;
+    }
+    owner->staging_used = 0;
+    return true;
+}
+
+/*
  * Hand the staged bytes to the sink and start the buffer over.
  *
  * The write runs with the GIL released, so nothing here touches the Python API until
@@ -650,10 +681,26 @@ static bool NNTPResponse_flush_sink(Decoder *owner, NNTPResponse *instance) {
     bool was_closed = false;
     unsigned long error_code = 0;
 
-    Py_BEGIN_ALLOW_THREADS;
-    written = filewriter_write_raw(writer, owner->staging, owner->staging_used,
-                                   static_cast<long long>(instance->sink_offset), &was_closed, &error_code);
-    Py_END_ALLOW_THREADS;
+    if (owner->staging_pooled) {
+        error_code = writer->async_error.load(std::memory_order_relaxed);
+        was_closed = writer->async_closed.load(std::memory_order_relaxed);
+        if (!was_closed && !error_code) {
+            std::shared_lock<std::shared_mutex> guard(writer->lock);
+            was_closed = writer->handle == SABCTOOLS_INVALID_HANDLE;
+        }
+        if (!was_closed && !error_code) {
+            written = owner->staging_used;
+            writebehind_submit(writer, owner->staging, written, static_cast<long long>(instance->sink_offset));
+            owner->staging = nullptr;
+            owner->staging_size = 0;
+            owner->staging_pooled = false;
+        }
+    } else {
+        Py_BEGIN_ALLOW_THREADS;
+        written = filewriter_write_raw(writer, owner->staging, owner->staging_used,
+                                       static_cast<long long>(instance->sink_offset), &was_closed, &error_code);
+        Py_END_ALLOW_THREADS;
+    }
 
     if (was_closed || error_code) {
         // Not an error for the connection, and it must not be raised here.
@@ -710,10 +757,12 @@ static bool NNTPResponse_decode_yenc_sink(Decoder *owner, NNTPResponse *instance
     RapidYencDecoderEnd end = RYDEC_END_NONE;
 
     while (read < buf_len) {
+        if (!Decoder_ensure_staging(owner)) return false;
         Py_ssize_t space = owner->staging_size - owner->staging_used;
         if (space == 0) {
             if (!NNTPResponse_flush_sink(owner, instance)) return false;
-            space = owner->staging_size;
+            if (!Decoder_ensure_staging(owner)) return false;
+            space = owner->staging_size - owner->staging_used;
         }
 
         // The decoder never writes more than it reads, so a chunk that fits the
@@ -774,7 +823,15 @@ static bool NNTPResponse_decode_yenc_sink(Decoder *owner, NNTPResponse *instance
     // The body is over, so whatever is still staged has to go out now. Leaving it would
     // lose the tail of the article: the buffer belongs to the connection, and the next
     // response resets it.
-    if (!instance->body && !NNTPResponse_flush_sink(owner, instance)) return false;
+    //
+    // A pooled buffer goes out at the end of every call, so no decoder holds one between reads.
+    if ((!instance->body || owner->staging_pooled) && !NNTPResponse_flush_sink(owner, instance)) return false;
+    if (owner->staging_pooled && owner->staging_used == 0) {
+        writebehind_release(owner->staging);
+        owner->staging = nullptr;
+        owner->staging_size = 0;
+        owner->staging_pooled = false;
+    }
 
     return true;
 }
@@ -789,15 +846,6 @@ static bool NNTPResponse_decode_yenc(Decoder *owner, NNTPResponse *instance, con
     // connection and write it out, instead of building a bytearray per article. The
     // sizing rules below do not apply, because nothing here is handed to Python.
     if (instance->sink) {
-        if (owner->staging == nullptr) {
-            owner->staging = static_cast<char*>(malloc(YENC_STAGING_SIZE));
-            if (!owner->staging) {
-                PyErr_NoMemory();
-                return false;
-            }
-            owner->staging_size = YENC_STAGING_SIZE;
-            owner->staging_used = 0;
-        }
         if (instance->bytes_decoded == 0) {
             // Where this article belongs in the file, straight from its =ypart header
             instance->sink_offset = instance->part_begin;
@@ -1473,6 +1521,7 @@ static PyObject* Decoder_new(PyTypeObject* type, PyObject* args, PyObject* kwds)
     self->staging = nullptr;
     self->staging_size = 0;
     self->staging_used = 0;
+    self->staging_pooled = false;
 
     return reinterpret_cast<PyObject *>(self);
 }
@@ -1517,7 +1566,11 @@ static void Decoder_dealloc(Decoder *self)
     self->deque.~deque();
     self->pending.~deque();
     free(self->data);
-    free(self->staging);
+    if (self->staging_pooled) {
+        writebehind_release(self->staging);
+    } else {
+        free(self->staging);
+    }
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
