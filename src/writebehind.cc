@@ -116,6 +116,10 @@ void writer_thread() {
             unsigned long none = 0;
             job.writer->async_error.compare_exchange_strong(none, error_code, std::memory_order_relaxed);
         }
+        if (was_closed || error_code) {
+            std::lock_guard<std::mutex> guard(job.writer->failed_lock);
+            job.writer->failed.emplace_back(job.offset, job.length);
+        }
 
         char *discard;
         {
