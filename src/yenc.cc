@@ -643,6 +643,10 @@ static bool Decoder_ensure_staging(Decoder *owner) {
             buffer = writebehind_acquire(true);
             Py_END_ALLOW_THREADS;
         }
+        if (!buffer) {
+            PyErr_NoMemory();
+            return false;
+        }
         owner->staging = buffer;
         owner->staging_size = writebehind_buffer_size();
         owner->staging_pooled = true;

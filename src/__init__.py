@@ -23,6 +23,7 @@ from sabctools.sabctools import (
     unlocked_ssl_recv_into,
     version,
     write_behind_stats,
+    write_behind_trim,
     write_stats,
     yenc_encode,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "sparse",
     "unlocked_ssl_recv_into",
     "write_behind_stats",
+    "write_behind_trim",
     "write_stats",
     "yenc_encode",
     "__version__",

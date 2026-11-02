@@ -97,6 +97,12 @@ static PyMethodDef sabctools_methods[] = {
         "write_behind_stats(reset=False)"
     },
     {
+        "write_behind_trim",
+        writebehind_trim,
+        METH_NOARGS,
+        "write_behind_trim()"
+    },
+    {
         "bytearray_malloc",
         bytearray_malloc,
         METH_O,

@@ -43,6 +43,8 @@ class WriteBehindStats(TypedDict):
     enabled: bool
     threads: int
     buffers: int
+    allocated: int
+    """Buffers that currently exist, free or in use"""
     free: int
     queued: int
     waits: int
@@ -52,8 +54,8 @@ class WriteBehindStats(TypedDict):
 def set_write_behind(threads: int, buffers: int = 0) -> None:
     """Hand streamed article data to background writer threads instead of writing inline.
 
-    buffers staging buffers of 256 KiB are allocated once and shared by every Decoder.
-    A decoder that finds none free waits for a write to finish. threads=0 turns it off
+    Up to buffers staging buffers of 256 KiB are shared by every Decoder, allocated on
+    first use. A decoder that finds all of them in use waits for a write to finish. threads=0 turns it off
     for buffers taken from then on. Once started, the thread and buffer counts cannot
     change.
 
@@ -63,6 +65,12 @@ def set_write_behind(threads: int, buffers: int = 0) -> None:
     """
 
 def write_behind_stats(reset: bool = False) -> WriteBehindStats: ...
+def write_behind_trim() -> None:
+    """Free every idle buffer, and each buffer still being written as it finishes.
+
+    Does not wait for writes. Buffers are allocated again as decoders next need them.
+    """
+
 def bytearray_malloc(size: int) -> bytearray: ...
 def rarfile_rar3_s2k(pwd, salt) -> tuple[bytes, bytes]: ...
 

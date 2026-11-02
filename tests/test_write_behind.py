@@ -84,7 +84,9 @@ class TestOutput:
             feed(decoder, build_article(os.urandom(300_000), begin=index * 300_000, total=3_000_000))
         writer.flush()
 
-        assert sabctools.write_behind_stats()["free"] == BUFFERS
+        stats = sabctools.write_behind_stats()
+        assert 0 < stats["allocated"] <= BUFFERS
+        assert stats["free"] == stats["allocated"]
         writer.close()
 
     def test_a_dropped_writer_still_lands_its_writes(self, tmp_path):
@@ -147,6 +149,49 @@ class TestOutput:
         writer.close()
 
         assert open(writer.path, "rb").read() == b"".join(payloads)
+
+
+class TestTrim:
+    def write(self, writer, count=10, size=300_000):
+        decoder = sabctools.Decoder(STAGING)
+        payloads = [os.urandom(size) for _ in range(count)]
+        for index, payload in enumerate(payloads):
+            decoder.expect(index, writer)
+            feed(decoder, build_article(payload, begin=index * size, total=count * size, part=index + 1))
+        return b"".join(payloads)
+
+    def test_idle_buffers_are_freed(self, tmp_path):
+        writer = sabctools.FileWriter(str(tmp_path / "idle.bin"))
+        self.write(writer)
+        writer.flush()
+        sabctools.write_behind_trim()
+
+        stats = sabctools.write_behind_stats()
+        assert stats["allocated"] == 0
+        assert stats["free"] == 0
+        writer.close()
+
+    def test_buffers_still_being_written_are_freed_when_done(self, tmp_path):
+        writer = sabctools.FileWriter(str(tmp_path / "in_flight.bin"))
+        expected = self.write(writer, count=20)
+        sabctools.write_behind_trim()
+        writer.flush()
+
+        assert sabctools.write_behind_stats()["allocated"] == 0
+        writer.close()
+        assert open(writer.path, "rb").read() == expected
+
+    def test_decoding_after_a_trim_allocates_again(self, tmp_path):
+        sabctools.write_behind_trim()
+        writer = sabctools.FileWriter(str(tmp_path / "again.bin"))
+        expected = self.write(writer)
+        writer.flush()
+
+        stats = sabctools.write_behind_stats()
+        assert stats["allocated"] > 0
+        assert stats["free"] == stats["allocated"]
+        writer.close()
+        assert open(writer.path, "rb").read() == expected
 
 
 class TestErrors:
