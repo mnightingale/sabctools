@@ -22,6 +22,7 @@
 #include <errno.h>
 // memset, for zeroing the OVERLAPPED on Windows
 #include <string.h>
+#include <algorithm>
 #include <chrono>
 
 #if !defined(_WIN32) && !defined(__CYGWIN__)
@@ -57,6 +58,8 @@ static PyObject *FileWriter_new(PyTypeObject *type, PyObject *Py_UNUSED(args), P
     new (&self->pending) std::atomic<long>(0);
     new (&self->async_error) std::atomic<unsigned long>(0);
     new (&self->async_closed) std::atomic<bool>(false);
+    new (&self->failed_lock) std::mutex();
+    new (&self->failed) std::vector<std::pair<long long, Py_ssize_t>>();
     return (PyObject *)self;
 }
 
@@ -160,6 +163,8 @@ static void FileWriter_dealloc(FileWriter *self) {
     filewriter_close_handle(self);
     Py_CLEAR(self->path);
     self->lock.~shared_mutex();
+    self->failed_lock.~mutex();
+    self->failed.~vector();
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -417,6 +422,38 @@ static PyObject *FileWriter_flush(FileWriter *self, PyObject *Py_UNUSED(ignored)
     Py_RETURN_NONE;
 }
 
+/* Wait for every write-behind write to this file, then list where those that failed belonged */
+static PyObject *FileWriter_failed_ranges(FileWriter *self, PyObject *Py_UNUSED(ignored)) {
+    std::vector<std::pair<long long, Py_ssize_t>> ranges;
+    Py_BEGIN_ALLOW_THREADS
+    writebehind_drain(self);
+    {
+        std::lock_guard<std::mutex> guard(self->failed_lock);
+        ranges = self->failed;
+    }
+    std::sort(ranges.begin(), ranges.end());
+    Py_END_ALLOW_THREADS
+
+    PyObject *result = PyList_New(0);
+    if (!result) return NULL;
+    size_t i = 0;
+    while (i < ranges.size()) {
+        long long start = ranges[i].first;
+        long long end = start + ranges[i].second;
+        for (i++; i < ranges.size() && ranges[i].first <= end; i++) {
+            end = std::max(end, ranges[i].first + (long long)ranges[i].second);
+        }
+        PyObject *range = Py_BuildValue("(LL)", start, end - start);
+        if (!range || PyList_Append(result, range) < 0) {
+            Py_XDECREF(range);
+            Py_DECREF(result);
+            return NULL;
+        }
+        Py_DECREF(range);
+    }
+    return result;
+}
+
 static PyObject *FileWriter_enter(FileWriter *self, PyObject *Py_UNUSED(ignored)) {
     if (self->handle == SABCTOOLS_INVALID_HANDLE) {
         PyErr_SetString(PyExc_ValueError, "FileWriter is closed");
@@ -548,6 +585,8 @@ static PyMethodDef FileWriter_methods[] = {
      PyDoc_STR("close()\n\nClose the file. Idempotent, and waits for writes in flight.")},
     {"flush", (PyCFunction)FileWriter_flush, METH_NOARGS,
      PyDoc_STR("flush()\n\nWait for queued write-behind writes, raising the first that failed.")},
+    {"failed_ranges", (PyCFunction)FileWriter_failed_ranges, METH_NOARGS,
+     PyDoc_STR("failed_ranges() -> list[tuple[int, int]]\n\nWait for queued write-behind writes, then list the offset and length of\nthose that failed, sorted and merged.")},
     {"__enter__", (PyCFunction)FileWriter_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)FileWriter_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}

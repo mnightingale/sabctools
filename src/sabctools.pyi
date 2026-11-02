@@ -198,6 +198,10 @@ class FileWriter:
     def flush(self) -> None:
         """Wait for queued write-behind writes to this file, raising the first that failed."""
 
+    def failed_ranges(self) -> list[tuple[int, int]]:
+        """Wait for queued write-behind writes to this file, then list the offset and length
+        of those that failed, sorted and merged."""
+
     def close(self) -> None:
         """Close the file. Idempotent, and waits for any writes still in flight."""
 

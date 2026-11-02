@@ -28,6 +28,8 @@
 #include <mutex>
 #include <new>
 #include <shared_mutex>
+#include <utility>
+#include <vector>
 
 #if defined(_WIN32) || defined(__CYGWIN__)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -76,6 +78,9 @@ typedef struct {
     // First failure of a write-behind write, held until flush() raises it
     std::atomic<unsigned long> async_error;
     std::atomic<bool> async_closed;
+    // Offset and length of every write-behind write that failed
+    std::mutex failed_lock;
+    std::vector<std::pair<long long, Py_ssize_t>> failed;
 } FileWriter;
 
 bool filewriter_init(PyObject *);

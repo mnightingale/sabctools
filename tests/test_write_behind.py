@@ -1,5 +1,8 @@
+import errno
 import gc
 import os
+import signal
+import sys
 import threading
 
 import pytest
@@ -215,4 +218,49 @@ class TestErrors:
         decoder.expect("ok", writer)
         feed(decoder, build_article(os.urandom(1000)))
         writer.flush()
+        writer.close()
+
+    def test_no_failed_ranges_after_success(self, tmp_path):
+        writer = sabctools.FileWriter(str(tmp_path / "ok.bin"))
+        decoder = sabctools.Decoder(STAGING)
+        decoder.expect("ok", writer)
+        feed(decoder, build_article(os.urandom(1000)))
+        assert writer.failed_ranges() == []
+        writer.close()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="needs RLIMIT_FSIZE")
+    def test_failed_ranges_cover_what_did_not_land(self, tmp_path):
+        import resource
+
+        limit = 1_000_000
+        size = 600_000
+        count = 4
+        writer = sabctools.FileWriter(str(tmp_path / "limited.bin"))
+        decoder = sabctools.Decoder(STAGING)
+        wire = b""
+        for index in range(count):
+            decoder.expect(index, writer)
+            wire += build_article(os.urandom(size), begin=index * size, total=count * size, part=index + 1)
+
+        previous_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        previous_limit = resource.getrlimit(resource.RLIMIT_FSIZE)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, previous_limit[1]))
+        try:
+            responses = feed(decoder, wire)
+            with pytest.raises(OSError) as error:
+                writer.flush()
+            ranges = writer.failed_ranges()
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, previous_limit)
+            signal.signal(signal.SIGXFSZ, previous_handler)
+
+        assert error.value.errno == errno.EFBIG
+        assert ranges
+        assert ranges[0][0] < limit
+        # Every article past the limit either failed on its response or lies in a failed range
+        for index, response in enumerate(responses):
+            begin = index * size
+            if begin + size <= limit or response.sink_failed:
+                continue
+            assert any(start <= max(begin, limit) and begin + size <= start + length for start, length in ranges)
         writer.close()
