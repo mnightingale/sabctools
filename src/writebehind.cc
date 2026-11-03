@@ -146,25 +146,30 @@ Py_ssize_t writebehind_buffer_size() {
 char *writebehind_acquire(bool wait) {
     std::unique_lock<std::mutex> guard(pool_lock);
     trimming = false;
-    if (free_buffers.empty() && allocated < pool_buffers) {
+    if (free_buffers.empty() && allocated >= pool_buffers) {
+        if (!wait) return nullptr;
+        std::chrono::steady_clock::time_point started_at = std::chrono::steady_clock::now();
+        buffer_free.wait(guard, [] {
+            trimming = false;
+            return !free_buffers.empty() || allocated < pool_buffers;
+        });
+        acquire_waits.fetch_add(1, std::memory_order_relaxed);
+        acquire_wait_nanos.fetch_add(
+            (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at)
+                .count(),
+            std::memory_order_relaxed);
+    }
+    if (free_buffers.empty()) {
         allocated++;
         guard.unlock();
         char *buffer = buffer_map();
         if (!buffer) {
             guard.lock();
             allocated--;
+            guard.unlock();
+            buffer_free.notify_one();
         }
         return buffer;
-    }
-    if (free_buffers.empty()) {
-        if (!wait) return nullptr;
-        std::chrono::steady_clock::time_point started_at = std::chrono::steady_clock::now();
-        buffer_free.wait(guard, [] { return !free_buffers.empty(); });
-        acquire_waits.fetch_add(1, std::memory_order_relaxed);
-        acquire_wait_nanos.fetch_add(
-            (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at)
-                .count(),
-            std::memory_order_relaxed);
     }
     char *buffer = free_buffers.back();
     free_buffers.pop_back();
