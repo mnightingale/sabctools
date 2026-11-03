@@ -4,6 +4,7 @@ import os
 import signal
 import sys
 import threading
+import time
 
 import pytest
 
@@ -195,6 +196,25 @@ class TestTrim:
         assert stats["free"] == stats["allocated"]
         writer.close()
         assert open(writer.path, "rb").read() == expected
+
+    def test_trims_do_not_strand_waiting_decoders(self, tmp_path):
+        writer = sabctools.FileWriter(str(tmp_path / "waiting.bin"))
+        wire = build_article(os.urandom(BUFFERS * 4 * STAGING))
+
+        def decode():
+            decoder = sabctools.Decoder(STAGING)
+            for _ in range(3):
+                decoder.expect("waiting", writer)
+                feed(decoder, wire)
+
+        threads = [threading.Thread(target=decode, daemon=True) for _ in range(BUFFERS)]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 10
+        while any(thread.is_alive() for thread in threads) and time.monotonic() < deadline:
+            sabctools.write_behind_trim()
+        assert not any(thread.is_alive() for thread in threads), "a trim stranded a waiting decoder"
+        writer.close()
 
 
 class TestErrors:
