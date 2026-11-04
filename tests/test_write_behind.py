@@ -19,7 +19,7 @@ STAGING = 256 * 1024
 
 @pytest.fixture(autouse=True)
 def write_behind():
-    sabctools.set_write_behind(THREADS, BUFFERS)
+    sabctools.set_write_behind(THREADS, BUFFERS * STAGING)
     yield
     sabctools.set_write_behind(0)
 
@@ -33,9 +33,13 @@ class TestConfiguration:
 
     def test_the_size_cannot_change_once_started(self):
         with pytest.raises(RuntimeError):
-            sabctools.set_write_behind(THREADS + 1, BUFFERS)
+            sabctools.set_write_behind(THREADS + 1, BUFFERS * STAGING)
 
-    def test_enabling_needs_buffers(self):
+    def test_memory_is_rounded_down_to_whole_buffers(self):
+        sabctools.set_write_behind(THREADS, (BUFFERS + 1) * STAGING - 1)
+        assert sabctools.write_behind_stats()["buffers"] == BUFFERS
+
+    def test_enabling_needs_memory(self):
         with pytest.raises(ValueError):
             sabctools.set_write_behind(THREADS)
 

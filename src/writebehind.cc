@@ -19,6 +19,7 @@
 #include "writebehind.h"
 #include "yenc.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -214,15 +215,15 @@ void writebehind_drain(FileWriter *writer) {
 }
 
 PyObject *writebehind_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs) {
-    static const char *keywords[] = {"threads", "buffers", NULL};
+    static const char *keywords[] = {"threads", "memory", NULL};
     int threads = 0;
-    Py_ssize_t buffers = 0;
+    Py_ssize_t memory = 0;
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|n:set_write_behind", const_cast<char **>(keywords), &threads,
-                                     &buffers))
+                                     &memory))
         return NULL;
 
-    if (threads < 0 || buffers < 0) {
-        PyErr_SetString(PyExc_ValueError, "threads and buffers must not be negative");
+    if (threads < 0 || memory < 0) {
+        PyErr_SetString(PyExc_ValueError, "threads and memory must not be negative");
         return NULL;
     }
 
@@ -231,10 +232,11 @@ PyObject *writebehind_configure(PyObject *Py_UNUSED(module), PyObject *args, PyO
         Py_RETURN_NONE;
     }
 
-    if (buffers == 0) {
-        PyErr_SetString(PyExc_ValueError, "buffers must be given when enabling write-behind");
+    if (memory == 0) {
+        PyErr_SetString(PyExc_ValueError, "memory must be given when enabling write-behind");
         return NULL;
     }
+    Py_ssize_t buffers = std::max<Py_ssize_t>(1, memory / writebehind_buffer_size());
 
     if (started) {
         if (threads != pool_threads || buffers != pool_buffers) {

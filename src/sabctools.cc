@@ -88,7 +88,7 @@ static PyMethodDef sabctools_methods[] = {
         "set_write_behind",
         (PyCFunction)(void (*)(void))writebehind_configure,
         METH_VARARGS | METH_KEYWORDS,
-        "set_write_behind(threads, buffers=0)"
+        "set_write_behind(threads, memory=0)"
     },
     {
         "write_behind_stats",

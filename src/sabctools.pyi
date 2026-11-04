@@ -51,13 +51,13 @@ class WriteBehindStats(TypedDict):
     """Times a decoder found the pool empty and waited for a buffer"""
     wait_nanos: int
 
-def set_write_behind(threads: int, buffers: int = 0) -> None:
+def set_write_behind(threads: int, memory: int = 0) -> None:
     """Hand streamed article data to background writer threads instead of writing inline.
 
-    Up to buffers staging buffers of 256 KiB are shared by every Decoder, allocated on
-    first use. A decoder that finds all of them in use waits for a write to finish. threads=0 turns it off
-    for buffers taken from then on. Once started, the thread and buffer counts cannot
-    change.
+    Up to memory bytes of staging buffers, at least one, are shared by every Decoder,
+    allocated on first use. A decoder that finds all of them in use waits for a write to
+    finish. threads=0 turns it off for buffers taken from then on. Once started, the
+    thread count and the number of buffers cannot change.
 
     A failed write-behind write cannot be reported on the response it came from, which
     has already completed. It is recorded on the FileWriter: later responses to that
