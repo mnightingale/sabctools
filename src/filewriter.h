@@ -78,12 +78,18 @@ typedef struct {
     PyObject *weakreflist;
     // Write-behind writes queued or in progress for this file
     std::atomic<long> pending;
+    // Decoder requests and responses streaming into this file
+    std::atomic<long> streams;
     // First failure of a write-behind write, held until flush() raises it
     std::atomic<unsigned long> async_error;
     std::atomic<bool> async_closed;
     // Offset and length of every write-behind write that failed
     std::mutex failed_lock;
     std::vector<std::pair<long long, Py_ssize_t>> failed;
+    // Guarded by the write-behind pool lock: the pool holds a reference to this writer,
+    // and a write-behind write failed since the last flush(), failed_ranges() or close()
+    bool pool_held;
+    bool failure_unreported;
 } FileWriter;
 
 bool filewriter_init(PyObject *);
@@ -106,6 +112,12 @@ Py_ssize_t filewriter_write_raw(FileWriter *writer, const char *buffer, Py_ssize
 
 /* Raise the error reported by filewriter_write_raw. Requires the GIL. */
 void filewriter_raise(FileWriter *writer, bool was_closed, unsigned long error_code);
+
+/* Take a reference to writer for a stream into it, or do nothing for NULL */
+void filewriter_stream_begin(PyObject *writer);
+
+/* Release a reference taken by filewriter_stream_begin, or do nothing for NULL */
+void filewriter_stream_end(PyObject *writer);
 
 /* Totals for every write through every FileWriter. Requires the GIL. */
 PyObject *filewriter_write_stats(PyObject *, PyObject *, PyObject *);

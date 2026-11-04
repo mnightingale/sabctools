@@ -454,11 +454,18 @@ static int NNTPResponse_traverse(NNTPResponse* self, visitproc visit, void* arg)
     return 0;
 }
 
+static void NNTPResponse_release_sink(NNTPResponse* self)
+{
+    PyObject* sink = self->sink;
+    self->sink = nullptr;
+    filewriter_stream_end(sink);
+}
+
 static int NNTPResponse_clear(NNTPResponse* self)
 {
     Py_CLEAR(self->data);
     Py_CLEAR(self->context);
-    Py_CLEAR(self->sink);
+    NNTPResponse_release_sink(self);
     Py_CLEAR(self->sink_error);
     Py_CLEAR(self->lines);
     Py_CLEAR(self->format);
@@ -566,8 +573,7 @@ static PyObject* NNTPResponse_get_block_crcs(NNTPResponse* self, void *closure)
     if (self->part_size > 0 && self->bytes_decoded > self->part_size) {
         Py_RETURN_NONE;
     }
-    // Only a sink stops at max_end
-    if (self->sink && self->max_end > 0 && self->part_begin + self->bytes_decoded > self->max_end) {
+    if (self->max_end > 0 && self->part_begin + self->bytes_decoded > self->max_end) {
         Py_RETURN_NONE;
     }
 
@@ -1631,7 +1637,7 @@ static void Decoder_drop_pending(Decoder *self)
 {
     for (PendingRequest& request : self->pending) {
         Py_XDECREF(request.context);
-        Py_XDECREF(request.sink);
+        filewriter_stream_end(request.sink);
     }
     self->pending.clear();
 }
@@ -1713,7 +1719,8 @@ Py_ssize_t Decoder_decode(Decoder *self, const char* data, const Py_ssize_t size
             instance->context = request.context;
             instance->sink = request.sink;
             instance->block_size = request.block_size;
-            instance->max_end = request.max_end;
+            // Only a sink stops at max_end
+            instance->max_end = request.sink ? request.max_end : 0;
         }
         // Defensive, and deliberately so. A response that ran to the end of its body
         // has already flushed, so this is normally a no-op - but tp_clear drops a
@@ -1779,6 +1786,7 @@ static bool Decoder_process_length(Decoder *self, Py_ssize_t length)
             }
 
             // Push completed decoder
+            NNTPResponse_release_sink(self->response);
             self->deque.push_back(self->response);
             self->response = nullptr;
 
@@ -1955,7 +1963,7 @@ static PyObject* Decoder_expect(Decoder *self, PyObject *args, PyObject *kwds)
     request.block_size = block_size;
     request.max_end = max_end;
     Py_XINCREF(request.context);
-    Py_XINCREF(request.sink);
+    filewriter_stream_begin(request.sink);
     self->pending.push_back(request);
 
     Py_RETURN_NONE;

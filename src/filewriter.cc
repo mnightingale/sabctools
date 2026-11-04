@@ -56,10 +56,13 @@ static PyObject *FileWriter_new(PyTypeObject *type, PyObject *Py_UNUSED(args), P
     // and destroyed by hand
     new (&self->lock) std::shared_mutex();
     new (&self->pending) std::atomic<long>(0);
+    new (&self->streams) std::atomic<long>(0);
     new (&self->async_error) std::atomic<unsigned long>(0);
     new (&self->async_closed) std::atomic<bool>(false);
     new (&self->failed_lock) std::mutex();
     new (&self->failed) std::vector<std::pair<long long, Py_ssize_t>>();
+    self->pool_held = false;
+    self->failure_unreported = false;
     return (PyObject *)self;
 }
 
@@ -398,6 +401,8 @@ static PyObject *FileWriter_close(FileWriter *self, PyObject *Py_UNUSED(ignored)
         filewriter_close_handle(self);
     }
     Py_END_ALLOW_THREADS
+    writebehind_disown(self);
+    writebehind_reap();
     Py_RETURN_NONE;
 }
 
@@ -410,6 +415,8 @@ static PyObject *FileWriter_flush(FileWriter *self, PyObject *Py_UNUSED(ignored)
     Py_BEGIN_ALLOW_THREADS
     writebehind_drain(self);
     Py_END_ALLOW_THREADS
+    writebehind_disown(self);
+    writebehind_reap();
 
     unsigned long error_code = self->async_error.load(std::memory_order_relaxed);
     if (error_code) {
@@ -434,6 +441,8 @@ static PyObject *FileWriter_failed_ranges(FileWriter *self, PyObject *Py_UNUSED(
     }
     std::sort(ranges.begin(), ranges.end());
     Py_END_ALLOW_THREADS
+    writebehind_disown(self);
+    writebehind_reap();
 
     PyObject *result = PyList_New(0);
     if (!result) return NULL;
@@ -537,6 +546,23 @@ static PyObject *FileWriter_get_closed(FileWriter *self, void *Py_UNUSED(closure
     return PyBool_FromLong(closed);
 }
 
+static PyObject *FileWriter_get_in_use(FileWriter *self, void *Py_UNUSED(closure)) {
+    return PyBool_FromLong(self->streams.load(std::memory_order_acquire) > 0);
+}
+
+void filewriter_stream_begin(PyObject *writer) {
+    writebehind_reap();
+    if (!writer) return;
+    Py_INCREF(writer);
+    reinterpret_cast<FileWriter *>(writer)->streams.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void filewriter_stream_end(PyObject *writer) {
+    if (!writer) return;
+    reinterpret_cast<FileWriter *>(writer)->streams.fetch_sub(1, std::memory_order_acq_rel);
+    if (!writebehind_adopt(reinterpret_cast<FileWriter *>(writer))) Py_DECREF(writer);
+}
+
 /* No lock: path is set once during __init__ and only cleared in dealloc, by which
    point nothing else can hold a reference. close() never touches it. */
 static PyObject *FileWriter_get_path(FileWriter *self, void *Py_UNUSED(closure)) {
@@ -595,6 +621,8 @@ static PyMethodDef FileWriter_methods[] = {
 
 static PyGetSetDef FileWriter_getset[] = {
     {"closed", (getter)FileWriter_get_closed, NULL, PyDoc_STR("Has the file been closed"), NULL},
+    {"in_use", (getter)FileWriter_get_in_use, NULL,
+     PyDoc_STR("Is a Decoder request or response still streaming into this file"), NULL},
     {"path", (getter)FileWriter_get_path, NULL, PyDoc_STR("Path the file was opened with"), NULL},
     {"size", (getter)FileWriter_get_size, NULL, PyDoc_STR("Current length of the file in bytes"), NULL},
     {NULL, NULL, NULL, NULL, NULL}

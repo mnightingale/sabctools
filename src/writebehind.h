@@ -51,6 +51,19 @@ void writebehind_submit(FileWriter *writer, char *buffer, Py_ssize_t length, lon
 /* Wait until every write submitted for this writer has completed */
 void writebehind_drain(FileWriter *writer);
 
+/*
+ * Take over a stream's reference to this writer while writes are queued for it or a
+ * failure is unreported, so the failure outlives every other reference. Returns false
+ * when the caller keeps the reference. Requires the GIL.
+ */
+bool writebehind_adopt(FileWriter *writer);
+
+/* Drop the pool's reference once nothing is queued, the failure now reported. Requires the GIL. */
+void writebehind_disown(FileWriter *writer);
+
+/* Drop the pool's references to writers whose writes all landed. Requires the GIL. */
+void writebehind_reap();
+
 PyObject *writebehind_configure(PyObject *, PyObject *, PyObject *);
 
 PyObject *writebehind_stats(PyObject *, PyObject *, PyObject *);

@@ -69,6 +69,8 @@ struct Pool {
     Py_ssize_t allocated = 0;
     // Set by trim: buffers coming back are freed rather than kept, until the next acquire
     bool trimming = false;
+    // Writers the pool held whose writes all landed, for writebehind_reap to release
+    std::vector<FileWriter *> released;
 };
 Pool &pool = *new Pool();
 std::mutex &pool_lock = pool.lock;
@@ -79,6 +81,8 @@ std::deque<Job> &jobs = pool.jobs;
 std::vector<char *> &free_buffers = pool.free_buffers;
 Py_ssize_t &allocated = pool.allocated;
 bool &trimming = pool.trimming;
+std::vector<FileWriter *> &released = pool.released;
+std::atomic<bool> any_released{false};
 std::atomic<bool> enabled{false};
 bool started = false;
 int pool_threads = 0;
@@ -116,7 +120,8 @@ void writer_thread() {
             unsigned long none = 0;
             job.writer->async_error.compare_exchange_strong(none, error_code, std::memory_order_relaxed);
         }
-        if (was_closed || error_code) {
+        bool failed = was_closed || error_code;
+        if (failed) {
             std::lock_guard<std::mutex> guard(job.writer->failed_lock);
             job.writer->failed.emplace_back(job.offset, job.length);
         }
@@ -125,7 +130,13 @@ void writer_thread() {
         {
             std::lock_guard<std::mutex> guard(pool_lock);
             discard = return_buffer_locked(job.buffer);
-            job.writer->pending.fetch_sub(1, std::memory_order_release);
+            if (failed) job.writer->failure_unreported = true;
+            if (job.writer->pending.fetch_sub(1, std::memory_order_release) == 1 && job.writer->pool_held &&
+                !job.writer->failure_unreported) {
+                job.writer->pool_held = false;
+                released.push_back(job.writer);
+                any_released.store(true, std::memory_order_release);
+            }
         }
         buffer_unmap(discard);
         buffer_free.notify_one();
@@ -195,6 +206,7 @@ PyObject *writebehind_trim(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(igno
         allocated -= (Py_ssize_t)discard.size();
     }
     for (char *buffer : discard) buffer_unmap(buffer);
+    writebehind_reap();
     Py_RETURN_NONE;
 }
 
@@ -211,6 +223,40 @@ void writebehind_drain(FileWriter *writer) {
     if (writer->pending.load(std::memory_order_acquire) == 0) return;
     std::unique_lock<std::mutex> guard(pool_lock);
     job_done.wait(guard, [writer] { return writer->pending.load(std::memory_order_acquire) == 0; });
+}
+
+bool writebehind_adopt(FileWriter *writer) {
+    std::lock_guard<std::mutex> guard(pool_lock);
+    if (writer->pool_held ||
+        (writer->pending.load(std::memory_order_acquire) == 0 && !writer->failure_unreported)) {
+        return false;
+    }
+    writer->pool_held = true;
+    return true;
+}
+
+void writebehind_disown(FileWriter *writer) {
+    bool release = false;
+    {
+        std::lock_guard<std::mutex> guard(pool_lock);
+        if (writer->pending.load(std::memory_order_acquire) == 0) {
+            writer->failure_unreported = false;
+            release = writer->pool_held;
+            writer->pool_held = false;
+        }
+    }
+    if (release) Py_DECREF(writer);
+}
+
+void writebehind_reap() {
+    if (!any_released.load(std::memory_order_acquire)) return;
+    std::vector<FileWriter *> writers;
+    {
+        std::lock_guard<std::mutex> guard(pool_lock);
+        writers.swap(released);
+        any_released.store(false, std::memory_order_relaxed);
+    }
+    for (FileWriter *writer : writers) Py_DECREF(writer);
 }
 
 PyObject *writebehind_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs) {

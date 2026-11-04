@@ -5,6 +5,7 @@ import signal
 import sys
 import threading
 import time
+import weakref
 
 import pytest
 
@@ -284,3 +285,54 @@ class TestErrors:
                 continue
             assert any(start <= max(begin, limit) and begin + size <= start + length for start, length in ranges)
         writer.close()
+
+
+class TestLifetime:
+    def test_a_dropped_writer_is_released_once_its_writes_land(self, tmp_path):
+        writer = sabctools.FileWriter(str(tmp_path / "released.bin"))
+        reference = weakref.ref(writer)
+        decoder = sabctools.Decoder(STAGING)
+        decoder.expect("released", writer)
+        response = feed(decoder, build_article(os.urandom(4 * STAGING)))[0]
+        del writer, response
+        gc.collect()
+
+        deadline = time.monotonic() + 10
+        while reference() is not None and time.monotonic() < deadline:
+            sabctools.write_behind_trim()
+            time.sleep(0.01)
+        assert reference() is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="needs RLIMIT_FSIZE")
+    def test_a_dropped_writer_keeps_its_failure_until_flushed(self, tmp_path):
+        import resource
+
+        limit = 100_000
+        writer = sabctools.FileWriter(str(tmp_path / "failed.bin"))
+        reference = weakref.ref(writer)
+        decoder = sabctools.Decoder(STAGING)
+        decoder.expect("failed", writer)
+
+        previous_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        previous_limit = resource.getrlimit(resource.RLIMIT_FSIZE)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, previous_limit[1]))
+        try:
+            response = feed(decoder, build_article(os.urandom(4 * STAGING)))[0]
+            del writer, response
+            gc.collect()
+            for _ in range(50):
+                sabctools.write_behind_trim()
+                time.sleep(0.01)
+            writer = reference()
+            assert writer is not None
+            with pytest.raises(OSError) as error:
+                writer.flush()
+            assert writer.failed_ranges()
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, previous_limit)
+            signal.signal(signal.SIGXFSZ, previous_handler)
+
+        assert error.value.errno == errno.EFBIG
+        del writer
+        gc.collect()
+        assert reference() is None
