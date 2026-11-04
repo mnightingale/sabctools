@@ -176,6 +176,8 @@ class FileWriter:
     def __init__(self, path: str | bytes | PathLike) -> None:
         """Open path for writing, creating it if it does not exist."""
     closed: bool
+    in_use: bool
+    """A Decoder request or response is still streaming into this file"""
     path: Optional[str]
     size: int
     """Current length of the file, read from the owned handle"""

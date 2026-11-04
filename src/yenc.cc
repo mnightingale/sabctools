@@ -460,11 +460,18 @@ static int NNTPResponse_traverse(NNTPResponse* self, visitproc visit, void* arg)
     return 0;
 }
 
+static void NNTPResponse_release_sink(NNTPResponse* self)
+{
+    PyObject* sink = self->sink;
+    self->sink = nullptr;
+    filewriter_stream_end(sink);
+}
+
 static int NNTPResponse_clear(NNTPResponse* self)
 {
     Py_CLEAR(self->data);
     Py_CLEAR(self->context);
-    Py_CLEAR(self->sink);
+    NNTPResponse_release_sink(self);
     Py_CLEAR(self->sink_error);
     Py_CLEAR(self->lines);
     Py_CLEAR(self->format);
@@ -478,7 +485,7 @@ static void NNTPResponse_dealloc(NNTPResponse* self)
     PyObject_GC_UnTrack(self);
     Py_XDECREF(self->data);
     Py_XDECREF(self->context);
-    Py_XDECREF(self->sink);
+    filewriter_stream_end(self->sink);
     Py_XDECREF(self->sink_error);
     Py_XDECREF(self->lines);
     Py_XDECREF(self->format);
@@ -1550,7 +1557,7 @@ static int Decoder_clear(Decoder *self)
     Py_CLEAR(self->response);
     for (PendingRequest& request : self->pending) {
         Py_XDECREF(request.context);
-        Py_XDECREF(request.sink);
+        filewriter_stream_end(request.sink);
     }
     self->pending.clear();
     return 0;
@@ -1565,7 +1572,7 @@ static void Decoder_dealloc(Decoder *self)
     Py_XDECREF(self->response);
     for (PendingRequest& request : self->pending) {
         Py_XDECREF(request.context);
-        Py_XDECREF(request.sink);
+        filewriter_stream_end(request.sink);
     }
     self->deque.~deque();
     self->pending.~deque();
@@ -1702,6 +1709,7 @@ static PyObject* Decoder_process(Decoder *self, PyObject *arg)
             }
 
             // Push completed decoder
+            NNTPResponse_release_sink(self->response);
             self->deque.push_back(self->response);
             self->response = nullptr;
 
@@ -1771,7 +1779,7 @@ static PyObject* Decoder_expect(Decoder *self, PyObject *args)
     request.context = context;
     request.sink = sink;
     Py_XINCREF(request.context);
-    Py_XINCREF(request.sink);
+    filewriter_stream_begin(request.sink);
     self->pending.push_back(request);
 
     Py_RETURN_NONE;
@@ -1782,7 +1790,7 @@ static PyObject* Decoder_clear_expected(Decoder *self, PyObject *Py_UNUSED(ignor
 {
     for (PendingRequest& request : self->pending) {
         Py_XDECREF(request.context);
-        Py_XDECREF(request.sink);
+        filewriter_stream_end(request.sink);
     }
     self->pending.clear();
     Py_RETURN_NONE;

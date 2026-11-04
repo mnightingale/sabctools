@@ -56,6 +56,7 @@ static PyObject *FileWriter_new(PyTypeObject *type, PyObject *Py_UNUSED(args), P
     // and destroyed by hand
     new (&self->lock) std::shared_mutex();
     new (&self->pending) std::atomic<long>(0);
+    new (&self->streams) std::atomic<long>(0);
     new (&self->async_error) std::atomic<unsigned long>(0);
     new (&self->async_closed) std::atomic<bool>(false);
     new (&self->failed_lock) std::mutex();
@@ -536,6 +537,22 @@ static PyObject *FileWriter_get_closed(FileWriter *self, void *Py_UNUSED(closure
     return PyBool_FromLong(closed);
 }
 
+static PyObject *FileWriter_get_in_use(FileWriter *self, void *Py_UNUSED(closure)) {
+    return PyBool_FromLong(self->streams.load(std::memory_order_acquire) > 0);
+}
+
+void filewriter_stream_begin(PyObject *writer) {
+    if (!writer) return;
+    Py_INCREF(writer);
+    reinterpret_cast<FileWriter *>(writer)->streams.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void filewriter_stream_end(PyObject *writer) {
+    if (!writer) return;
+    reinterpret_cast<FileWriter *>(writer)->streams.fetch_sub(1, std::memory_order_acq_rel);
+    Py_DECREF(writer);
+}
+
 /* No lock: path is set once during __init__ and only cleared in dealloc, by which
    point nothing else can hold a reference. close() never touches it. */
 static PyObject *FileWriter_get_path(FileWriter *self, void *Py_UNUSED(closure)) {
@@ -594,6 +611,8 @@ static PyMethodDef FileWriter_methods[] = {
 
 static PyGetSetDef FileWriter_getset[] = {
     {"closed", (getter)FileWriter_get_closed, NULL, PyDoc_STR("Has the file been closed"), NULL},
+    {"in_use", (getter)FileWriter_get_in_use, NULL,
+     PyDoc_STR("Is a Decoder request or response still streaming into this file"), NULL},
     {"path", (getter)FileWriter_get_path, NULL, PyDoc_STR("Path the file was opened with"), NULL},
     {"size", (getter)FileWriter_get_size, NULL, PyDoc_STR("Current length of the file in bytes"), NULL},
     {NULL, NULL, NULL, NULL, NULL}

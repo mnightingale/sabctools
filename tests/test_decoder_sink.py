@@ -544,3 +544,67 @@ class TestSinkError:
         assert response.sink_error is not None
         gc.collect()
         assert str(response.sink_error)  # still usable after a collection
+
+
+class TestInUse:
+    def test_a_new_writer_is_not_in_use(self, writer):
+        assert writer.in_use is False
+
+    def test_a_python_reference_does_not_count(self, writer):
+        held = [writer, writer]
+        assert writer.in_use is False
+        del held
+
+    def test_in_use_from_expect_until_the_response_completes(self, writer):
+        decoder = sabctools.Decoder(64 * 1024)
+        decoder.expect("article", writer)
+        assert writer.in_use is True
+
+        wire = memoryview(build_article(b"z" * (512 * 1024)))
+        buffer = memoryview(decoder)
+        count = min(len(buffer), len(wire) // 2)
+        buffer[:count] = wire[:count]
+        buffer.release()
+        decoder.process(count)
+        assert writer.in_use is True, "the body is still arriving"
+
+        responses = feed(decoder, bytes(wire[count:]))
+        assert len(responses) == 1
+        assert writer.in_use is False, "the response is complete but still held"
+
+    def test_counts_every_request_into_the_same_file(self, writer):
+        decoder = sabctools.Decoder(1 << 20)
+        decoder.expect("first", writer)
+        decoder.expect("second", writer)
+
+        feed(decoder, build_article(b"x" * 1000))
+        assert writer.in_use is True, "the second request is still pending"
+
+        feed(decoder, build_article(b"y" * 1000, begin=1000))
+        assert writer.in_use is False
+
+    def test_clear_expected_releases_it(self, writer):
+        decoder = sabctools.Decoder(4096)
+        decoder.expect("article", writer)
+        decoder.clear_expected()
+        assert writer.in_use is False
+
+    def test_dropping_the_decoder_releases_it(self, writer):
+        decoder = sabctools.Decoder(64 * 1024)
+        decoder.expect("pending", writer)
+        decoder.expect("arriving", writer)
+        wire = build_article(b"z" * (512 * 1024))
+        buffer = memoryview(decoder)
+        buffer[:1024] = wire[:1024]
+        buffer.release()
+        decoder.process(1024)
+        assert writer.in_use is True
+
+        del decoder
+        gc.collect()
+        assert writer.in_use is False
+
+    def test_a_none_sink_does_not_count(self, writer):
+        decoder = sabctools.Decoder(4096)
+        decoder.expect("article", None)
+        assert writer.in_use is False
