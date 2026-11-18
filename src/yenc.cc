@@ -340,7 +340,9 @@ static inline void NNTPResponse_process_yenc_header(NNTPResponse* instance, std:
         if (instance->file_size > YENC_MAX_FILE_SIZE) {
             instance->file_size = 0;
         }
-        if (!extract_int(line, " part=", instance->part)) {
+        if (extract_int(line, " part=", instance->part)) {
+            instance->part_mismatch = instance->expected_part > 0 && instance->part > 0 && instance->part != instance->expected_part;
+        } else {
             // Not multi-part, so body starts immediately after =ybegin
             instance->body = true;
             instance->part_begin = 0;
@@ -509,7 +511,7 @@ static PyObject* NNTPResponse_get_context(NNTPResponse* self, void* closure)
 
 static PyObject* NNTPResponse_get_data(NNTPResponse* self, void* closure)
 {
-    if (!self->eof || !self->bytes_decoded || self->data == NULL) {
+    if (!self->eof || !self->bytes_decoded || self->data == NULL || self->part_mismatch) {
         Py_RETURN_NONE;
     }
     Py_INCREF(self->data);
@@ -549,7 +551,7 @@ static PyObject* NNTPResponse_get_crc(NNTPResponse* self, void *closure)
         Py_RETURN_NONE;
     }
 
-    if (self->sink_unplaced) {
+    if (self->sink_unplaced || self->part_mismatch) {
         Py_RETURN_NONE;
     }
 
@@ -891,7 +893,7 @@ static bool NNTPResponse_decode_yenc(Decoder *owner, NNTPResponse *instance, con
         if (instance->bytes_decoded == 0) {
             // Where this article belongs in the file, straight from its =ypart header
             instance->sink_offset = instance->part_begin;
-            instance->sink_unplaced = instance->has_part && instance->part_size == 0;
+            instance->sink_unplaced = (instance->has_part && instance->part_size == 0) || instance->part_mismatch;
         }
         return NNTPResponse_decode_yenc_sink(owner, instance, buf, buf_len, read);
     }
@@ -1350,6 +1352,7 @@ static PyObject* NNTPResponse_new(PyTypeObject* type, PyObject* args, PyObject* 
     instance->bytes_read = 0;
     instance->file_size = 0;
     instance->part = 0;
+    instance->expected_part = 0;
     instance->part_begin = 0;
     instance->part_end = 0;
     instance->part_size = 0;
@@ -1367,6 +1370,7 @@ static PyObject* NNTPResponse_new(PyTypeObject* type, PyObject* args, PyObject* 
     instance->has_baddata = false;
     instance->sink_failed = false;
     instance->sink_unplaced = false;
+    instance->part_mismatch = false;
     instance->block_size = 0;
     instance->pieces = nullptr;
     instance->piece_count = 0;
@@ -1398,6 +1402,10 @@ static PyMemberDef NNTPResponse_members[] = {
     {"status_code", T_INT, offsetof(NNTPResponse, status_code), READONLY, ""},
     {"message", T_OBJECT_EX, offsetof(NNTPResponse, message), READONLY, ""},
     {"file_size", T_LONGLONG, offsetof(NNTPResponse, file_size), READONLY, ""},
+    {"part", T_PYSSIZET, offsetof(NNTPResponse, part), READONLY,
+     PyDoc_STR("The =ybegin part number, 0 when absent")},
+    {"part_mismatch", T_BOOL, offsetof(NNTPResponse, part_mismatch), READONLY,
+     PyDoc_STR("The =ybegin part differs from the part given to Decoder.expect(), so the body was not kept")},
     {"part_begin", T_LONGLONG, offsetof(NNTPResponse, part_begin), READONLY, ""},
     {"block_size", T_LONGLONG, offsetof(NNTPResponse, block_size), READONLY,
      PyDoc_STR("The block_size given to Decoder.expect(), 0 for none")},
@@ -1675,6 +1683,7 @@ Py_ssize_t Decoder_decode(Decoder *self, const char* data, const Py_ssize_t size
             instance->context = request.context;
             instance->sink = request.sink;
             instance->block_size = request.block_size;
+            instance->expected_part = request.expected_part;
         }
         // Defensive, and deliberately so. A response that ran to the end of its body
         // has already flushed, so this is normally a no-op - but tp_clear drops a
@@ -1798,16 +1807,22 @@ static PyObject* Decoder_process(Decoder *self, PyObject *arg)
  */
 static PyObject* Decoder_expect(Decoder *self, PyObject *args, PyObject *kwds)
 {
-    static const char* kwlist[] = {"context", "sink", "block_size", NULL};
+    static const char* kwlist[] = {"context", "sink", "block_size", "part", NULL};
     PyObject* context = nullptr;
     PyObject* sink = nullptr;
     long long block_size = 0;
+    Py_ssize_t part = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|OL:expect", (char**)kwlist, &context, &sink, &block_size))
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|OLn:expect", (char**)kwlist, &context, &sink, &block_size, &part))
         return NULL;
 
     if (block_size < 0) {
         PyErr_SetString(PyExc_ValueError, "block_size must not be negative");
+        return NULL;
+    }
+
+    if (part < 0) {
+        PyErr_SetString(PyExc_ValueError, "part must not be negative");
         return NULL;
     }
 
@@ -1824,6 +1839,7 @@ static PyObject* Decoder_expect(Decoder *self, PyObject *args, PyObject *kwds)
     request.context = context;
     request.sink = sink;
     request.block_size = block_size;
+    request.expected_part = part;
     Py_XINCREF(request.context);
     Py_XINCREF(request.sink);
     self->pending.push_back(request);
@@ -1909,7 +1925,7 @@ static PyGetSetDef Decoder_getsetters[] = {
 static PyMethodDef Decoder_methods[] = {
     {"process", (PyCFunction)Decoder_process, METH_O, ""},
     {"expect", (PyCFunction)(void (*)(void))Decoder_expect, METH_VARARGS | METH_KEYWORDS,
-     PyDoc_STR("expect(context, sink=None, block_size=0)\n\nRecord a sent request and how its response should be handled.")},
+     PyDoc_STR("expect(context, sink=None, block_size=0, part=0)\n\nRecord a sent request and how its response should be handled.")},
     {"clear_expected", (PyCFunction)Decoder_clear_expected, METH_NOARGS,
      PyDoc_STR("clear_expected()\n\nForget every pending request.")},
     {NULL}

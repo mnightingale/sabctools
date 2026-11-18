@@ -118,6 +118,7 @@ typedef struct {
 	PyObject* context; // opaque to us, handed back as NNTPResponse.context
 	PyObject* sink;    // FileWriter to stream into, or NULL to build a bytearray
 	long long block_size; // split the CRC at multiples of this, 0 for none
+	Py_ssize_t expected_part; // the =ybegin part= the article must carry, 0 for any
 } PendingRequest;
 
 typedef struct {
@@ -138,6 +139,7 @@ typedef struct {
 	PyObject* file_name;
 	long long file_size;
 	Py_ssize_t part;
+	Py_ssize_t expected_part;
 	long long part_begin;
 	long long part_end;
 	long long part_size;
@@ -161,6 +163,8 @@ typedef struct {
 	bool sink_failed;
 	// The =ypart offsets were invalid, so the body has nowhere to go and is discarded
 	bool sink_unplaced;
+	// The =ybegin part= differs from the one given to Decoder.expect()
+	bool part_mismatch;
 	// With a block size, the CRC of each piece of a yEnc body between multiples of it,
 	// counted from the start of the file. crc is combined from these as each ends.
 	long long block_size;

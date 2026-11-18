@@ -364,15 +364,21 @@ class NNTPResponse:
     """Bytes produced"""
     file_name: Optional[str]
     file_size: int
+    part: int
+    """The =ybegin part number, 0 when absent"""
+    part_mismatch: bool
+    """The =ybegin part differs from the part given to Decoder.expect(). Nothing is
+    written to a sink, and data and crc are None."""
     part_begin: int
     part_end: int
     part_size: int
     end_size: int
     data: Optional[bytearray]
-    """Decoded data, or None when it was streamed to a sink instead"""
+    """Decoded data, or None when it was streamed to a sink instead or part_mismatch is set"""
     crc: Optional[int]
-    """CRC of decoded data, None if does not match crc_expected, or when the body was
-    streamed to a sink but its =ypart offsets were invalid and nothing was written"""
+    """CRC of decoded data, None if does not match crc_expected, when the body was
+    streamed to a sink but its =ypart offsets were invalid and nothing was written, or
+    when part_mismatch is set"""
     crc_expected: Optional[int]
     """CRC is yEnc headers, None if not found"""
     block_size: int
@@ -416,7 +422,7 @@ class Decoder:
     pending: tuple[object, ...]
     """Contexts of the requests still awaiting a response, oldest first"""
 
-    def expect(self, context: object, sink: Optional[FileWriter] = None, block_size: int = 0) -> None:
+    def expect(self, context: object, sink: Optional[FileWriter] = None, block_size: int = 0, part: int = 0) -> None:
         """Record that a request has been sent, so its response can be paired with it.
 
         `context` is returned untouched as NNTPResponse.context. Calls must be in the
@@ -430,6 +436,10 @@ class Decoder:
 
         When `block_size` is given, the response's `block_crcs` holds the CRC of each
         piece of the body between multiples of it.
+
+        When `part` is given, a yEnc article whose =ybegin part= is present and differs
+        from it sets `part_mismatch`: nothing is written to the sink, and `data` and
+        `crc` are None.
         """
 
     def clear_expected(self) -> None:

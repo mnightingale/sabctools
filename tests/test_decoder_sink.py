@@ -649,3 +649,76 @@ class TestBlockCrcs:
     def test_negative_block_size_is_refused(self):
         with pytest.raises(ValueError):
             sabctools.Decoder(1024).expect("article", block_size=-1)
+
+
+class TestExpectedPart:
+    """A server can return another post's article under the requested Message-ID. Its
+    =ybegin part= then differs from the segment number the request was for."""
+
+    payload = b"p" * 4096
+
+    @pytest.mark.parametrize("sink", [True, False])
+    def test_other_part_is_not_kept(self, tmp_path, sink):
+        target = sabctools.FileWriter(str(tmp_path / "target.bin"))
+        good = sabctools.FileWriter(str(tmp_path / "good.bin"))
+        decoder = sabctools.Decoder(1 << 20)
+        decoder.expect("foreign", target if sink else None, part=11)
+        decoder.expect("good", good if sink else None, part=12)
+        wire = build_article(self.payload, begin=4096 * 345, total=1 << 30, part=346)
+        wire += build_article(self.payload, begin=4096 * 11, total=1 << 30, part=12)
+        responses = feed(decoder, wire)
+        target.close()
+        good.close()
+
+        assert [r.context for r in responses] == ["foreign", "good"]
+        foreign, matching = responses
+        assert foreign.part == 346
+        assert foreign.part_mismatch is True
+        assert foreign.crc is None
+        assert foreign.data is None
+        assert foreign.sink_failed is False
+        assert os.path.getsize(target.path) == 0
+        assert matching.part == 12
+        assert matching.part_mismatch is False
+        assert matching.crc == zlib.crc32(self.payload)
+        if sink:
+            assert os.path.getsize(good.path) == 4096 * 12
+        else:
+            assert matching.data == self.payload
+
+    def test_without_part_nothing_is_checked(self, writer):
+        decoder = sabctools.Decoder(1 << 20)
+        decoder.expect("article", writer)
+        response = feed(decoder, build_article(self.payload, part=7))[0]
+        assert response.part == 7
+        assert response.part_mismatch is False
+        assert response.crc == zlib.crc32(self.payload)
+
+    def test_single_part_article_is_not_checked(self, writer):
+        encoded, crc = sabctools.yenc_encode(self.payload)
+        wire = (
+            b"222 0 <single>\r\n"
+            + f"=ybegin line=128 size={len(self.payload)} name=single.bin\r\n".encode()
+            + encoded
+            + f"\r\n=yend size={len(self.payload)} crc32={crc:08x}\r\n.\r\n".encode()
+        )
+        decoder = sabctools.Decoder(1 << 20)
+        decoder.expect("article", writer, part=1)
+        response = feed(decoder, wire)[0]
+        assert response.part == 0
+        assert response.part_mismatch is False
+        assert response.crc == crc
+
+    def test_mismatch_does_not_carry_to_the_next_response(self, writer):
+        decoder = sabctools.Decoder(1 << 20)
+        decoder.expect("foreign", writer, part=2)
+        decoder.expect("unchecked", writer)
+        wire = build_article(self.payload, part=9) + build_article(self.payload, part=9)
+        foreign, unchecked = feed(decoder, wire)
+        assert foreign.part_mismatch is True
+        assert unchecked.part_mismatch is False
+        assert unchecked.crc == zlib.crc32(self.payload)
+
+    def test_negative_part_is_refused(self):
+        with pytest.raises(ValueError):
+            sabctools.Decoder(1024).expect("article", part=-1)
